@@ -1,0 +1,12 @@
+services:
+  coop:
+    build: .
+    privileged: true
+    ports:
+      - "7300:7300"
+    environment:
+      COOP_API_KEYS: "local:change-me"
+      COOP_SANDBOX: auto
+      RUST_LOG: info,coop=debug
+    volumes:
+      - ./data:/data

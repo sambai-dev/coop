@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coop — agent sandbox</title>
+<style>
+  :root {
+    --bg: #0b0f14; --panel: #121821; --panel2: #0e141c; --border: #1f2733;
+    --text: #dbe4ee; --dim: #7d8b9e; --accent: #7ee787; --red: #ff7b72;
+    --amber: #e3b341; --blue: #79c0ff; --purple: #d2a8ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--panel2); position: sticky; top: 0; z-index: 5; }
+  .logo { font-weight: 700; letter-spacing: .12em; font-size: 15px; }
+  .logo span { color: var(--accent); }
+  .chip { border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font-size: 11px; color: var(--dim); }
+  .chip b { color: var(--text); font-weight: 600; }
+  #key { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 6px 10px; width: 220px; outline: none; }
+  #key:focus { border-color: var(--accent); }
+  main { display: grid; grid-template-columns: minmax(340px, 480px) 1fr; gap: 16px; padding: 16px 22px; max-width: 1500px; margin: 0 auto; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); margin-bottom: 10px; font-weight: 600; }
+  label { display: block; font-size: 11px; color: var(--dim); margin: 8px 0 4px; }
+  select, input.num { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 6px 8px; outline: none; }
+  textarea { width: 100%; height: 170px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 10px; font: 12.5px/1.5 ui-monospace, Consolas, monospace; resize: vertical; outline: none; white-space: pre; }
+  textarea:focus, select:focus { border-color: var(--blue); }
+  .row { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+  button.run { background: var(--accent); border: 0; color: #06230c; font-weight: 700; border-radius: 8px; padding: 8px 18px; cursor: pointer; margin-top: 12px; }
+  button.run:disabled { opacity: .5; cursor: default; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; color: var(--dim); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--border); font-family: ui-monospace, Consolas, monospace; white-space: nowrap; }
+  tr.job { cursor: pointer; }
+  tr.job:hover { background: #16202c; }
+  tr.active { background: #17222f; outline: 1px solid var(--blue); }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .s-queued { background: #2a3340; color: #aab8c8; }
+  .s-running { background: rgba(227,179,65,.15); color: var(--amber); animation: pulse 1.2s infinite alternate; }
+  .s-succeeded { background: rgba(126,231,135,.14); color: var(--accent); }
+  .s-failed { background: rgba(255,123,114,.14); color: var(--red); }
+  .s-timed_out { background: rgba(255,123,114,.2); color: var(--red); }
+  .s-oom_killed { background: rgba(210,168,255,.15); color: var(--purple); }
+  .s-error { background: rgba(255,123,114,.25); color: var(--red); }
+  @keyframes pulse { from { opacity: .55; } to { opacity: 1; } }
+  #log { height: 420px; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font: 12.5px/1.55 ui-monospace, Consolas, monospace; }
+  .line-out { color: var(--text); }
+  .line-err { color: var(--red); }
+  .line-ev { color: var(--blue); }
+  .line-violation { color: var(--amber); font-weight: 600; }
+  .meta { color: var(--dim); font-size: 12px; margin-top: 8px; }
+  .empty { color: var(--dim); padding: 24px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">CO<span>OP</span></div>
+  <span class="chip">sandbox <b id="sandbox">…</b></span>
+  <span class="chip">v<b id="version">…</b></span>
+  <div style="flex:1"></div>
+  <input id="key" type="password" placeholder="API key" autocomplete="off">
+  <span class="chip" id="conn"><b>●</b> idle</span>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h2>New job</h2>
+      <div class="row">
+        <div><label>Language</label>
+          <select id="lang">
+            <option value="python">python</option>
+            <option value="node">node</option>
+            <option value="bash">bash</option>
+          </select>
+        </div>
+        <div><label>Wall s</label><input class="num" id="wall" type="number" value="15" min="1" max="300" style="width:70px"></div>
+        <div><label>Mem MB</label><input class="num" id="mem" type="number" value="256" min="16" max="4096" style="width:80px"></div>
+      </div>
+      <label>Code</label>
+      <textarea id="code" spellcheck="false">import time
+for i in range(3):
+    print(f"tick {i}")
+    time.sleep(0.4)
+print("done")</textarea>
+      <button class="run" id="run">Run job</button>
+      <div class="meta" id="submit-meta"></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h2>Jobs</h2>
+      <table>
+        <thead><tr><th>id</th><th>lang</th><th>status</th><th>exit</th><th>ms</th></tr></thead>
+        <tbody id="jobs"><tr><td colspan="5" class="empty">no jobs yet</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Output <span id="watching" style="color:var(--text);text-transform:none;letter-spacing:0"></span></h2>
+    <div id="log"><div class="empty">select a job to stream its output</div></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let ws = null, selected = null;
+
+const keyInput = $("key");
+keyInput.value = localStorage.getItem("coop_key") || "";
+keyInput.addEventListener("change", () => localStorage.setItem("coop_key", keyInput.value.trim()));
+
+function headers() { return { Authorization: "Bearer " + keyInput.value.trim(), "Content-Type": "application/json" }; }
+
+async function loadMeta() {
+  try {
+    const r = await fetch("/healthz");
+    const j = await r.json();
+    $("sandbox").textContent = j.sandbox || "?";
+    $("version").textContent = j.version || "?";
+  } catch {}
+}
+
+function pill(status) { return `<span class="pill s-${status}">${status}</span>`; }
+
+function fmtMs(row) {
+  if (row.started_at_ms && row.finished_at_ms) return row.finished_at_ms - row.started_at_ms;
+  return row.status === "running" ? "…" : "";
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/v1/jobs?limit=50", { headers: headers() });
+    if (!r.ok) return;
+    const jobs = await r.json();
+    const tb = $("jobs");
+    if (!jobs.length) { tb.innerHTML = `<tr><td colspan="5" class="empty">no jobs yet</td></tr>`; return; }
+    tb.innerHTML = "";
+    for (const j of jobs) {
+      const tr = document.createElement("tr");
+      tr.className = "job" + (j.job_id === selected ? " active" : "");
+      tr.innerHTML = `<td>${j.job_id.slice(0, 8)}</td><td>${j.language}</td><td>${pill(j.status)}</td><td>${j.exit_code ?? ""}</td><td>${fmtMs(j)}</td>`;
+      tr.onclick = () => watch(j.job_id);
+      tb.appendChild(tr);
+    }
+  } catch {}
+}
+
+function line(kind, data) {
+  const div = document.createElement("div");
+  if (kind === "stdout") { div.className = "line-out"; div.textContent = data.line ?? ""; }
+  else if (kind === "stderr") { div.className = "line-err"; div.textContent = data.line ?? ""; }
+  else if (kind === "violation") { div.className = "line-violation"; div.textContent = `! limit violation: ${data.rule}`; }
+  else if (kind === "finished") { div.className = "line-ev"; div.textContent = `— finished: ${data.status} (exit ${data.exit_code ?? "-"}, ${data.duration_ms} ms)`; }
+  else { div.className = "line-ev"; div.textContent = `— ${kind}`; }
+  return div;
+}
+
+function watch(id) {
+  selected = id;
+  $("watching").textContent = "· " + id.slice(0, 8);
+  const log = $("log");
+  log.innerHTML = "";
+  if (ws) ws.close();
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/v1/jobs/${id}/stream?key=${encodeURIComponent(keyInput.value.trim())}`);
+  $("conn").innerHTML = "<b style='color:#79c0ff'>●</b> streaming";
+  ws.onmessage = (m) => {
+    try {
+      const ev = JSON.parse(m.data);
+      log.appendChild(line(ev.kind, ev.data || {}));
+      log.scrollTop = log.scrollHeight;
+      if (ev.kind === "finished") setTimeout(refresh, 150);
+    } catch {}
+  };
+  ws.onclose = () => { $("conn").innerHTML = "<b style='color:#7d8b9e'>●</b> idle"; };
+  ws.onerror = () => {};
+}
+
+$("run").onclick = async () => {
+  const btn = $("run");
+  btn.disabled = true;
+  $("submit-meta").textContent = "";
+  try {
+    const r = await fetch("/v1/jobs", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        language: $("lang").value,
+        code: $("code").value,
+        limits: {
+          wall_seconds: parseInt($("wall").value) || 15,
+          mem_mb: parseInt($("mem").value) || 256,
+        },
+      }),
+    });
+    const j = await r.json();
+    if (r.status === 201) {
+      $("submit-meta").textContent = "queued " + j.job_id.slice(0, 8);
+      watch(j.job_id);
+      refresh();
+    } else {
+      $("submit-meta").textContent = typeof j === "string" ? j : "error " + r.status;
+    }
+  } catch (e) {
+    $("submit-meta").textContent = String(e);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+loadMeta();
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>

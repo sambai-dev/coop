@@ -1,0 +1,12 @@
+[package]
+name = "coop-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SQLite-backed append-only event log and job store for Coop"
+
+[dependencies]
+sqlx = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }

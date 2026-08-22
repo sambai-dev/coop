@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/coop-types",
+    "crates/coop-store",
+    "crates/coop-exec",
+    "crates/coop-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/sambai-dev/coop"
+
+[workspace.dependencies]
+coop-types = { path = "crates/coop-types" }
+coop-store = { path = "crates/coop-store" }
+coop-exec = { path = "crates/coop-exec" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+utoipa = { version = "5", features = ["axum_extras"] }
+uuid = { version = "1", features = ["v7"] }
+futures-util = "0.3"
+dashmap = "6"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

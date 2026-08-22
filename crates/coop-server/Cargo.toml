@@ -1,0 +1,31 @@
+[package]
+name = "coop-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Coop: a self-hostable sandbox that safely executes untrusted code for AI agents"
+default-run = "coop"
+
+[[bin]]
+name = "coop"
+path = "src/main.rs"
+
+[dependencies]
+coop-types = { workspace = true }
+coop-store = { workspace = true }
+coop-exec = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+utoipa = { workspace = true }
+uuid = { workspace = true }
+futures-util = { workspace = true }
+dashmap = { workspace = true }
+
+[dev-dependencies]
