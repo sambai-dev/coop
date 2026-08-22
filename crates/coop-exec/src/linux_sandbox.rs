@@ -254,6 +254,7 @@ fn prepare_cgroup(limits: &Limits, job_key: &str) -> io::Result<PathBuf> {
         .map_err(|e| io::Error::other(format!("cgroup: create {}: {e}", base.display())))?;
 
     enable_controllers_for(cgroup_root);
+    enable_controllers_for(&base);
 
     let dir = base.join(format!("job-{job_key}"));
     let _ = fs::remove_dir_all(&dir);

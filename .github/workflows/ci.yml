@@ -42,8 +42,11 @@ jobs:
           cat /sys/fs/cgroup/cgroup.controllers || true
           echo "--- cgroup.subtree_control ---"
           cat /sys/fs/cgroup/cgroup.subtree_control || true
-          echo "--- writable check ---"
-          touch /sys/fs/cgroup/coop-probe 2>/dev/null && { echo "cgroup fs: writable"; rmdir /sys/fs/cgroup/coop-probe; } || echo "cgroup fs: NOT writable"
+          echo "--- writable check (mkdir + knob write) ---"
+          mkdir -p /sys/fs/cgroup/coop-probe 2>/dev/null \
+            && { echo max > /sys/fs/cgroup/coop-probe/memory.max 2>/dev/null && echo "knob write: OK" || echo "knob write: DENIED"; \
+                 rmdir /sys/fs/cgroup/coop-probe; } \
+            || echo "mkdir in cgroupfs: DENIED"
           mount | grep -i cgroup | head -5 || true
       - uses: Swatinem/rust-cache@v2
       - name: run hostile-job containment suite
