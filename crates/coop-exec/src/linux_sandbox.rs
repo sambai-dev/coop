@@ -253,7 +253,10 @@ fn prepare_cgroup(limits: &Limits, job_key: &str) -> io::Result<PathBuf> {
     let dir = base.join(format!("job-{job_key}"));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir)?;
-    fs::write(dir.join("memory.max"), (limits.mem_mb as u64 * 1024 * 1024).to_string())?;
+    fs::write(
+        dir.join("memory.max"),
+        (limits.mem_mb as u64 * 1024 * 1024).to_string(),
+    )?;
     fs::write(dir.join("memory.swap.max"), "0")?;
     fs::write(
         dir.join("cpu.max"),

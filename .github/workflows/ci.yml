@@ -25,4 +25,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: run hostile-job containment suite (needs root for namespaces + cgroups)
-        run: sudo "$(which cargo)" test -p coop-server --test hostile -- --ignored --nocapture
+        run: >
+          sudo -E env "PATH=$PATH" "RUSTUP_HOME=${RUSTUP_HOME:-/home/runner/.rustup}"
+          "CARGO_HOME=${CARGO_HOME:-/home/runner/.cargo}"
+          cargo test -p coop-server --test hostile -- --ignored --nocapture
