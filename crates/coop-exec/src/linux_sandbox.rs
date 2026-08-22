@@ -53,39 +53,47 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
     let out_w = out_child.into_raw_fd();
     let err_w = err_child.into_raw_fd();
 
+    let plan = ChildPlan {
+        cg_dir: cg_dir_c,
+        prog,
+        argv,
+        envp,
+        cpu_seconds: u64::from(ctx.limits.cpu_seconds.clamp(1, 240)),
+        mem_bytes,
+        max_pids: u64::from(ctx.limits.max_pids),
+        fsize_bytes: u64::from(ctx.limits.max_file_mb) * 1024 * 1024,
+        out_r,
+        out_w,
+        err_r,
+        err_w,
+    };
+
     let fork_result = unsafe { fork() }.map_err(io::Error::other)?;
 
     match fork_result {
-        ForkResult::Child => child_setup(
-            &cg_dir_c,
-            &prog,
-            &argv,
-            &envp,
-            &ctx.limits,
-            mem_bytes,
-            out_r,
-            out_w,
-            err_r,
-            err_w,
-        ),
+        ForkResult::Child => child_setup(&plan),
         ForkResult::Parent { child } => {
-            let _ = close(out_w);
-            let _ = close(err_w);
+            let _ = close(plan.out_w);
+            let _ = close(plan.err_w);
 
-            let out_std = unsafe { UnixStream::from_raw_fd(out_r) };
-            let err_std = unsafe { UnixStream::from_raw_fd(err_r) };
+            let out_std = unsafe { UnixStream::from_raw_fd(plan.out_r) };
+            let err_std = unsafe { UnixStream::from_raw_fd(plan.err_r) };
             out_std.set_nonblocking(true)?;
             err_std.set_nonblocking(true)?;
             let out_tokio = tokio::net::UnixStream::from_std(out_std)?;
             let err_tokio = tokio::net::UnixStream::from_std(err_std)?;
 
-            supervise(
+            let sctx = SuperviseCtx {
                 child,
                 sink,
                 cg_dir,
-                ctx.limits,
+                limits: ctx.limits,
                 oom_before,
                 started,
+            };
+
+            supervise(
+                sctx,
                 BufReader::new(out_tokio).lines(),
                 BufReader::new(err_tokio).lines(),
             )
@@ -94,20 +102,24 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
     }
 }
 
-fn child_setup(
-    cg_dir: &CString,
-    prog: &CString,
-    argv: &[CString],
-    envp: &[CString],
-    limits: &Limits,
+struct ChildPlan {
+    cg_dir: CString,
+    prog: CString,
+    argv: Vec<CString>,
+    envp: Vec<CString>,
+    cpu_seconds: u64,
     mem_bytes: u64,
+    max_pids: u64,
+    fsize_bytes: u64,
     out_r: i32,
     out_w: i32,
     err_r: i32,
     err_w: i32,
-) -> ! {
-    let _ = close(out_r);
-    let _ = close(err_r);
+}
+
+fn child_setup(plan: &ChildPlan) -> ! {
+    let _ = close(plan.out_r);
+    let _ = close(plan.err_r);
 
     let _ = setsid();
 
@@ -148,7 +160,7 @@ fn child_setup(
     {
         std::process::exit(126);
     }
-    let tmp_opts = format!("size={},mode=1777", mem_bytes);
+    let tmp_opts = format!("size={},mode=1777", plan.mem_bytes);
     if mount::<str, str, str, str>(
         None,
         "/tmp",
@@ -169,17 +181,15 @@ fn child_setup(
         None,
     );
 
-    let cpu: u64 = u64::from(limits.cpu_seconds.clamp(1, 240));
+    let cpu = plan.cpu_seconds;
     let _ = setrlimit(Resource::RLIMIT_CPU, cpu + 1, cpu + 2);
-    let _ = setrlimit(Resource::RLIMIT_AS, mem_bytes, mem_bytes);
-    let pids = u64::from(limits.max_pids);
-    let _ = setrlimit(Resource::RLIMIT_NPROC, pids, pids);
+    let _ = setrlimit(Resource::RLIMIT_AS, plan.mem_bytes, plan.mem_bytes);
+    let _ = setrlimit(Resource::RLIMIT_NPROC, plan.max_pids, plan.max_pids);
     let _ = setrlimit(Resource::RLIMIT_NOFILE, 256, 512);
-    let fsize = u64::from(limits.max_file_mb) * 1024 * 1024;
-    let _ = setrlimit(Resource::RLIMIT_FSIZE, fsize, fsize);
+    let _ = setrlimit(Resource::RLIMIT_FSIZE, plan.fsize_bytes, plan.fsize_bytes);
 
     let _ = fs::write(
-        format!("{}/cgroup.procs", cg_dir.to_string_lossy()),
+        format!("{}/cgroup.procs", plan.cg_dir.to_string_lossy()),
         std::process::id().to_string(),
     );
 
@@ -190,17 +200,17 @@ fn child_setup(
 
     let _ = chdir("/tmp");
 
-    let _ = dup2(out_w, 1);
-    let _ = dup2(err_w, 2);
-    let _ = close(out_w);
-    let _ = close(err_w);
+    let _ = dup2(plan.out_w, 1);
+    let _ = dup2(plan.err_w, 2);
+    let _ = close(plan.out_w);
+    let _ = close(plan.err_w);
     if let Ok(null) = fs::File::open("/dev/null") {
         let _ = dup2(null.as_raw_fd(), 0);
     }
 
-    let argv_refs: Vec<&CString> = argv.iter().collect();
-    let envp_refs: Vec<&CString> = envp.iter().collect();
-    let _ = execve(prog, &argv_refs, &envp_refs);
+    let argv_refs: Vec<&CString> = plan.argv.iter().collect();
+    let envp_refs: Vec<&CString> = plan.envp.iter().collect();
+    let _ = execve(&plan.prog, &argv_refs, &envp_refs);
     std::process::exit(127);
 }
 
@@ -247,21 +257,25 @@ impl LineRouter<'_> {
     }
 }
 
-async fn supervise(
+struct SuperviseCtx {
     child: nix::unistd::Pid,
     sink: Arc<dyn Sink>,
     cg_dir: PathBuf,
     limits: Limits,
     oom_before: u64,
     started: Instant,
+}
+
+async fn supervise(
+    ctx: SuperviseCtx,
     mut out_lines: Lines<BufReader<tokio::net::UnixStream>>,
     mut err_lines: Lines<BufReader<tokio::net::UnixStream>>,
 ) -> io::Result<ExecOutcome> {
-    let wall = Duration::from_secs(limits.wall_seconds.max(1) as u64);
-    let deadline = started + wall;
+    let wall = Duration::from_secs(ctx.limits.wall_seconds.max(1) as u64);
+    let deadline = ctx.started + wall;
     let mut killed_on_timeout = false;
     let mut router = LineRouter {
-        sink: &sink,
+        sink: &ctx.sink,
         counts: (0, 0),
         truncated: false,
     };
@@ -284,22 +298,22 @@ async fn supervise(
                 Some(Ok(None)) | Some(Err(_)) | None => err_done = true,
             },
 
-            polled = poll_status(child, reaped.is_some()) => match polled.expect("not pending") {
+            polled = poll_status(ctx.child, reaped.is_some()) => match polled.expect("not pending") {
                 Ok(WaitStatus::StillAlive) => {
                     if !killed_on_timeout && Instant::now() >= deadline {
                         killed_on_timeout = true;
-                        sink.violation(
+                        ctx.sink.violation(
                             "wall_clock_exceeded",
-                            json!({"wall_seconds": limits.wall_seconds}),
+                            json!({"wall_seconds": ctx.limits.wall_seconds}),
                         );
-                        let _ = kill(neg_pid(child), Signal::SIGKILL);
+                        let _ = kill(neg_pid(ctx.child), Signal::SIGKILL);
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
                 Ok(status) => reaped = Some(status),
                 Err(nix::errno::Errno::EINTR) => {}
                 Err(e) => {
-                    cleanup_cgroup(&cg_dir);
+                    cleanup_cgroup(&ctx.cg_dir);
                     return Err(io::Error::other(e));
                 }
             },
@@ -307,11 +321,11 @@ async fn supervise(
     }
 
     let status = reaped.expect("loop exits only after reap");
-    let oom_after = read_oom_kills(&cg_dir);
-    cleanup_cgroup(&cg_dir);
+    let oom_after = read_oom_kills(&ctx.cg_dir);
+    cleanup_cgroup(&ctx.cg_dir);
 
     tracing::debug!(
-        elapsed_ms = started.elapsed().as_millis() as u64,
+        elapsed_ms = ctx.started.elapsed().as_millis() as u64,
         stdout_lines = router.counts.0,
         stderr_lines = router.counts.1,
         "sandboxed job finished"
@@ -319,10 +333,10 @@ async fn supervise(
 
     Ok(classify(
         status,
-        limits,
-        oom_after > oom_before,
+        ctx.limits,
+        oom_after > ctx.oom_before,
         killed_on_timeout,
-        sink.as_ref(),
+        ctx.sink.as_ref(),
     ))
 }
 
