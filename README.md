@@ -175,7 +175,7 @@ coop.stream(jobId, (e) => console.log(e.kind, e.data));
 
 ## The hostile-jobs suite
 
-The portfolio piece isn't the happy path — it's proof that the unhappy path is contained. `hostile-jobs/` plus `crates/coop-server/tests/hostile.rs` assert real containment on Linux:
+The portfolio piece isn't the happy path — it's proof that the unhappy path is contained. `hostile-jobs/` plus `crates/coop-server/tests/hostile.rs` assert real containment on Linux, and CI runs them in a privileged container on every push — **all 7 currently pass**:
 
 | Job | Expectation |
 |---|---|
@@ -197,14 +197,14 @@ CI runs this in a dedicated privileged job on every push.
 
 ## Numbers
 
-Measured with `scripts/bench.py` (end-to-end submit → terminal state), 40 jobs of `print('bench')`:
+Measured with `scripts/bench.py` (end-to-end submit → terminal state), release build:
 
 | setup | concurrency | throughput | p50 | p95 | p99 |
 |---|---|---|---|---|---|
-| dev laptop, Windows, debug build, naive subprocess backend | 1 | 17.9 jobs/s | 57 ms | 78 ms | 78 ms |
-| same | 4 | 39.3 jobs/s | 85 ms | 210 ms | 316 ms |
+| dev laptop, Windows, release build, naive subprocess backend | 1 | 18.1 jobs/s | 49 ms | 78 ms | 81 ms |
+| same | 4 | 41.1 jobs/s | 90 ms | 167 ms | 200 ms |
 
-Honest footnotes: these are a debug build on a laptop where the dominant cost is Python interpreter startup (~40 ms); release builds on Linux will be better, and the namespace backend adds a small constant for mount/unshare work. Cold-start latency is interpreter-dominated, which is exactly why snapshot/warm-pool warm starts are on the roadmap. Re-run on your hardware:
+Honest footnotes: these are a single laptop where the dominant cost is Python interpreter startup (~40 ms); Linux servers will be better, and the namespace backend adds a small constant for mount/unshare work. Cold-start latency is interpreter-dominated, which is exactly why snapshot/warm-pool warm starts are on the roadmap. Every job across both runs reached `succeeded`. Re-run on your hardware:
 
 ```bash
 python scripts/bench.py --url http://your-host:7300 --key YOUR_KEY --jobs 100 --concurrency 8
@@ -223,6 +223,7 @@ We publish the harness instead of cherry-picked screenshots. Replace this table 
 | `COOP_TENANT_CONCURRENCY` | `2` | max parallel jobs per tenant |
 | `COOP_RATE_PER_MIN` | `120` | requests/min per tenant |
 | `COOP_SANDBOX` | `auto` | `auto` \| `ns` \| `off` |
+| `COOP_JOBS_ROOT` | `/var/lib/coop/jobs` (Linux) | scratch dir for job scripts; must live outside any tmpfs the sandbox overlays |
 | `COOP_PYTHON` / `COOP_NODE` / `COOP_BASH` | PATH lookup | interpreter overrides |
 | `RUST_LOG` | `info` | e.g. `debug`, `coop_server=trace` |
 
