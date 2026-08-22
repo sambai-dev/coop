@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Execution backends for Coop: naive subprocess and Linux namespace/cgroup sandbox"
+readme = "../../README.md"
 
 [dependencies]
 coop-types = { workspace = true }

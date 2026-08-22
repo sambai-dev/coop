@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "SQLite-backed append-only event log and job store for Coop"
+readme = "../../README.md"
 
 [dependencies]
 sqlx = { workspace = true }

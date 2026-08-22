@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Coop: a self-hostable sandbox that safely executes untrusted code for AI agents"
+readme = "../../README.md"
 default-run = "coop"
 
 [[bin]]
