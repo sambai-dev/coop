@@ -33,4 +33,8 @@ impl Bus {
             let _ = entry.send(Arc::new(event));
         }
     }
+
+    pub fn remove(&self, job_id: &str) {
+        self.inner.remove(job_id);
+    }
 }

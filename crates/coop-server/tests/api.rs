@@ -14,6 +14,7 @@ const TERMINAL: [&str; 5] = ["succeeded", "failed", "timed_out", "oom_killed", "
 fn test_config(db: &std::path::Path) -> Config {
     let mut api_keys = HashMap::new();
     api_keys.insert("test-key".to_string(), "t1".to_string());
+    api_keys.insert("other-key".to_string(), "t2".to_string());
     Config {
         addr: "127.0.0.1:0".to_string(),
         db_path: db.to_string_lossy().into_owned(),
@@ -136,6 +137,49 @@ async fn rejects_unknown_language() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn cross_tenant_reads_are_rejected() {
+    let app = spawn_app().await;
+    let payload = r#"{"language":"python","code":"print(1)"}"#.to_string();
+    let (status, body) = send(
+        &app,
+        request("POST", "/v1/jobs", Some("test-key"), Some(payload)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let job_id = body["job_id"].as_str().expect("job_id");
+
+    let (owner_status, _) = send(
+        &app,
+        request("GET", &format!("/v1/jobs/{job_id}"), Some("test-key"), None),
+    )
+    .await;
+    assert_eq!(owner_status, StatusCode::OK);
+
+    for path in [
+        format!("/v1/jobs/{job_id}"),
+        format!("/v1/jobs/{job_id}/replay"),
+    ] {
+        let (status, _) = send(&app, request("GET", &path, Some("other-key"), None)).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "cross-tenant read of {path} must look like a missing job"
+        );
+    }
+
+    let (_, other_jobs) = send(
+        &app,
+        request("GET", "/v1/jobs?limit=100", Some("other-key"), None),
+    )
+    .await;
+    let leaked = other_jobs
+        .as_array()
+        .map(|a| a.iter().any(|j| j["job_id"] == *job_id))
+        .unwrap_or(false);
+    assert!(!leaked, "tenant t2 must not see tenant t1 jobs in listings");
 }
 
 #[tokio::test]

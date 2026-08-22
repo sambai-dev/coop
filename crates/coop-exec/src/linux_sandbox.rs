@@ -42,7 +42,7 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
         CString::new("LANG=C.UTF-8")?,
     ];
     let cg_dir_c = CString::new(cg_dir.as_os_str().as_bytes())?;
-    let mem_bytes = ctx.limits.mem_mb.min(2048) as u64 * 1024 * 1024;
+    let mem_bytes = ctx.limits.mem_mb as u64 * 1024 * 1024;
     let oom_before = read_oom_kills(&cg_dir);
 
     let (out_parent, out_child) = UnixStream::pair().map_err(io::Error::other)?;
@@ -188,10 +188,14 @@ fn child_setup(plan: &ChildPlan) -> ! {
     let _ = setrlimit(Resource::RLIMIT_NOFILE, 256, 512);
     let _ = setrlimit(Resource::RLIMIT_FSIZE, plan.fsize_bytes, plan.fsize_bytes);
 
-    let _ = fs::write(
+    if fs::write(
         format!("{}/cgroup.procs", plan.cg_dir.to_string_lossy()),
         std::process::id().to_string(),
-    );
+    )
+    .is_err()
+    {
+        std::process::exit(126);
+    }
 
     if Uid::effective().is_root() {
         let _ = setgid(Gid::from_raw(NOBODY_GID));

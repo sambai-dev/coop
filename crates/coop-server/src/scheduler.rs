@@ -250,6 +250,7 @@ async fn pump_events(state: AppState, job_id: String, mut rx: mpsc::UnboundedRec
             if let Err(e) = state.store.finish(&job_id, &status, exit_code).await {
                 tracing::error!(error = %e, "failed to finalize job row");
             }
+            state.bus.remove(&job_id);
         }
     }
 }

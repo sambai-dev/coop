@@ -171,10 +171,27 @@ pub async fn list_jobs(
     params(("id" = String, Path, description = "Job id")),
     responses((status = 200, body = JobView), (status = 404), (status = 401))
 )]
-pub async fn get_job(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+pub async fn owns_job(state: &AppState, id: &str, tenant: &str) -> bool {
+    matches!(
+        state.store.get_job(id).await,
+        Ok(Some(row)) if row.tenant == tenant
+    )
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/jobs/{id}",
+    params(("id" = String, Path, description = "Job id")),
+    responses((status = 200, body = JobView), (status = 404), (status = 401))
+)]
+pub async fn get_job(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<Tenant>,
+    Path(id): Path<String>,
+) -> Response {
     match state.store.get_job(&id).await {
-        Ok(Some(row)) => Json(JobView::from_row(&row)).into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Some(row)) if row.tenant == tenant.0 => Json(JobView::from_row(&row)).into_response(),
+        Ok(_) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => internal_error("get job", e),
     }
 }
@@ -185,8 +202,12 @@ pub async fn get_job(State(state): State<AppState>, Path(id): Path<String>) -> R
     params(("id" = String, Path, description = "Job id")),
     responses((status = 200, body = [WireEvent]), (status = 404), (status = 401))
 )]
-pub async fn replay(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    if job_missing(&state, &id).await {
+pub async fn replay(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<Tenant>,
+    Path(id): Path<String>,
+) -> Response {
+    if !owns_job(&state, &id, &tenant.0).await {
         return StatusCode::NOT_FOUND.into_response();
     }
     match state.store.events_for(&id).await {
@@ -206,16 +227,13 @@ pub async fn replay(State(state): State<AppState>, Path(id): Path<String>) -> Re
     }
 }
 
-async fn job_missing(state: &AppState, id: &str) -> bool {
-    matches!(state.store.get_job(id).await, Ok(None))
-}
-
 async fn stream(
     State(state): State<AppState>,
+    Extension(tenant): Extension<Tenant>,
     Path(id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if job_missing(&state, &id).await {
+    if !owns_job(&state, &id, &tenant.0).await {
         return StatusCode::NOT_FOUND.into_response();
     }
     ws.on_upgrade(move |socket| stream_socket(state, id, socket))
