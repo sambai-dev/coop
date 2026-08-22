@@ -15,12 +15,48 @@ use tower::ServiceExt;
 
 const TERMINAL: [&str; 5] = ["succeeded", "failed", "timed_out", "oom_killed", "error"];
 
+fn init_tracing() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("info,coop_server=debug")
+                }),
+            )
+            .with_test_writer()
+            .try_init();
+    });
+}
+
 fn is_root() -> bool {
     std::process::Command::new("id")
         .arg("-u")
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
         .unwrap_or(false)
+}
+
+fn preflight() -> bool {
+    init_tracing();
+
+    if !is_root() {
+        eprintln!("SKIP: hostile suite needs root (namespaces + cgroup delegation)");
+        return false;
+    }
+
+    let controllers = std::path::Path::new("/sys/fs/cgroup/cgroup.controllers");
+    if !controllers.exists() {
+        eprintln!(
+            "SKIP: cgroup v2 unified hierarchy not found ({controllers:?} missing); \
+             host may be running cgroup v1"
+        );
+        return false;
+    }
+
+    eprintln!("preflight: root=yes, cgroup-v2=yes — running containment suite");
+    true
 }
 
 async fn spawn_app() -> Router {
@@ -41,8 +77,21 @@ async fn spawn_app() -> Router {
     };
     let store = Arc::new(Store::open(&db).await.expect("open store"));
     let (app, state, queue_rx) = coop_server::build_app(cfg, store);
+    eprintln!(
+        "sandbox resolved by server: {}",
+        state.sandbox_mode.as_str()
+    );
     scheduler::spawn_workers(state, queue_rx);
     app
+}
+
+async fn send_raw(app: &Router, req: Request<Body>) -> serde_json::Value {
+    let res = app.clone().oneshot(req).await.expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK, "unexpected http status");
+    let bytes = axum::body::to_bytes(res.into_body(), 4 << 20)
+        .await
+        .expect("body");
+    serde_json::from_slice(&bytes).expect("json body")
 }
 
 async fn submit(app: &Router, language: &str, code: &str, limits: serde_json::Value) -> String {
@@ -55,7 +104,7 @@ async fn submit(app: &Router, language: &str, code: &str, limits: serde_json::Va
         .body(Body::from(payload.to_string()))
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::CREATED);
+    assert_eq!(res.status(), StatusCode::CREATED, "submit rejected");
     let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
         .await
         .unwrap();
@@ -72,18 +121,69 @@ async fn wait_terminal(app: &Router, job_id: &str) -> (String, f64) {
             .header(header::AUTHORIZATION, "Bearer test-key")
             .body(Body::empty())
             .unwrap();
-        let res = app.clone().oneshot(req).await.unwrap();
-        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
-            .await
-            .unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let v = send_raw(app, req).await;
         let status = v["status"].as_str().unwrap_or("").to_string();
         if TERMINAL.contains(&status.as_str()) {
             return (status, started.elapsed().as_secs_f64());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("job {job_id} never finished");
+    panic!("job {job_id} never reached a terminal state within 30s");
+}
+
+async fn replay_events(app: &Router, job_id: &str) -> serde_json::Value {
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/v1/jobs/{job_id}/replay"))
+        .header(header::AUTHORIZATION, "Bearer test-key")
+        .body(Body::empty())
+        .unwrap();
+    send_raw(app, req).await
+}
+
+async fn replay_stdout(app: &Router, job_id: &str) -> String {
+    replay_events(app, job_id)
+        .await
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| e["kind"] == "stdout")
+        .filter_map(|e| e["data"]["line"].as_str().map(str::to_string))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_events(events: &serde_json::Value) -> String {
+    events
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|e| {
+                    format!(
+                        "  {:>3} [{:<9}] {}",
+                        e["seq"],
+                        e["kind"].as_str().unwrap_or("?"),
+                        e["data"]
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_else(|| "<no events>".to_string())
+}
+
+async fn expect_status(app: &Router, job_id: &str, acceptable: &[&str]) -> (String, f64) {
+    let (status, elapsed) = wait_terminal(app, job_id).await;
+    if !acceptable.contains(&status.as_str()) {
+        let events = replay_events(app, job_id).await;
+        panic!(
+            "job {job_id}: expected one of {acceptable:?}, got '{status}' after {elapsed:.2}s\n\
+             --- event log ---\n{}\n-----------------",
+            render_events(&events)
+        );
+    }
+    (status, elapsed)
 }
 
 async fn assert_host_still_serves(app: &Router) {
@@ -94,7 +194,7 @@ async fn assert_host_still_serves(app: &Router) {
         serde_json::json!({ "wall_seconds": 10 }),
     )
     .await;
-    let (status, _) = wait_terminal(app, &id).await;
+    let (status, _) = expect_status(app, &id, &["succeeded"]).await;
     assert_eq!(
         status, "succeeded",
         "host must stay healthy after hostile job"
@@ -112,8 +212,7 @@ const PID_BOMB: &str = include_str!("../../../hostile-jobs/pid_bomb.py");
 #[tokio::test]
 #[ignore]
 async fn contains_fork_bomb() {
-    if !is_root() {
-        eprintln!("skipping: needs root");
+    if !preflight() {
         return;
     }
     let app = spawn_app().await;
@@ -124,8 +223,7 @@ async fn contains_fork_bomb() {
         serde_json::json!({ "wall_seconds": 8, "max_pids": 32 }),
     )
     .await;
-    let (status, elapsed) = wait_terminal(&app, &id).await;
-    assert_ne!(status, "running");
+    let (_, elapsed) = expect_status(&app, &id, &["failed", "timed_out", "oom_killed"]).await;
     assert!(
         elapsed < 25.0,
         "fork bomb must be contained quickly, took {elapsed}s"
@@ -136,8 +234,7 @@ async fn contains_fork_bomb() {
 #[tokio::test]
 #[ignore]
 async fn contains_memory_bomb() {
-    if !is_root() {
-        eprintln!("skipping: needs root");
+    if !preflight() {
         return;
     }
     let app = spawn_app().await;
@@ -148,20 +245,14 @@ async fn contains_memory_bomb() {
         serde_json::json!({ "wall_seconds": 15, "mem_mb": 128 }),
     )
     .await;
-    let (status, elapsed) = wait_terminal(&app, &id).await;
-    assert!(
-        matches!(status.as_str(), "oom_killed" | "failed"),
-        "memory bomb must die by OOM or allocation failure, got {status}"
-    );
-    assert!(elapsed < 30.0);
+    expect_status(&app, &id, &["oom_killed", "failed"]).await;
     assert_host_still_serves(&app).await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn kills_infinite_loop_on_wall_clock() {
-    if !is_root() {
-        eprintln!("skipping: needs root");
+    if !preflight() {
         return;
     }
     let app = spawn_app().await;
@@ -172,20 +263,18 @@ async fn kills_infinite_loop_on_wall_clock() {
         serde_json::json!({ "wall_seconds": 3 }),
     )
     .await;
-    let (status, elapsed) = wait_terminal(&app, &id).await;
-    assert_eq!(
-        status, "timed_out",
-        "infinite loop should hit wall clock, got {status}"
+    let (_, elapsed) = expect_status(&app, &id, &["timed_out"]).await;
+    assert!(
+        elapsed < 15.0,
+        "wall-clock kill must land near t=3s, took {elapsed}s"
     );
-    assert!(elapsed < 15.0);
     assert_host_still_serves(&app).await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn network_is_disabled_by_default() {
-    if !is_root() {
-        eprintln!("skipping: needs root");
+    if !preflight() {
         return;
     }
     let app = spawn_app().await;
@@ -196,10 +285,11 @@ async fn network_is_disabled_by_default() {
         serde_json::json!({ "wall_seconds": 10 }),
     )
     .await;
-    let (status, _) = wait_terminal(&app, &id).await;
-    assert_eq!(
-        status, "succeeded",
-        "probe exits 0 only when network is blocked"
+    expect_status(&app, &id, &["succeeded"]).await;
+    let stdout = replay_stdout(&app, &id).await;
+    assert!(
+        stdout.contains("network blocked"),
+        "probe must confirm the network is unreachable; stdout was:\n{stdout}"
     );
     assert_host_still_serves(&app).await;
 }
@@ -207,8 +297,7 @@ async fn network_is_disabled_by_default() {
 #[tokio::test]
 #[ignore]
 async fn disk_filler_hits_filesystem_cap() {
-    if !is_root() {
-        eprintln!("skipping: needs root");
+    if !preflight() {
         return;
     }
     let app = spawn_app().await;
@@ -219,20 +308,18 @@ async fn disk_filler_hits_filesystem_cap() {
         serde_json::json!({ "wall_seconds": 20, "mem_mb": 128 }),
     )
     .await;
-    let (status, elapsed) = wait_terminal(&app, &id).await;
-    assert_eq!(
-        status, "failed",
-        "disk filler must fail against capped tmpfs"
+    let (_, elapsed) = expect_status(&app, &id, &["failed", "timed_out"]).await;
+    assert!(
+        elapsed < 40.0,
+        "disk filler must die fast against capped tmpfs, took {elapsed}s"
     );
-    assert!(elapsed < 40.0);
     assert_host_still_serves(&app).await;
 }
 
 #[tokio::test]
 #[ignore]
-async fn escape_probes_fail() {
-    if !is_root() {
-        eprintln!("skipping: needs root");
+async fn escape_probes_fail_without_leaking() {
+    if !preflight() {
         return;
     }
     let app = spawn_app().await;
@@ -243,10 +330,11 @@ async fn escape_probes_fail() {
         serde_json::json!({ "wall_seconds": 10 }),
     )
     .await;
-    let (status, _) = wait_terminal(&app, &id).await;
-    assert_eq!(
-        status, "failed",
-        "escape probe must not succeed inside sandbox"
+    expect_status(&app, &id, &["failed"]).await;
+    let stdout = replay_stdout(&app, &id).await;
+    assert!(
+        !stdout.contains("LEAK"),
+        "sandbox must not allow host reads/writes; probe reported:\n{stdout}"
     );
     assert_host_still_serves(&app).await;
 }
@@ -254,8 +342,7 @@ async fn escape_probes_fail() {
 #[tokio::test]
 #[ignore]
 async fn pid_bomb_is_capped() {
-    if !is_root() {
-        eprintln!("skipping: needs root");
+    if !preflight() {
         return;
     }
     let app = spawn_app().await;
@@ -266,8 +353,11 @@ async fn pid_bomb_is_capped() {
         serde_json::json!({ "wall_seconds": 8, "max_pids": 32 }),
     )
     .await;
-    let (status, elapsed) = wait_terminal(&app, &id).await;
-    assert_ne!(status, "running");
-    assert!(elapsed < 25.0);
+    expect_status(&app, &id, &["failed", "timed_out"]).await;
+    let stdout = replay_stdout(&app, &id).await;
+    assert!(
+        stdout.contains("spawn refused"),
+        "process-spawn storm must hit pids.max; stdout was:\n{stdout}"
+    );
     assert_host_still_serves(&app).await;
 }

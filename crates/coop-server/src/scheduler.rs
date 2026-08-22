@@ -94,6 +94,12 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
 
     let workdir = std::env::temp_dir().join(format!("coop-job-{job_id}"));
     if tokio::fs::create_dir_all(&workdir).await.is_err() {
+        op_tx
+            .send(Op::Violation(
+                "executor_error",
+                json!({ "message": "failed to create workdir" }),
+            ))
+            .ok();
         finish_via(op_tx, "error", None, 0);
         pump.await.ok();
         return;
@@ -146,6 +152,12 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
         }
         Err(e) => {
             tracing::error!(error = %e, "executor failure");
+            op_tx
+                .send(Op::Violation(
+                    "executor_error",
+                    json!({ "message": e.to_string() }),
+                ))
+                .ok();
             finish_via(
                 op_tx,
                 "error",

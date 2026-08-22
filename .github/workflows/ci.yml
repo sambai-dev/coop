@@ -19,13 +19,28 @@ jobs:
 
   hostile:
     runs-on: ubuntu-latest
+    container:
+      image: rust:1-slim
+      options: --privileged
     continue-on-error: true
+    env:
+      CARGO_HOME: /usr/local/cargo
+      RUST_LOG: "info,coop_server=debug"
     steps:
+      - name: install tooling and runtimes used by the suite
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq git python3 nodejs ca-certificates
+          python3 --version && git --version
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: show sandbox environment
+        run: |
+          id
+          echo "--- /proc/self/cgroup ---"
+          cat /proc/self/cgroup || true
+          echo "--- /sys/fs/cgroup ---"
+          ls /sys/fs/cgroup | head -20 || true
+          test -f /sys/fs/cgroup/cgroup.controllers && echo "cgroup v2: yes" || echo "cgroup v2: NO"
       - uses: Swatinem/rust-cache@v2
-      - name: run hostile-job containment suite (needs root for namespaces + cgroups)
-        run: >
-          sudo -E env "PATH=$PATH" "RUSTUP_HOME=${RUSTUP_HOME:-/home/runner/.rustup}"
-          "CARGO_HOME=${CARGO_HOME:-/home/runner/.cargo}"
-          cargo test -p coop-server --test hostile -- --ignored --nocapture
+      - name: run hostile-job containment suite
+        run: cargo test -p coop-server --test hostile -- --ignored --nocapture

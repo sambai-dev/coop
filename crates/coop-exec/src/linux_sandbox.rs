@@ -60,7 +60,6 @@ fn child_setup(
     limits: &Limits,
     mem_bytes: u64,
 ) -> ! {
-    let bail = |_: nix::errno::Errno| std::process::exit(126);
     let _ = setsid();
 
     let ns_flags = CloneFlags::CLONE_NEWNS
