@@ -5,7 +5,7 @@ use nix::sched::{unshare, CloneFlags};
 use nix::sys::resource::{setrlimit, Resource};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::{close, dup2, execve, fork, setgid, setsid, setuid, ForkResult, Gid, Uid};
+use nix::unistd::{chdir, close, dup2, execve, fork, setgid, setsid, setuid, ForkResult, Gid, Uid};
 use serde_json::json;
 use std::ffi::CString;
 use std::fs;
@@ -72,8 +72,8 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
             let _ = close(out_w);
             let _ = close(err_w);
 
-            let mut out_std = UnixStream::from_raw_fd(out_r);
-            let mut err_std = UnixStream::from_raw_fd(err_r);
+            let out_std = unsafe { UnixStream::from_raw_fd(out_r) };
+            let err_std = unsafe { UnixStream::from_raw_fd(err_r) };
             out_std.set_nonblocking(true)?;
             err_std.set_nonblocking(true)?;
             let out_tokio = tokio::net::UnixStream::from_std(out_std)?;
@@ -207,7 +207,7 @@ fn child_setup(
 async fn next_line(
     reader: &mut Lines<BufReader<tokio::net::UnixStream>>,
     done: bool,
-) -> Option<io::Result<String>> {
+) -> Option<io::Result<Option<String>>> {
     if done {
         std::future::pending::<()>().await;
         None
@@ -275,15 +275,13 @@ async fn supervise(
             biased;
 
             line = next_line(&mut out_lines, out_done) => match line {
-                Some(Ok(text)) => router.route(Stream::Stdout, text),
-                Some(Err(_)) => out_done = true,
-                None => out_done = true,
+                Some(Ok(Some(text))) => router.route(Stream::Stdout, text),
+                Some(Ok(None)) | Some(Err(_)) | None => out_done = true,
             },
 
             line = next_line(&mut err_lines, err_done) => match line {
-                Some(Ok(text)) => router.route(Stream::Stderr, text),
-                Some(Err(_)) => err_done = true,
-                None => err_done = true,
+                Some(Ok(Some(text))) => router.route(Stream::Stderr, text),
+                Some(Ok(None)) | Some(Err(_)) | None => err_done = true,
             },
 
             polled = poll_status(child, reaped.is_some()) => match polled.expect("not pending") {
