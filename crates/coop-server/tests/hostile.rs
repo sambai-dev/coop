@@ -69,6 +69,7 @@ async fn spawn_app() -> Router {
         tenant_concurrency: 4,
         rate_per_min: 10_000,
         sandbox: "ns".to_string(),
+        jobs_root: format!("/var/lib/coop/jobs-test-{}", uuid::Uuid::now_v7()),
         python_bin: None,
         node_bin: None,
         bash_bin: None,

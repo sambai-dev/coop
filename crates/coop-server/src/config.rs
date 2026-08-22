@@ -9,6 +9,7 @@ pub struct Config {
     pub tenant_concurrency: usize,
     pub rate_per_min: u32,
     pub sandbox: String,
+    pub jobs_root: String,
     pub python_bin: Option<String>,
     pub node_bin: Option<String>,
     pub bash_bin: Option<String>,
@@ -19,6 +20,17 @@ fn env_or(key: &str, default: &str) -> String {
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+fn default_jobs_root() -> String {
+    if cfg!(target_os = "linux") {
+        "/var/lib/coop/jobs".to_string()
+    } else {
+        std::env::temp_dir()
+            .join("coop-jobs")
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 impl Config {
@@ -51,6 +63,7 @@ impl Config {
                 .max(1),
             rate_per_min: env_or("COOP_RATE_PER_MIN", "120").parse().unwrap_or(120),
             sandbox: env_or("COOP_SANDBOX", "auto"),
+            jobs_root: env_or("COOP_JOBS_ROOT", &default_jobs_root()),
             python_bin: std::env::var("COOP_PYTHON").ok(),
             node_bin: std::env::var("COOP_NODE").ok(),
             bash_bin: std::env::var("COOP_BASH").ok(),

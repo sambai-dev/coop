@@ -92,7 +92,7 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
 
     op_tx.send(Op::Started).ok();
 
-    let workdir = std::env::temp_dir().join(format!("coop-job-{job_id}"));
+    let workdir = std::path::PathBuf::from(&state.cfg.jobs_root).join(format!("job-{job_id}"));
     if tokio::fs::create_dir_all(&workdir).await.is_err() {
         op_tx
             .send(Op::Violation(

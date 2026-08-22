@@ -14,6 +14,7 @@ async fn main() {
         .init();
 
     let cfg = Config::from_env();
+    std::fs::create_dir_all(&cfg.jobs_root).expect("failed to create jobs root");
     let store = Arc::new(
         Store::open(Path::new(&cfg.db_path))
             .await
