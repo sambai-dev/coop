@@ -2,10 +2,18 @@
 
 **A self-hostable sandbox that safely executes untrusted code and tool calls on behalf of AI agents.**
 
+[![ci](https://github.com/sambai-dev/coop/actions/workflows/ci.yml/badge.svg)](https://github.com/sambai-dev/coop/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/sambai-dev/coop)](https://github.com/sambai-dev/coop/releases)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Resource limits, live streaming output, and a replayable audit log. One Rust binary, one SQLite file, no cloud dependency.
 
 ```bash
-cargo install coop-server   # or: docker compose up
+# option 1: prebuilt binary (linux-musl / macOS arm64 / windows x64)
+curl -sL https://github.com/sambai-dev/coop/releases/latest/download/coop-x86_64-unknown-linux-musl.tar.gz | tar xz
+
+# option 2: from source, or docker
+cargo install --path crates/coop-server   # or: docker compose up
 COOP_API_KEYS="local:my-key" coop
 ```
 
@@ -240,12 +248,20 @@ Hardening checklist for production-ish use:
 - keep `COOP_DB` on persistent storage; the audit log is the point
 - firewall egress from the host itself; jobs already have none
 
+## Security and audit
+
+A full security audit shipped with v0.1.0 — see **[AUDIT.md](AUDIT.md)** for the complete report and **[SECURITY.md](SECURITY.md)** for the reporting policy.
+
+- 4 findings found and fixed before release, including two high-severity ones: cross-tenant job reads (IDOR) and a silent cgroup-attach failure that could have run jobs without memory/cpu/pid caps
+- supply chain clean: `cargo-audit` over 185 dependencies — 0 vulnerabilities, 0 unmaintained, 0 unsound, 0 yanked
+- secrets scan over tracked content: clean; regression tests added for every fixed finding
+
 ## CI and releasing
 
 - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` on every push
-- privileged `hostile` CI job proving containment on Linux runners
-- tag `v*` → release binaries for linux-musl, macOS arm64, Windows x64
-- publish to crates.io when ready: `cargo publish -p coop-types && … -p coop-exec && … -p coop-store && … -p coop-server`
+- privileged `hostile` CI job proving containment on Linux runners (currently 7/7 green)
+- tag `v*` → release binaries for linux-musl, macOS arm64, Windows x64 (v0.1.0 is live on the Releases page)
+- crates.io: crates are publish-ready; run `cargo publish -p coop-types`, then `-p coop-exec`, `-p coop-store`, `-p coop-server` once a token is configured
 
 ## Roadmap
 
