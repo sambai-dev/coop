@@ -1,19 +1,22 @@
-use crate::{ext_for, resolve_interpreter, ExecContext, ExecOutcome, Sink};
-use coop_types::{Limits, OutcomeStatus};
+use crate::{ext_for, resolve_interpreter, ExecContext, ExecOutcome, Sink, Stream};
+use coop_types::{Limits, OutcomeStatus, MAX_OUTPUT_LINES};
 use nix::mount::{mount, MsFlags};
 use nix::sched::{unshare, CloneFlags};
 use nix::sys::resource::{setrlimit, Resource};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::{chdir, execve, fork, setgid, setsid, setuid, ForkResult, Gid, Uid};
+use nix::unistd::{close, dup2, execve, fork, setgid, setsid, setuid, ForkResult, Gid, Uid};
 use serde_json::json;
 use std::ffi::CString;
 use std::fs;
 use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 
 const NOBODY_GID: u32 = 65534;
 const NOBODY_UID: u32 = 65534;
@@ -42,12 +45,51 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
     let mem_bytes = ctx.limits.mem_mb.min(2048) as u64 * 1024 * 1024;
     let oom_before = read_oom_kills(&cg_dir);
 
+    let (out_parent, out_child) = UnixStream::pair().map_err(io::Error::other)?;
+    let (err_parent, err_child) = UnixStream::pair().map_err(io::Error::other)?;
+
+    let out_r = out_parent.into_raw_fd();
+    let err_r = err_parent.into_raw_fd();
+    let out_w = out_child.into_raw_fd();
+    let err_w = err_child.into_raw_fd();
+
     let fork_result = unsafe { fork() }.map_err(io::Error::other)?;
 
     match fork_result {
-        ForkResult::Child => child_setup(&cg_dir_c, &prog, &argv, &envp, &ctx.limits, mem_bytes),
+        ForkResult::Child => child_setup(
+            &cg_dir_c,
+            &prog,
+            &argv,
+            &envp,
+            &ctx.limits,
+            mem_bytes,
+            out_r,
+            out_w,
+            err_r,
+            err_w,
+        ),
         ForkResult::Parent { child } => {
-            supervise(child, sink, cg_dir, ctx.limits, oom_before, started).await
+            let _ = close(out_w);
+            let _ = close(err_w);
+
+            let mut out_std = UnixStream::from_raw_fd(out_r);
+            let mut err_std = UnixStream::from_raw_fd(err_r);
+            out_std.set_nonblocking(true)?;
+            err_std.set_nonblocking(true)?;
+            let out_tokio = tokio::net::UnixStream::from_std(out_std)?;
+            let err_tokio = tokio::net::UnixStream::from_std(err_std)?;
+
+            supervise(
+                child,
+                sink,
+                cg_dir,
+                ctx.limits,
+                oom_before,
+                started,
+                BufReader::new(out_tokio).lines(),
+                BufReader::new(err_tokio).lines(),
+            )
+            .await
         }
     }
 }
@@ -59,7 +101,14 @@ fn child_setup(
     envp: &[CString],
     limits: &Limits,
     mem_bytes: u64,
+    out_r: i32,
+    out_w: i32,
+    err_r: i32,
+    err_w: i32,
 ) -> ! {
+    let _ = close(out_r);
+    let _ = close(err_r);
+
     let _ = setsid();
 
     let ns_flags = CloneFlags::CLONE_NEWNS
@@ -141,10 +190,61 @@ fn child_setup(
 
     let _ = chdir("/tmp");
 
+    let _ = dup2(out_w, 1);
+    let _ = dup2(err_w, 2);
+    let _ = close(out_w);
+    let _ = close(err_w);
+    if let Ok(null) = fs::File::open("/dev/null") {
+        let _ = dup2(null.as_raw_fd(), 0);
+    }
+
     let argv_refs: Vec<&CString> = argv.iter().collect();
     let envp_refs: Vec<&CString> = envp.iter().collect();
     let _ = execve(prog, &argv_refs, &envp_refs);
     std::process::exit(127);
+}
+
+async fn next_line(
+    reader: &mut Lines<BufReader<tokio::net::UnixStream>>,
+    done: bool,
+) -> Option<io::Result<String>> {
+    if done {
+        std::future::pending::<()>().await;
+        None
+    } else {
+        Some(reader.next_line().await)
+    }
+}
+
+async fn poll_status(child: nix::unistd::Pid, reaped: bool) -> Option<nix::Result<WaitStatus>> {
+    if reaped {
+        std::future::pending::<()>().await;
+        None
+    } else {
+        Some(waitpid(child, Some(WaitPidFlag::WNOHANG)))
+    }
+}
+
+struct LineRouter<'a> {
+    sink: &'a Arc<dyn Sink>,
+    counts: (usize, usize),
+    truncated: bool,
+}
+
+impl LineRouter<'_> {
+    fn route(&mut self, stream: Stream, line: String) {
+        let count = match stream {
+            Stream::Stdout => &mut self.counts.0,
+            Stream::Stderr => &mut self.counts.1,
+        };
+        if *count < MAX_OUTPUT_LINES {
+            *count += 1;
+            self.sink.output(stream, line);
+        } else if !self.truncated {
+            self.truncated = true;
+            self.sink.truncated(stream);
+        }
+    }
 }
 
 async fn supervise(
@@ -154,37 +254,88 @@ async fn supervise(
     limits: Limits,
     oom_before: u64,
     started: Instant,
+    mut out_lines: Lines<BufReader<tokio::net::UnixStream>>,
+    mut err_lines: Lines<BufReader<tokio::net::UnixStream>>,
 ) -> io::Result<ExecOutcome> {
     let wall = Duration::from_secs(limits.wall_seconds.max(1) as u64);
     let deadline = started + wall;
     let mut killed_on_timeout = false;
-
-    let status = loop {
-        match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => {
-                if !killed_on_timeout && Instant::now() >= deadline {
-                    killed_on_timeout = true;
-                    sink.violation(
-                        "wall_clock_exceeded",
-                        json!({"wall_seconds": limits.wall_seconds}),
-                    );
-                    let _ = kill(neg_pid(child), Signal::SIGKILL);
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Ok(st) => break st,
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(e) => {
-                cleanup_cgroup(&cg_dir);
-                return Err(io::Error::other(e));
-            }
-        }
+    let mut router = LineRouter {
+        sink: &sink,
+        counts: (0, 0),
+        truncated: false,
     };
 
+    let mut reaped: Option<WaitStatus> = None;
+    let mut out_done = false;
+    let mut err_done = false;
+
+    while reaped.is_none() || !out_done || !err_done {
+        tokio::select! {
+            biased;
+
+            line = next_line(&mut out_lines, out_done) => match line {
+                Some(Ok(text)) => router.route(Stream::Stdout, text),
+                Some(Err(_)) => out_done = true,
+                None => out_done = true,
+            },
+
+            line = next_line(&mut err_lines, err_done) => match line {
+                Some(Ok(text)) => router.route(Stream::Stderr, text),
+                Some(Err(_)) => err_done = true,
+                None => err_done = true,
+            },
+
+            polled = poll_status(child, reaped.is_some()) => match polled.expect("not pending") {
+                Ok(WaitStatus::StillAlive) => {
+                    if !killed_on_timeout && Instant::now() >= deadline {
+                        killed_on_timeout = true;
+                        sink.violation(
+                            "wall_clock_exceeded",
+                            json!({"wall_seconds": limits.wall_seconds}),
+                        );
+                        let _ = kill(neg_pid(child), Signal::SIGKILL);
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Ok(status) => reaped = Some(status),
+                Err(nix::errno::Errno::EINTR) => {}
+                Err(e) => {
+                    cleanup_cgroup(&cg_dir);
+                    return Err(io::Error::other(e));
+                }
+            },
+        }
+    }
+
+    let status = reaped.expect("loop exits only after reap");
     let oom_after = read_oom_kills(&cg_dir);
     cleanup_cgroup(&cg_dir);
 
-    let outcome = match status {
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        stdout_lines = router.counts.0,
+        stderr_lines = router.counts.1,
+        "sandboxed job finished"
+    );
+
+    Ok(classify(
+        status,
+        limits,
+        oom_after > oom_before,
+        killed_on_timeout,
+        sink.as_ref(),
+    ))
+}
+
+fn classify(
+    status: WaitStatus,
+    limits: Limits,
+    oom: bool,
+    killed_on_timeout: bool,
+    sink: &dyn Sink,
+) -> ExecOutcome {
+    match status {
         WaitStatus::Exited(_, code) => ExecOutcome {
             status: if code == 0 {
                 OutcomeStatus::Succeeded
@@ -195,8 +346,7 @@ async fn supervise(
             killed_by: None,
         },
         WaitStatus::Signaled(_, sig, _) => {
-            let oom = sig == Signal::SIGKILL && oom_after > oom_before;
-            if oom {
+            if sig == Signal::SIGKILL && oom {
                 sink.violation("memory_cap_exceeded", json!({"mem_mb": limits.mem_mb}));
                 ExecOutcome {
                     status: OutcomeStatus::OomKilled,
@@ -232,14 +382,7 @@ async fn supervise(
             exit_code: None,
             killed_by: Some(format!("{other:?}")),
         },
-    };
-
-    tracing::debug!(
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        status = ?outcome.status,
-        "sandboxed job finished"
-    );
-    Ok(outcome)
+    }
 }
 
 fn neg_pid(pid: nix::unistd::Pid) -> nix::unistd::Pid {

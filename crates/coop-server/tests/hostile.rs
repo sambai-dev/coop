@@ -222,10 +222,26 @@ async fn contains_fork_bomb() {
         serde_json::json!({ "wall_seconds": 8, "max_pids": 32 }),
     )
     .await;
-    let (_, elapsed) = expect_status(&app, &id, &["failed", "timed_out", "oom_killed"]).await;
+    let (_, elapsed) = expect_status(&app, &id, &["succeeded", "failed", "timed_out"]).await;
     assert!(
         elapsed < 25.0,
         "fork bomb must be contained quickly, took {elapsed}s"
+    );
+    let stdout = replay_stdout(&app, &id).await;
+    let spawned: u32 = stdout
+        .split("spawned=")
+        .nth(1)
+        .map(|rest| {
+            rest.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .unwrap_or(u32::MAX)
+        })
+        .unwrap_or(0);
+    assert!(
+        spawned <= 100,
+        "pids.max must cap spawning; job reported spawned={spawned}\nstdout:\n{stdout}"
     );
     assert_host_still_serves(&app).await;
 }

@@ -188,7 +188,10 @@ fn finish_via(
 }
 
 fn short_key(job_id: &str) -> String {
-    job_id.chars().filter(|c| *c != '-').take(12).collect()
+    job_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect()
 }
 
 fn semaphore_for(state: &AppState, tenant: &str) -> Arc<Semaphore> {
