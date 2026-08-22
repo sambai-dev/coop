@@ -29,15 +29,15 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --release -p coop-server --target ${{ matrix.target }}
-      - name: package
-        shell: bash
+      - name: package (unix)
+        if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            zip -r ../../../coop-${{ matrix.target }}.zip coop.exe
-          else
-            tar czf ../../../coop-${{ matrix.target }}.tar.gz coop
-          fi
+          tar czf ../../../coop-${{ matrix.target }}.tar.gz coop
+      - name: package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "target/${{ matrix.target }}/release/coop.exe" -DestinationPath "coop-${{ matrix.target }}.zip"
       - uses: softprops/action-gh-release@v2
         with:
           files: |
