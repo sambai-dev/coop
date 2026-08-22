@@ -247,22 +247,78 @@ fn neg_pid(pid: nix::unistd::Pid) -> nix::unistd::Pid {
 }
 
 fn prepare_cgroup(limits: &Limits, job_key: &str) -> io::Result<PathBuf> {
-    let base = PathBuf::from("/sys/fs/cgroup/coop-jobs");
-    fs::create_dir_all(&base)?;
+    let cgroup_root = Path::new("/sys/fs/cgroup");
+    let base = cgroup_root.join("coop-jobs");
+
+    fs::create_dir_all(&base)
+        .map_err(|e| io::Error::other(format!("cgroup: create {}: {e}", base.display())))?;
+
+    enable_controllers_for(cgroup_root);
+
     let dir = base.join(format!("job-{job_key}"));
     let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir)?;
-    fs::write(
-        dir.join("memory.max"),
-        (limits.mem_mb as u64 * 1024 * 1024).to_string(),
-    )?;
-    fs::write(dir.join("memory.swap.max"), "0")?;
+    fs::create_dir_all(&dir)
+        .map_err(|e| io::Error::other(format!("cgroup: create {}: {e}", dir.display())))?;
+
+    let mem_bytes = limits.mem_mb as u64 * 1024 * 1024;
+    fs::write(dir.join("memory.max"), mem_bytes.to_string())
+        .map_err(|e| io::Error::other(format!("cgroup: write memory.max: {e}")))?;
+    if let Err(e) = fs::write(dir.join("memory.swap.max"), "0") {
+        tracing::debug!(error = %e, "memory.swap.max not available; continuing");
+    }
     fs::write(
         dir.join("cpu.max"),
         format!("{} 1000000", limits.cpu_seconds as u64 * 1_000_000),
-    )?;
-    fs::write(dir.join("pids.max"), limits.max_pids.to_string())?;
+    )
+    .map_err(|e| io::Error::other(format!("cgroup: write cpu.max: {e}")))?;
+    fs::write(dir.join("pids.max"), limits.max_pids.to_string())
+        .map_err(|e| io::Error::other(format!("cgroup: write pids.max: {e}")))?;
+
     Ok(dir)
+}
+
+const NEEDED_CONTROLLERS: [&str; 3] = ["memory", "pids", "cpu"];
+
+fn enable_controllers_for(root: &Path) {
+    let controllers_path = root.join("cgroup.controllers");
+
+    let Ok(available) = fs::read_to_string(&controllers_path) else {
+        tracing::debug!(
+            path = %controllers_path.display(),
+            "cannot read available controllers"
+        );
+        return;
+    };
+
+    let subtree = root.join("cgroup.subtree_control");
+    let enabled = fs::read_to_string(&subtree).unwrap_or_default();
+
+    let mut tokens = String::new();
+    for controller in NEEDED_CONTROLLERS {
+        if available.split_whitespace().any(|c| c == controller)
+            && !enabled.split_whitespace().any(|c| c == controller)
+        {
+            tokens.push_str(&format!("+{controller} "));
+        }
+    }
+
+    if tokens.is_empty() {
+        return;
+    }
+
+    match fs::write(&subtree, tokens.trim()) {
+        Ok(_) => tracing::debug!(
+            path = %subtree.display(),
+            tokens = tokens.trim(),
+            "enabled controllers in subtree_control"
+        ),
+        Err(e) => tracing::warn!(
+            error = %e,
+            path = %subtree.display(),
+            "could not enable controllers (EBUSY means processes sit directly \
+             in this group — move them into a child scope or use systemd delegation)"
+        ),
+    }
 }
 
 fn read_oom_kills(dir: &Path) -> u64 {

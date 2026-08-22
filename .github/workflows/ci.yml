@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: rust:1-slim
-      options: --privileged
+      options: --privileged --cgroupns=host
     continue-on-error: true
     env:
       CARGO_HOME: /usr/local/cargo
@@ -38,9 +38,13 @@ jobs:
           id
           echo "--- /proc/self/cgroup ---"
           cat /proc/self/cgroup || true
-          echo "--- /sys/fs/cgroup ---"
-          ls /sys/fs/cgroup | head -20 || true
-          test -f /sys/fs/cgroup/cgroup.controllers && echo "cgroup v2: yes" || echo "cgroup v2: NO"
+          echo "--- cgroup.controllers ---"
+          cat /sys/fs/cgroup/cgroup.controllers || true
+          echo "--- cgroup.subtree_control ---"
+          cat /sys/fs/cgroup/cgroup.subtree_control || true
+          echo "--- writable check ---"
+          touch /sys/fs/cgroup/coop-probe 2>/dev/null && { echo "cgroup fs: writable"; rmdir /sys/fs/cgroup/coop-probe; } || echo "cgroup fs: NOT writable"
+          mount | grep -i cgroup | head -5 || true
       - uses: Swatinem/rust-cache@v2
       - name: run hostile-job containment suite
         run: cargo test -p coop-server --test hostile -- --ignored --nocapture

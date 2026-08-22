@@ -4,13 +4,11 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
 use coop_server::config::Config;
-use coop_server::{routes, scheduler};
+use coop_server::scheduler;
 use coop_store::Store;
-use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Semaphore};
 use tower::ServiceExt;
 
 const TERMINAL: [&str; 5] = ["succeeded", "failed", "timed_out", "oom_killed", "error"];
