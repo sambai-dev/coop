@@ -19,6 +19,20 @@ COOP_API_KEYS="local:my-key" coop
 
 Every team building agents hits the same wall: *the agent wants to run code — where does it actually run?* Most teams hack together Docker containers with no CPU/memory caps, no observability, and no audit trail. Managed options (E2B, Modal) are great but add cost, latency, and a third party to your trust boundary. Coop is the small, honest, self-hosted answer.
 
+## How Coop compares
+
+| | Coop | E2B / Modal (managed) | Raw Docker scripts | gVisor / Firecracker DIY |
+|---|---|---|---|---|
+| Data leaves your network | **never** | yes | never | never |
+| Setup effort | one binary + SQLite file | account + SDK + egress | hours of glue code | days of infra |
+| CPU/mem/pid limits per job | ✅ enforced, fail-closed | ✅ | usually not | ✅ |
+| Live output streaming | ✅ WS, replayable | ✅ | build it yourself | build it yourself |
+| Replayable audit log of every run | ✅ append-only event store | partial (dashboard only) | ❌ | ❌ |
+| Runs on any $5 VPS | ✅ Linux, root | ❌ (their cloud) | ✅ | needs KVM/nested virt |
+| License | MIT | proprietary | — | Apache-2.0 |
+
+The honest tradeoff: Coop is namespaces+cgroups defense-in-depth, **not** a VM boundary — see the [containment table](#isolation-strategy-stated-honestly). If you need kernel-level isolation today, put Coop inside a Firecracker VM (or wait for the microVM backend on the roadmap).
+
 ---
 
 ## The 60-second tour
@@ -161,6 +175,36 @@ All endpoints require `Authorization: Bearer <key>` (or `?key=` for browser WebS
 Statuses: `queued → running → succeeded | failed | timed_out | oom_killed | error`.
 
 Languages: `python`, `node`, `bash` (interpreter binaries configurable via env).
+
+## Wiring it to an agent
+
+The point of Coop is being the place your agent's code actually runs. The loop is four lines on either side:
+
+```
+┌──────────────┐   "run this python"   ┌─────────────────┐
+│  Your agent  │ ────────────────────▶ │      Coop       │
+│ (any LLM/    │ ◀──────────────────── │ sandbox + audit │
+│  framework)  │    stream / result     └─────────────────┘
+└──────────────┘
+```
+
+Python (`sdks/python/coop.py` — the same stdlib-only file as above):
+
+```python
+from coop import Coop
+coop = Coop("http://sandbox.internal:7300", "tenant-key")
+
+def run_agent_code(code: str) -> str:
+    job = coop.submit("python", code, limits={"wall_seconds": 30, "mem_mb": 256})
+    return coop.result(job["job_id"])          # blocks until terminal state
+
+# wherever your tool-calling loop executes code:
+#   tool_output = run_agent_code(llm_tool_call["code"])
+```
+
+Every run lands in the audit log regardless of what the agent does — including the
+ones that get killed mid-flight. Point your agent at a Coop host instead of
+`exec()`, and "what did the model run?" becomes a SQL query.
 
 ## SDKs (one file each)
 
