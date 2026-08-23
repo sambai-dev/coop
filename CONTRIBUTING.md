@@ -60,4 +60,3 @@ If a commit was genuinely produced by more than one person, attribute each contr
 - Keep tenant boundaries explicit in storage, routing, and logs.
 - Preserve replayability: every execution outcome should be explainable from persisted events.
 - Prefer small, auditable mechanisms over broad abstractions in security-sensitive paths.
-

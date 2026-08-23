@@ -54,4 +54,3 @@ body:
       label: Relevant logs
       description: Redact API keys, job contents, paths, and tenant identifiers before posting.
       render: text
-

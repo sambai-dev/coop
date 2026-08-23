@@ -32,4 +32,3 @@ body:
       description: What tests or evidence would demonstrate that the change works and fails safely?
     validations:
       required: true
-
