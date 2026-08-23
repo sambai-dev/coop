@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose a scoped improvement to Coop
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What agent, operator, or security problem exists today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: Explain the smallest useful change and any alternatives considered.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Safety and compatibility impact
+      description: Note effects on isolation, tenant boundaries, replayability, API compatibility, or deployment.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Validation plan
+      description: What tests or evidence would demonstrate that the change works and fails safely?
+    validations:
+      required: true
+

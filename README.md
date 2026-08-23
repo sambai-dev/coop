@@ -313,6 +313,10 @@ A full security audit shipped with v0.1.0 — see **[AUDIT.md](AUDIT.md)** for t
 - tag `v*` → release binaries for linux-musl, macOS arm64, Windows x64 (v0.1.0 is live on the Releases page)
 - crates.io: crates are publish-ready; run `cargo publish -p coop-types`, then `-p coop-exec`, `-p coop-store`, `-p coop-server` once a token is configured
 
+## Contributing
+
+Issues and focused pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for development checks, hostile-suite requirements, security reporting, and the design principles expected in security-sensitive changes.
+
 ## Roadmap
 
 - [x] Week 1 — naive executor: submit → subprocess → timeout → output, integration tests
