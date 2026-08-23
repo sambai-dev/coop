@@ -21,6 +21,8 @@ use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 const NOBODY_GID: u32 = 65534;
 const NOBODY_UID: u32 = 65534;
 
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
+
 pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcome> {
     let cg_dir = prepare_cgroup(&ctx.limits, &ctx.job_key)?;
     let started = Instant::now();
@@ -287,10 +289,26 @@ async fn supervise(
     let mut reaped: Option<WaitStatus> = None;
     let mut out_done = false;
     let mut err_done = false;
+    let mut drain_deadline: Option<Instant> = None;
 
     while reaped.is_none() || !out_done || !err_done {
+        let drain_guard = async {
+            match drain_deadline {
+                Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         tokio::select! {
             biased;
+
+            _ = drain_guard => {
+                tracing::warn!(
+                    elapsed_ms = ctx.started.elapsed().as_millis() as u64,
+                    "stream drain cut off: wall budget exhausted after reap"
+                );
+                out_done = true;
+                err_done = true;
+            }
 
             line = next_line(&mut out_lines, out_done) => match line {
                 Some(Ok(Some(text))) => router.route(Stream::Stdout, text),
@@ -314,7 +332,11 @@ async fn supervise(
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
-                Ok(status) => reaped = Some(status),
+                Ok(status) => {
+                    reaped = Some(status);
+                    let _ = kill(neg_pid(ctx.child), Signal::SIGKILL);
+                    drain_deadline = Some(deadline.max(Instant::now() + DRAIN_GRACE));
+                }
                 Err(nix::errno::Errno::EINTR) => {}
                 Err(e) => {
                     cleanup_cgroup(&ctx.cg_dir);

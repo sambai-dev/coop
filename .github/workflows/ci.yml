@@ -22,7 +22,6 @@ jobs:
     container:
       image: rust:1-slim
       options: --privileged --cgroupns=host
-    continue-on-error: true
     env:
       CARGO_HOME: /usr/local/cargo
       RUST_LOG: "info,coop_server=debug"
@@ -49,5 +48,13 @@ jobs:
             || echo "mkdir in cgroupfs: DENIED"
           mount | grep -i cgroup | head -5 || true
       - uses: Swatinem/rust-cache@v2
+      - name: guard hostile test discovery >= 7
+        run: |
+          n=$(cargo test -p coop-server --test hostile -- --list --ignored | grep -c ': test$')
+          echo "discovered ${n} hostile tests"
+          if [ "${n}" -lt 7 ]; then
+            echo "FAIL: expected >= 7 hostile tests, found ${n}"
+            exit 1
+          fi
       - name: run hostile-job containment suite
         run: cargo test -p coop-server --test hostile -- --ignored --nocapture

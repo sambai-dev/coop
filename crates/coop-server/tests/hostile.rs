@@ -201,6 +201,7 @@ async fn assert_host_still_serves(app: &Router) {
 }
 
 const FORK_BOMB: &str = include_str!("../../../hostile-jobs/fork_bomb.sh");
+const BACKGROUND_HOLDER: &str = include_str!("../../../hostile-jobs/background_holder.sh");
 const MEMORY_BOMB: &str = include_str!("../../../hostile-jobs/memory_bomb.py");
 const INFINITE_LOOP: &str = include_str!("../../../hostile-jobs/infinite_loop.py");
 const NETWORK_PROBE: &str = include_str!("../../../hostile-jobs/network_probe.py");
@@ -242,6 +243,35 @@ async fn contains_fork_bomb() {
     assert!(
         spawned <= 100,
         "pids.max must cap spawning; job reported spawned={spawned}\nstdout:\n{stdout}"
+    );
+    assert_host_still_serves(&app).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn background_holder_does_not_hang_worker() {
+    if !preflight() {
+        return;
+    }
+    let app = spawn_app().await;
+    let id = submit(
+        &app,
+        "bash",
+        BACKGROUND_HOLDER,
+        serde_json::json!({ "wall_seconds": 5 }),
+    )
+    .await;
+    let (status, elapsed) = expect_status(&app, &id, &["succeeded"]).await;
+    assert_eq!(status, "succeeded");
+    let stdout = replay_stdout(&app, &id).await;
+    assert!(
+        stdout.contains("done"),
+        "'echo done' output must survive the post-reap group kill; stdout was:\n{stdout}"
+    );
+    assert!(
+        elapsed < 15.0,
+        "background `sleep infinity` holding the pipes must not pin the worker \
+         past wall(5s)+grace; job took {elapsed:.2}s"
     );
     assert_host_still_serves(&app).await;
 }

@@ -15,6 +15,14 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
     let interp = resolve_interpreter(&ctx.language, ctx.interpreter_override.as_deref());
     let mut cmd = Command::new(interp);
     cmd.current_dir(&ctx.workdir).arg(&src);
+    cmd.env_clear();
+    cmd.env(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
+    cmd.env("HOME", "/tmp/home");
+    cmd.env("TMPDIR", "/tmp");
+    cmd.env("LANG", "C.UTF-8");
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd.stdin(if ctx.stdin.is_some() {
         Stdio::piped()
