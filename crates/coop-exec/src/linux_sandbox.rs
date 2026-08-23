@@ -1,5 +1,6 @@
 use crate::{ext_for, resolve_interpreter, ExecContext, ExecOutcome, Sink, Stream};
 use coop_types::{Limits, OutcomeStatus, MAX_OUTPUT_LINES};
+use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 use nix::mount::{mount, MsFlags};
 use nix::sched::{unshare, CloneFlags};
 use nix::sys::resource::{setrlimit, Resource};
@@ -20,6 +21,16 @@ use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 
 const NOBODY_GID: u32 = 65534;
 const NOBODY_UID: u32 = 65534;
+
+// F5: bootstrap stages reported to the parent over the setup socket when the
+// child cannot finish preparing its sandbox. These strings are safe for
+// tenant-visible violation events; errno detail stays in tracing.
+const STAGE_NAMESPACES: &str = "entering kernel namespaces";
+const STAGE_ID_MAP: &str = "mapping sandbox user ids";
+const STAGE_ROOT_MOUNTS: &str = "preparing read-only root mounts";
+const STAGE_TMP_MOUNT: &str = "mounting private tmp";
+const STAGE_CGROUP_ATTACH: &str = "attaching job cgroup";
+const STAGE_EXEC: &str = "starting interpreter";
 
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
@@ -60,6 +71,19 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
     let out_w = out_child.into_raw_fd();
     let err_w = err_child.into_raw_fd();
 
+    // F5: a dedicated channel so a child that cannot finish bootstrapping its
+    // sandbox reports *why* instead of collapsing into a bare exit(126). The
+    // write end is close-on-exec, so the parent reads EOF exactly when execve
+    // succeeds; any line that arrives means setup failed before exec.
+    let (setup_parent, setup_child) = UnixStream::pair().map_err(io::Error::other)?;
+    fcntl(
+        setup_child.as_raw_fd(),
+        FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC),
+    )
+    .map_err(io::Error::other)?;
+    let setup_r = setup_parent.into_raw_fd();
+    let setup_w = setup_child.into_raw_fd();
+
     let plan = ChildPlan {
         cg_dir: cg_dir_c,
         prog,
@@ -73,6 +97,13 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
         out_w,
         err_r,
         err_w,
+        setup_r,
+        setup_w,
+        // F5: without an owning user namespace, unshare(CLONE_NEWNS|…) is
+        // EPERM for unprivileged users and every job silently died at 126.
+        unpriv_userns: !Uid::effective().is_root(),
+        euid: Uid::effective().as_raw(),
+        egid: Gid::effective().as_raw(),
     };
 
     let fork_result = unsafe { fork() }.map_err(io::Error::other)?;
@@ -82,13 +113,17 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
         ForkResult::Parent { child } => {
             let _ = close(plan.out_w);
             let _ = close(plan.err_w);
+            let _ = close(plan.setup_w);
 
             let out_std = unsafe { UnixStream::from_raw_fd(plan.out_r) };
             let err_std = unsafe { UnixStream::from_raw_fd(plan.err_r) };
             out_std.set_nonblocking(true)?;
             err_std.set_nonblocking(true)?;
+            let setup_std = unsafe { UnixStream::from_raw_fd(plan.setup_r) };
+            setup_std.set_nonblocking(true)?;
             let out_tokio = tokio::net::UnixStream::from_std(out_std)?;
             let err_tokio = tokio::net::UnixStream::from_std(err_std)?;
+            let setup_tokio = tokio::net::UnixStream::from_std(setup_std)?;
 
             let sctx = SuperviseCtx {
                 child,
@@ -97,6 +132,7 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
                 limits: ctx.limits,
                 oom_before,
                 started,
+                setup_lines: BufReader::new(setup_tokio).lines(),
             };
 
             supervise(
@@ -122,37 +158,76 @@ struct ChildPlan {
     out_w: i32,
     err_r: i32,
     err_w: i32,
+    setup_r: i32,
+    setup_w: i32,
+    unpriv_userns: bool,
+    euid: u32,
+    egid: u32,
+}
+
+/// Report a sandbox-bootstrap failure to the parent (stage + errno detail)
+/// and exit 126. The parent turns this into a violation event naming the
+/// failing stage; the raw reason goes to server logs only.
+fn report_setup_failure(setup_w: i32, stage: &str, reason: &str) -> ! {
+    use std::io::Write;
+    let mut f = unsafe { fs::File::from_raw_fd(setup_w) };
+    let _ = writeln!(f, "{stage}\t{reason}");
+    let _ = f.flush();
+    std::process::exit(126);
+}
+
+/// F5: a fresh user namespace grants its creator full capabilities *inside
+/// it*, which is what makes the mount/pid/net/ipc/uts namespaces reachable
+/// without root. Only the invoking user's own effective id can be mapped
+/// without CAP_SETUID in the parent namespace, and setgroups must be denied
+/// before gid_map (user_namespaces(7)).
+fn write_own_id_maps(uid: u32, gid: u32) -> io::Result<()> {
+    fs::write("/proc/self/setgroups", b"deny\n")?;
+    fs::write("/proc/self/uid_map", format!("0 {uid} 1\n"))?;
+    fs::write("/proc/self/gid_map", format!("0 {gid} 1\n"))?;
+    Ok(())
 }
 
 fn child_setup(plan: &ChildPlan) -> ! {
     let _ = close(plan.out_r);
     let _ = close(plan.err_r);
+    let _ = close(plan.setup_r);
 
     let _ = setsid();
 
-    let ns_flags = CloneFlags::CLONE_NEWNS
+    // F5: join CLONE_NEWUSER for unprivileged hosts; the kernel creates the
+    // user namespace first, so the capability checks for the rest of the set
+    // pass against it.
+    let mut ns_flags = CloneFlags::CLONE_NEWNS
         | CloneFlags::CLONE_NEWPID
         | CloneFlags::CLONE_NEWNET
         | CloneFlags::CLONE_NEWIPC
         | CloneFlags::CLONE_NEWUTS;
-    if unshare(ns_flags).is_err() {
-        std::process::exit(126);
+    if plan.unpriv_userns {
+        ns_flags |= CloneFlags::CLONE_NEWUSER;
+    }
+    if let Err(e) = unshare(ns_flags) {
+        report_setup_failure(plan.setup_w, STAGE_NAMESPACES, &e.to_string());
+    }
+
+    if plan.unpriv_userns {
+        if let Err(e) = write_own_id_maps(plan.euid, plan.egid) {
+            report_setup_failure(plan.setup_w, STAGE_ID_MAP, &e.to_string());
+        }
     }
 
     let _ =
         mount::<str, str, str, str>(None, "/", None, MsFlags::MS_REC | MsFlags::MS_PRIVATE, None);
-    if mount::<str, str, str, str>(
+    if let Err(e) = mount::<str, str, str, str>(
         Some("/"),
         "/",
         None,
         MsFlags::MS_BIND | MsFlags::MS_REC,
         None,
-    )
-    .is_err()
-    {
-        std::process::exit(126);
+    ) {
+        report_setup_failure(plan.setup_w, STAGE_ROOT_MOUNTS, &e.to_string());
     }
-    if mount::<str, str, str, str>(
+    if let Err(e) = mount::<str, str, str, str>(
         Some("/"),
         "/",
         None,
@@ -162,22 +237,18 @@ fn child_setup(plan: &ChildPlan) -> ! {
             | MsFlags::MS_NOSUID
             | MsFlags::MS_NODEV,
         None,
-    )
-    .is_err()
-    {
-        std::process::exit(126);
+    ) {
+        report_setup_failure(plan.setup_w, STAGE_ROOT_MOUNTS, &e.to_string());
     }
     let tmp_opts = format!("size={},mode=1777", plan.mem_bytes);
-    if mount::<str, str, str, str>(
+    if let Err(e) = mount::<str, str, str, str>(
         None,
         "/tmp",
         Some("tmpfs"),
         MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
         Some(tmp_opts.as_str()),
-    )
-    .is_err()
-    {
-        std::process::exit(126);
+    ) {
+        report_setup_failure(plan.setup_w, STAGE_TMP_MOUNT, &e.to_string());
     }
     let _ = fs::create_dir_all("/tmp/home");
     let _ = mount::<str, str, str, str>(
@@ -195,16 +266,17 @@ fn child_setup(plan: &ChildPlan) -> ! {
     let _ = setrlimit(Resource::RLIMIT_NOFILE, 256, 512);
     let _ = setrlimit(Resource::RLIMIT_FSIZE, plan.fsize_bytes, plan.fsize_bytes);
 
-    if fs::write(
+    if let Err(e) = fs::write(
         format!("{}/cgroup.procs", plan.cg_dir.to_string_lossy()),
         std::process::id().to_string(),
-    )
-    .is_err()
-    {
-        std::process::exit(126);
+    ) {
+        report_setup_failure(plan.setup_w, STAGE_CGROUP_ATTACH, &e.to_string());
     }
 
-    if Uid::effective().is_root() {
+    // Inside a user namespace we are uid 0 mapped back to the invoking host
+    // user; nobody (65534) cannot be mapped without CAP_SETUID in the parent
+    // namespace, so those credentials are kept instead.
+    if !plan.unpriv_userns && Uid::effective().is_root() {
         let _ = setgid(Gid::from_raw(NOBODY_GID));
         let _ = setuid(Uid::from_raw(NOBODY_UID));
     }
@@ -221,8 +293,10 @@ fn child_setup(plan: &ChildPlan) -> ! {
 
     let argv_refs: Vec<&CString> = plan.argv.iter().collect();
     let envp_refs: Vec<&CString> = plan.envp.iter().collect();
-    let _ = execve(&plan.prog, &argv_refs, &envp_refs);
-    std::process::exit(127);
+    // nix 0.29 returns Result<Infallible, Errno>: execve only ever comes back
+    // on failure, so bind the errno and report it (this diverges).
+    let Err(e) = execve(&plan.prog, &argv_refs, &envp_refs);
+    report_setup_failure(plan.setup_w, STAGE_EXEC, &e.to_string());
 }
 
 async fn next_line(
@@ -275,10 +349,41 @@ struct SuperviseCtx {
     limits: Limits,
     oom_before: u64,
     started: Instant,
+    setup_lines: Lines<BufReader<tokio::net::UnixStream>>,
+}
+
+/// F5: what the child reported over the setup socket. `stage` is a canonical,
+/// tenant-safe description of the failing bootstrap step; `reason` is the raw
+/// errno text and stays in server logs.
+#[derive(Debug)]
+struct BootstrapFailure {
+    stage: &'static str,
+    reason: String,
+}
+
+impl BootstrapFailure {
+    /// Wire format: "<stage>\t<errno text>". Stages are canonicalized so only
+    /// known, sanitized descriptions can reach tenant events.
+    fn parse(line: &str) -> Option<Self> {
+        let (stage, reason) = line.split_once('\t')?;
+        let stage = match stage {
+            STAGE_NAMESPACES => STAGE_NAMESPACES,
+            STAGE_ID_MAP => STAGE_ID_MAP,
+            STAGE_ROOT_MOUNTS => STAGE_ROOT_MOUNTS,
+            STAGE_TMP_MOUNT => STAGE_TMP_MOUNT,
+            STAGE_CGROUP_ATTACH => STAGE_CGROUP_ATTACH,
+            STAGE_EXEC => STAGE_EXEC,
+            _ => "initializing sandbox",
+        };
+        Some(Self {
+            stage,
+            reason: reason.trim_end().to_string(),
+        })
+    }
 }
 
 async fn supervise(
-    ctx: SuperviseCtx,
+    mut ctx: SuperviseCtx,
     mut out_lines: Lines<BufReader<tokio::net::UnixStream>>,
     mut err_lines: Lines<BufReader<tokio::net::UnixStream>>,
 ) -> io::Result<ExecOutcome> {
@@ -294,9 +399,11 @@ async fn supervise(
     let mut reaped: Option<WaitStatus> = None;
     let mut out_done = false;
     let mut err_done = false;
+    let mut setup_done = false;
+    let mut bootstrap_failure: Option<BootstrapFailure> = None;
     let mut drain_deadline: Option<Instant> = None;
 
-    while reaped.is_none() || !out_done || !err_done {
+    while reaped.is_none() || !out_done || !err_done || !setup_done {
         let drain_guard = async {
             match drain_deadline {
                 Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
@@ -323,6 +430,15 @@ async fn supervise(
             line = next_line(&mut err_lines, err_done) => match line {
                 Some(Ok(Some(text))) => router.route(Stream::Stderr, text),
                 Some(Ok(None)) | Some(Err(_)) | None => err_done = true,
+            },
+
+            note = next_line(&mut ctx.setup_lines, setup_done) => match note {
+                Some(Ok(Some(text))) => {
+                    // The child holds this socket open only until it execs or
+                    // dies; a line here always means bootstrap failed.
+                    bootstrap_failure = BootstrapFailure::parse(&text).or(bootstrap_failure);
+                }
+                Some(Ok(None)) | Some(Err(_)) | None => setup_done = true,
             },
 
             polled = poll_status(ctx.child, reaped.is_some()) => match polled.expect("not pending") {
@@ -354,6 +470,24 @@ async fn supervise(
     let status = reaped.expect("loop exits only after reap");
     let oom_after = read_oom_kills(&ctx.cg_dir);
     cleanup_cgroup(&ctx.cg_dir);
+
+    // F5: a 126 used to be a silent collapse. If the child reported a stage,
+    // emit a violation naming it and fail the job with an error instead.
+    if let (WaitStatus::Exited(_, 126), Some(failure)) = (status, bootstrap_failure) {
+        tracing::error!(
+            stage = failure.stage,
+            reason = %failure.reason,
+            "sandbox bootstrap failed"
+        );
+        ctx.sink.violation(
+            "sandbox_bootstrap_failed",
+            json!({ "stage": failure.stage }),
+        );
+        return Err(io::Error::other(format!(
+            "sandbox bootstrap failed during '{}' ({})",
+            failure.stage, failure.reason
+        )));
+    }
 
     tracing::debug!(
         elapsed_ms = ctx.started.elapsed().as_millis() as u64,

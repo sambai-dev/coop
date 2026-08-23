@@ -37,7 +37,7 @@ async fn spawn_app() -> Router {
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, state, queue_rx) = coop_server::build_app(cfg, store);
+    let (app, state, queue_rx) = coop_server::build_app(cfg, store).expect("build app");
     scheduler::spawn_workers(state, queue_rx);
     app
 }

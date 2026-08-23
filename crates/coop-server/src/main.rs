@@ -25,7 +25,13 @@ async fn main() {
             .expect("failed to open sqlite event store"),
     );
 
-    let (app, state, queue_rx) = build_app(cfg, store);
+    // F8: an unsatisfiable sandbox configuration is a startup error, not a
+    // silent downgrade to unprotected execution.
+    let (app, state, queue_rx) = build_app(cfg, store).unwrap_or_else(|e| {
+        tracing::error!("{e}");
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    });
     scheduler::spawn_workers(state.clone(), queue_rx);
 
     let addr = state.cfg.addr.clone();

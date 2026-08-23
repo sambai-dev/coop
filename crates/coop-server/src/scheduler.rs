@@ -93,12 +93,10 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
     op_tx.send(Op::Started).ok();
 
     let workdir = std::path::PathBuf::from(&state.cfg.jobs_root).join(format!("job-{job_id}"));
-    if tokio::fs::create_dir_all(&workdir).await.is_err() {
+    if let Err(e) = tokio::fs::create_dir_all(&workdir).await {
+        tracing::error!(error = %e, "failed to create workdir");
         op_tx
-            .send(Op::Violation(
-                "executor_error",
-                json!({ "message": "failed to create workdir" }),
-            ))
+            .send(Op::Violation("executor_error", executor_error_detail(&e)))
             .ok();
         finish_via(op_tx, "error", None, 0);
         pump.await.ok();
@@ -153,10 +151,7 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
         Err(e) => {
             tracing::error!(error = %e, "executor failure");
             op_tx
-                .send(Op::Violation(
-                    "executor_error",
-                    json!({ "message": e.to_string() }),
-                ))
+                .send(Op::Violation("executor_error", executor_error_detail(&e)))
                 .ok();
             finish_via(
                 op_tx,
@@ -170,6 +165,19 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
     drop(permit);
     let _ = tokio::fs::remove_dir_all(&workdir).await;
     pump.await.ok();
+}
+
+/// N6: tenant-visible executor errors are reduced to a coarse, generic code.
+/// Raw io::Error text can name interpreter paths and cgroup/jobs_root
+/// topology, so it stays in server-side tracing only (see the callers).
+fn executor_error_detail(e: &std::io::Error) -> Value {
+    let code = match e.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied => {
+            "executor_unavailable"
+        }
+        _ => "executor_failure",
+    };
+    json!({ "code": code })
 }
 
 fn finish_via(

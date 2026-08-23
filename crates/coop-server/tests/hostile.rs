@@ -75,7 +75,7 @@ async fn spawn_app() -> Router {
         bash_bin: None,
     };
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, state, queue_rx) = coop_server::build_app(cfg, store);
+    let (app, state, queue_rx) = coop_server::build_app(cfg, store).expect("build app");
     eprintln!(
         "sandbox resolved by server: {}",
         state.sandbox_mode.as_str()
