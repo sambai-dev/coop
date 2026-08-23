@@ -57,10 +57,11 @@ fn preflight() -> bool {
     true
 }
 
-async fn spawn_app() -> Router {
+async fn spawn_app_with_root() -> (Router, String) {
     let db = std::env::temp_dir().join(format!("coop-hostile-{}.db", uuid::Uuid::now_v7()));
     let mut api_keys = HashMap::new();
     api_keys.insert("test-key".to_string(), "t1".to_string());
+    let jobs_root = format!("/var/lib/coop/jobs-test-{}", uuid::Uuid::now_v7());
     let cfg = Config {
         addr: "127.0.0.1:0".to_string(),
         db_path: db.to_string_lossy().into_owned(),
@@ -69,7 +70,7 @@ async fn spawn_app() -> Router {
         tenant_concurrency: 4,
         rate_per_min: 10_000,
         sandbox: "ns".to_string(),
-        jobs_root: format!("/var/lib/coop/jobs-test-{}", uuid::Uuid::now_v7()),
+        jobs_root,
         python_bin: None,
         node_bin: None,
         bash_bin: None,
@@ -81,7 +82,12 @@ async fn spawn_app() -> Router {
         state.sandbox_mode.as_str()
     );
     scheduler::spawn_workers(state, queue_rx);
-    app
+    let cfg_jobs_root = state.cfg.jobs_root.clone();
+    (app, cfg_jobs_root)
+}
+
+async fn spawn_app() -> Router {
+    spawn_app_with_root().await.0
 }
 
 async fn send_raw(app: &Router, req: Request<Body>) -> serde_json::Value {
@@ -403,6 +409,69 @@ async fn pid_bomb_is_capped() {
     assert!(
         stdout.contains("spawn refused"),
         "process-spawn storm must hit pids.max; stdout was:\n{stdout}"
+    );
+    assert_host_still_serves(&app).await;
+}
+
+/// N-1: two jobs run concurrently on the shared jobs root; job B knows job
+/// A's workdir path exactly (the test composes it) and must get nothing —
+/// no directory listing, no file contents. The jobs root and each workdir
+/// are 0700 for the server account while sandboxed jobs run unprivileged,
+/// so both the relative sweep and the absolute read come up empty.
+#[tokio::test]
+#[ignore]
+async fn sibling_workdir_not_readable() {
+    if !preflight() {
+        return;
+    }
+    let (app, jobs_root) = spawn_app_with_root().await;
+
+    let marker = format!("coop-src-marker-{}", uuid::Uuid::now_v7());
+    let victim_code =
+        format!("MARKER = {marker:?}\nprint('alive', flush=True)\nimport time\ntime.sleep(8)\n");
+    let victim = submit(
+        &app,
+        "python",
+        &victim_code,
+        serde_json::json!({ "wall_seconds": 15 }),
+    )
+    .await;
+
+    // Job B starts while A is still running (workers=2), so A's workdir and
+    // its 0600 source file exist for the whole probe window.
+    let target = format!("{jobs_root}/job-{victim}/job.py");
+    let probe_code = format!(
+        r#"import glob
+hits = sorted(glob.glob('../job-*'))
+hits += sorted(glob.glob({jobs_root:?} + '/job-*'))
+try:
+    with open({target:?}) as fh:
+        hits.append(fh.read())
+except OSError:
+    pass
+print('PROBE-HITS', len(hits))
+"#,
+    );
+    let prober = submit(
+        &app,
+        "python",
+        &probe_code,
+        serde_json::json!({ "wall_seconds": 10 }),
+    )
+    .await;
+
+    let (victim_status, _) = expect_status(&app, &victim, &["succeeded"]).await;
+    assert_eq!(victim_status, "succeeded", "victim must run normally");
+    let (prober_status, _) = expect_status(&app, &prober, &["succeeded"]).await;
+    assert_eq!(prober_status, "succeeded");
+    let stdout = replay_stdout(&app, &prober).await;
+    assert!(
+        stdout.contains("PROBE-HITS 0"),
+        "sibling workdir enumeration/read must return nothing; stdout was:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(&marker),
+        "victim source must never reach another job; stdout was:\n{stdout}"
     );
     assert_host_still_serves(&app).await;
 }

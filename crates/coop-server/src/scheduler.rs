@@ -93,7 +93,12 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
     op_tx.send(Op::Started).ok();
 
     let workdir = std::path::PathBuf::from(&state.cfg.jobs_root).join(format!("job-{job_id}"));
-    if let Err(e) = tokio::fs::create_dir_all(&workdir).await {
+    // N-1: workdirs hold tenant source and artifacts; mode 0700 (no-op off
+    // unix) keeps sibling jobs from traversing each other's directories.
+    if let Err(e) = tokio::fs::create_dir_all(&workdir)
+        .await
+        .and_then(|()| coop_exec::owner_only_dir(&workdir))
+    {
         tracing::error!(error = %e, "failed to create workdir");
         op_tx
             .send(Op::Violation("executor_error", executor_error_detail(&e)))

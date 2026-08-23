@@ -11,10 +11,16 @@ use tokio::time::Duration;
 pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcome> {
     let src = ctx.workdir.join(format!("job.{}", ext_for(&ctx.language)));
     tokio::fs::write(&src, &ctx.code).await?;
+    crate::owner_only_file(&src)?;
 
     let interp = resolve_interpreter(&ctx.language, ctx.interpreter_override.as_deref());
     let mut cmd = Command::new(interp);
     cmd.current_dir(&ctx.workdir).arg(&src);
+    // N-2: make the child a process-group leader so a group-wide SIGKILL can
+    // reap background descendants that would otherwise outlive the job while
+    // holding our output pipes open.
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.env_clear();
     cmd.env(
         "PATH",
@@ -32,6 +38,9 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
     cmd.kill_on_drop(true);
 
     let mut child = cmd.spawn()?;
+    // Freshly spawned, so the pid is always present; the child is its own
+    // process-group leader on unix (pgid == pid).
+    let child_pid = child.id().expect("freshly spawned child has a pid");
 
     if let Some(input) = ctx.stdin.clone() {
         if let Some(mut si) = child.stdin.take() {
@@ -46,17 +55,43 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
     spawn_reader(stdout, Stream::Stdout, tx.clone());
     spawn_reader(stderr, Stream::Stderr, tx);
 
+    // N-2: parity with the linux_sandbox supervise loop. A bare kill of the
+    // direct child leaves background descendants alive; they inherit the
+    // output pipes, so the drain below never sees EOF and the worker is
+    // pinned forever. Reap the leader first, SIGKILL the whole group, then
+    // bound the remaining drain by the wall budget with a small grace.
+    const DRAIN_GRACE: Duration = Duration::from_secs(2);
     let wall = Duration::from_secs(ctx.limits.wall_seconds.max(1) as u64);
-    let deadline = tokio::time::sleep(wall);
-    tokio::pin!(deadline);
+    let started = std::time::Instant::now();
+    let wall_deadline = started + wall;
 
     let mut counts = (0usize, 0usize);
     let mut truncated = false;
     let mut timed_out = false;
+    let mut killed_on_timeout = false;
+    let mut reaped: Option<std::process::ExitStatus> = None;
+    let mut rx_closed = false;
+    let mut drain_deadline: Option<tokio::time::Instant> = None;
 
-    loop {
+    while reaped.is_none() || !rx_closed {
+        let drain_guard = async {
+            match drain_deadline {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         tokio::select! {
-            item = rx.recv() => match item {
+            biased;
+
+            _ = drain_guard => {
+                tracing::warn!(
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "stream drain cut off: wall budget exhausted after reap"
+                );
+                rx_closed = true;
+            }
+
+            item = recv_output(&mut rx, rx_closed) => match item {
                 Some((stream, line)) => {
                     let count = match stream {
                         Stream::Stdout => &mut counts.0,
@@ -70,21 +105,81 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
                         sink.truncated(stream);
                     }
                 }
-                None => break,
+                None => rx_closed = true,
             },
-            _ = &mut deadline, if !timed_out => {
-                timed_out = true;
-                sink.violation("wall_clock_exceeded", serde_json::json!({
-                    "wall_seconds": ctx.limits.wall_seconds
-                }));
-                let _ = child.start_kill();
-            }
+
+            polled = poll_status(&mut child, reaped.is_some()) => match polled.expect("not pending") {
+                Ok(Some(status)) => {
+                    reaped = Some(status);
+                    kill_process_group(child_pid);
+                    let _ = child.start_kill();
+                    drain_deadline = Some(
+                        tokio::time::Instant::from_std(wall_deadline)
+                            .max(tokio::time::Instant::now() + DRAIN_GRACE),
+                    );
+                }
+                Ok(None) => {
+                    if !killed_on_timeout && std::time::Instant::now() >= wall_deadline {
+                        killed_on_timeout = true;
+                        timed_out = true;
+                        sink.violation("wall_clock_exceeded", serde_json::json!({
+                            "wall_seconds": ctx.limits.wall_seconds
+                        }));
+                        kill_process_group(child_pid);
+                        let _ = child.start_kill();
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => return Err(e),
+            },
         }
     }
 
-    let status = child.wait().await?;
+    let status = match reaped {
+        Some(status) => status,
+        None => child.wait().await?,
+    };
     Ok(classify(status.code(), unix_signal(&status), timed_out))
 }
+
+/// N-2: once the channel is closed (`done`), park forever instead of spinning
+/// on the `None` that `recv` would otherwise return immediately.
+async fn recv_output(
+    rx: &mut mpsc::UnboundedReceiver<(Stream, String)>,
+    done: bool,
+) -> Option<(Stream, String)> {
+    if done {
+        std::future::pending::<()>().await;
+        None
+    } else {
+        rx.recv().await
+    }
+}
+
+async fn poll_status(
+    child: &mut tokio::process::Child,
+    reaped: bool,
+) -> Option<io::Result<Option<std::process::ExitStatus>>> {
+    if reaped {
+        std::future::pending::<()>().await;
+        None
+    } else {
+        Some(child.try_wait())
+    }
+}
+
+/// N-2: negative pid targets the whole process group — the leader plus every
+/// descendant that inherited it. Signal delivery cannot fail meaningfully
+/// here (the group exists while the leader lives), so the result is ignored.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {}
 
 fn classify(code: Option<i32>, signal: Option<i32>, timed_out: bool) -> ExecOutcome {
     if timed_out {

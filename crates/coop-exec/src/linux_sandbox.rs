@@ -8,11 +8,12 @@ use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{chdir, close, dup2, execve, fork, setgid, setsid, setuid, ForkResult, Gid, Uid};
 use serde_json::json;
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,6 +30,7 @@ const STAGE_NAMESPACES: &str = "entering kernel namespaces";
 const STAGE_ID_MAP: &str = "mapping sandbox user ids";
 const STAGE_ROOT_MOUNTS: &str = "preparing read-only root mounts";
 const STAGE_TMP_MOUNT: &str = "mounting private tmp";
+const STAGE_SRC_STAGING: &str = "staging the job source";
 const STAGE_CGROUP_ATTACH: &str = "attaching job cgroup";
 const STAGE_EXEC: &str = "starting interpreter";
 
@@ -43,8 +45,10 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
     let cg_guard = CgroupGuard::new(prepare_cgroup(&ctx.limits, &ctx.job_key)?);
     let started = Instant::now();
 
-    let src_path = ctx.workdir.join(format!("job.{}", ext_for(&ctx.language)));
+    let src_name = format!("job.{}", ext_for(&ctx.language));
+    let src_path = ctx.workdir.join(&src_name);
     tokio::fs::write(&src_path, &ctx.code).await?;
+    crate::owner_only_file(&src_path)?;
 
     let interp = resolve_interpreter(&ctx.language, ctx.interpreter_override.as_deref());
     let interp_abs = find_in_path(Path::new(&interp))
@@ -52,7 +56,17 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
 
     let prog = CString::new(interp_abs.as_os_str().as_bytes())?;
     let src_c = CString::new(src_path.as_os_str().as_bytes())?;
-    let argv = vec![prog.clone(), src_c];
+    // N-1: the workdir/source are now 0700/0600 for the server account, so
+    // the job executes a sanitized staging copy placed on its private tmpfs
+    // during bootstrap (see `child_setup`) instead of the host-path file.
+    let staged_c = CString::new(
+        Path::new("/tmp")
+            .join(&src_name)
+            .as_os_str()
+            .as_bytes()
+            .to_vec(),
+    )?;
+    let argv = vec![prog.clone(), staged_c.clone()];
     let envp = vec![
         CString::new("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")?,
         CString::new("HOME=/tmp/home")?,
@@ -89,6 +103,8 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
         prog,
         argv,
         envp,
+        src_host: src_c,
+        src_staged: staged_c,
         cpu_seconds: u64::from(ctx.limits.cpu_seconds.clamp(1, 240)),
         mem_bytes,
         max_pids: u64::from(ctx.limits.max_pids),
@@ -150,6 +166,8 @@ struct ChildPlan {
     prog: CString,
     argv: Vec<CString>,
     envp: Vec<CString>,
+    src_host: CString,
+    src_staged: CString,
     cpu_seconds: u64,
     mem_bytes: u64,
     max_pids: u64,
@@ -251,6 +269,21 @@ fn child_setup(plan: &ChildPlan) -> ! {
         report_setup_failure(plan.setup_w, STAGE_TMP_MOUNT, &e.to_string());
     }
     let _ = fs::create_dir_all("/tmp/home");
+
+    // N-1: copy the job source onto the job-private tmpfs while still running
+    // with the server's credentials. The host-side file is 0600 in a 0700
+    // workdir, so a job that dropped to `nobody` could no longer open it;
+    // the staged copy is 0444 on a tmpfs only this mount namespace can see,
+    // which keeps it readable by the job but invisible to sibling jobs.
+    let host_src = Path::new(OsStr::from_bytes(plan.src_host.as_bytes()));
+    let staged_src = Path::new(OsStr::from_bytes(plan.src_staged.as_bytes()));
+    if let Err(e) = fs::copy(host_src, staged_src) {
+        report_setup_failure(plan.setup_w, STAGE_SRC_STAGING, &e.to_string());
+    }
+    if let Err(e) = fs::set_permissions(staged_src, fs::Permissions::from_mode(0o444)) {
+        report_setup_failure(plan.setup_w, STAGE_SRC_STAGING, &e.to_string());
+    }
+
     let _ = mount::<str, str, str, str>(
         None,
         "/proc",
@@ -371,6 +404,7 @@ impl BootstrapFailure {
             STAGE_ID_MAP => STAGE_ID_MAP,
             STAGE_ROOT_MOUNTS => STAGE_ROOT_MOUNTS,
             STAGE_TMP_MOUNT => STAGE_TMP_MOUNT,
+            STAGE_SRC_STAGING => STAGE_SRC_STAGING,
             STAGE_CGROUP_ATTACH => STAGE_CGROUP_ATTACH,
             STAGE_EXEC => STAGE_EXEC,
             _ => "initializing sandbox",

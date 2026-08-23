@@ -153,6 +153,7 @@ name = "coop-exec"
 version = "0.1.0"
 dependencies = [
  "coop-types",
+ "libc",
  "nix",
  "serde_json",
  "tokio",

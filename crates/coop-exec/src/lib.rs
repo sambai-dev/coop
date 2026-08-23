@@ -6,7 +6,7 @@ pub mod linux_sandbox;
 use coop_types::Limits;
 use serde_json::Value;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,5 +118,39 @@ pub fn ext_for(language: &str) -> &'static str {
         "python" => "py",
         "node" => "js",
         _ => "sh",
+    }
+}
+
+/// N-1: the jobs root and per-job workdirs hold tenant source and artifacts.
+/// Mode 0700 keeps them traversable by the server account only, so a job
+/// running under another local uid (e.g. `nobody` in the sandbox) cannot
+/// enumerate or enter sibling workdirs. No-op where POSIX modes do not exist,
+/// so host builds for other platforms stay green.
+pub fn owner_only_dir(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// N-1: job source files contain another tenant's code. Mode 0600 restricts
+/// them to the server account; sandboxed jobs get a sanitized staging copy
+/// instead of host-path access (see `linux_sandbox`). No-op off unix.
+pub fn owner_only_file(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
     }
 }

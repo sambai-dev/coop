@@ -13,5 +13,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.29", features = ["sched", "mount", "signal", "process", "user", "resource", "fs"] }

@@ -19,6 +19,10 @@ async fn main() {
         std::process::exit(1);
     });
     std::fs::create_dir_all(&cfg.jobs_root).expect("failed to create jobs root");
+    // N-1: only the server account may traverse the jobs area; sandboxed
+    // tenants run under other uids and must not enumerate sibling workdirs.
+    coop_exec::owner_only_dir(Path::new(&cfg.jobs_root))
+        .expect("failed to restrict jobs root permissions");
     let store = Arc::new(
         Store::open(Path::new(&cfg.db_path))
             .await
