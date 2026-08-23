@@ -38,7 +38,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Compress-Archive -Path "target/${{ matrix.target }}/release/coop.exe" -DestinationPath "coop-${{ matrix.target }}.zip"
-      - uses: softprops/action-gh-release@v2
+      # Pinned to a full commit SHA (= v2.6.2): mutable tags are a supply-chain
+      # risk for a job holding `contents: write`.
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           files: |
             coop-*.tar.gz

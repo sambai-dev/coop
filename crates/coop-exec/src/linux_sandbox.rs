@@ -24,7 +24,12 @@ const NOBODY_UID: u32 = 65534;
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcome> {
-    let cg_dir = prepare_cgroup(&ctx.limits, &ctx.job_key)?;
+    // N7: arm a guard so every error path before supervision starts (source
+    // write, interpreter resolution, CString/socket setup, fork) removes the
+    // fresh cgroup instead of orphaning a directory with live knobs on every
+    // failed submit. `disarm` hands ownership to `supervise`, which cleans up
+    // from then on.
+    let cg_guard = CgroupGuard::new(prepare_cgroup(&ctx.limits, &ctx.job_key)?);
     let started = Instant::now();
 
     let src_path = ctx.workdir.join(format!("job.{}", ext_for(&ctx.language)));
@@ -43,9 +48,9 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
         CString::new("TMPDIR=/tmp")?,
         CString::new("LANG=C.UTF-8")?,
     ];
-    let cg_dir_c = CString::new(cg_dir.as_os_str().as_bytes())?;
+    let cg_dir_c = CString::new(cg_guard.path().as_os_str().as_bytes())?;
     let mem_bytes = ctx.limits.mem_mb as u64 * 1024 * 1024;
-    let oom_before = read_oom_kills(&cg_dir);
+    let oom_before = read_oom_kills(cg_guard.path());
 
     let (out_parent, out_child) = UnixStream::pair().map_err(io::Error::other)?;
     let (err_parent, err_child) = UnixStream::pair().map_err(io::Error::other)?;
@@ -88,7 +93,7 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
             let sctx = SuperviseCtx {
                 child,
                 sink,
-                cg_dir,
+                cg_dir: cg_guard.disarm(),
                 limits: ctx.limits,
                 oom_before,
                 started,
@@ -437,10 +442,14 @@ fn prepare_cgroup(limits: &Limits, job_key: &str) -> io::Result<PathBuf> {
     enable_controllers_for(cgroup_root);
     enable_controllers_for(&base);
 
-    let dir = base.join(format!("job-{job_key}"));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir)
-        .map_err(|e| io::Error::other(format!("cgroup: create {}: {e}", dir.display())))?;
+    // F4: the old code ran `remove_dir_all` followed by `create_dir_all` here.
+    // That pair is racy and unsafe: two same-key jobs could interleave
+    // remove/create, and the remove could delete the cgroup of a *live* job
+    // that had just been handed this path. `create_dir` is a single atomic
+    // mkdir(2) that fails with `AlreadyExists` instead, so an existing
+    // directory is never deleted blindly — recovery lives in
+    // `create_cgroup_dir`.
+    let dir = create_cgroup_dir(&base, job_key)?;
 
     let mem_bytes = limits.mem_mb as u64 * 1024 * 1024;
     fs::write(dir.join("memory.max"), mem_bytes.to_string())
@@ -457,6 +466,89 @@ fn prepare_cgroup(limits: &Limits, job_key: &str) -> io::Result<PathBuf> {
         .map_err(|e| io::Error::other(format!("cgroup: write pids.max: {e}")))?;
 
     Ok(dir)
+}
+
+/// Create the per-job cgroup directory atomically (F4). `fs::create_dir` is
+/// one exclusive mkdir(2): if `job-{job_key}` already exists we must decide
+/// whether it is a stale leftover from a crashed job or a *live* job's cgroup,
+/// which must never be deleted.
+fn create_cgroup_dir(base: &Path, job_key: &str) -> io::Result<PathBuf> {
+    let dir = base.join(format!("job-{job_key}"));
+    match fs::create_dir(&dir) {
+        Ok(()) => Ok(dir),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            if cgroup_has_processes(&dir) {
+                // A live job owns this cgroup — never delete it; take a fresh
+                // unique name instead.
+                let fresh = base.join(format!(
+                    "job-{job_key}-{}-{:x}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or_default()
+                ));
+                fs::create_dir(&fresh).map_err(|e| {
+                    io::Error::other(format!("cgroup: create {}: {e}", fresh.display()))
+                })?;
+                Ok(fresh)
+            } else {
+                // No member processes: stale cgroup left behind by a crashed
+                // job, safe to reclaim. The kernel backstops this — rmdir(2)
+                // on a populated cgroup fails with EBUSY, so a live group
+                // cannot be removed even if one races in after the check.
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir(&dir).map_err(|e| {
+                    io::Error::other(format!("cgroup: create {}: {e}", dir.display()))
+                })?;
+                Ok(dir)
+            }
+        }
+        Err(e) => Err(io::Error::other(format!(
+            "cgroup: create {}: {e}",
+            dir.display()
+        ))),
+    }
+}
+
+/// Conservative liveness probe: an unreadable `cgroup.procs` counts as live.
+fn cgroup_has_processes(dir: &Path) -> bool {
+    match fs::read_to_string(dir.join("cgroup.procs")) {
+        Ok(procs) => procs.split_whitespace().next().is_some(),
+        Err(_) => true,
+    }
+}
+
+/// RAII guard for the per-job cgroup directory (N7): every `?` between
+/// `prepare_cgroup` and `supervise` (source write, interpreter resolution,
+/// CString/socket setup, fork) returns through this guard, so failed submits
+/// no longer orphan cgroup directories with live knobs. `disarm` hands
+/// ownership to the supervision path, which cleans up from then on.
+struct CgroupGuard {
+    dir: Option<PathBuf>,
+}
+
+impl CgroupGuard {
+    fn new(dir: PathBuf) -> Self {
+        Self { dir: Some(dir) }
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.as_deref().expect("cgroup guard is armed")
+    }
+
+    /// Consume the guard without cleaning up; the caller takes over cleanup.
+    fn disarm(mut self) -> PathBuf {
+        self.dir.take().expect("cgroup guard is armed")
+    }
+}
+
+impl Drop for CgroupGuard {
+    fn drop(&mut self) {
+        if let Some(dir) = self.dir.take() {
+            cleanup_cgroup(&dir);
+        }
+    }
 }
 
 const NEEDED_CONTROLLERS: [&str; 3] = ["memory", "pids", "cpu"];
@@ -534,4 +626,79 @@ fn find_in_path(bin: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stand-in for `/sys/fs/cgroup/coop-jobs`: a plain temp dir, with a fake
+    /// `cgroup.procs` file controlling the liveness probe.
+    fn temp_base(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("coop-cg-{tag}-{}", std::process::id()));
+        fs::create_dir_all(&base).expect("create temp cgroup base");
+        base
+    }
+
+    #[test]
+    fn fresh_job_key_uses_deterministic_dir() {
+        let base = temp_base("fresh");
+        let dir = create_cgroup_dir(&base, "abc").expect("create fresh cgroup dir");
+        assert_eq!(dir, base.join("job-abc"));
+        assert!(dir.is_dir());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stale_dir_from_crashed_job_is_reclaimed() {
+        let base = temp_base("stale");
+        let stale = base.join("job-abc");
+        fs::create_dir(&stale).expect("seed stale dir");
+        fs::write(stale.join("cgroup.procs"), "").expect("empty procs = crashed job");
+
+        let dir = create_cgroup_dir(&base, "abc").expect("reclaim stale cgroup dir");
+        assert_eq!(dir, stale, "stale cgroup is removed and recreated in place");
+        assert!(dir.is_dir());
+        assert!(
+            !dir.join("cgroup.procs").exists(),
+            "reclaimed dir is fresh, not the crashed job's leftover"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn live_job_dir_is_never_deleted() {
+        let base = temp_base("live");
+        let live = base.join("job-abc");
+        fs::create_dir(&live).expect("seed live dir");
+        fs::write(live.join("cgroup.procs"), "1234\n").expect("populated procs = live job");
+
+        let dir = create_cgroup_dir(&base, "abc").expect("fall back to a fresh dir");
+        assert_ne!(
+            dir, live,
+            "a populated cgroup must not be deleted; a unique name is used instead"
+        );
+        assert!(dir.is_dir());
+        assert_eq!(
+            fs::read_to_string(live.join("cgroup.procs")).expect("live cgroup untouched"),
+            "1234\n"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn guard_cleans_up_unless_disarmed() {
+        let base = temp_base("guard");
+
+        let doomed = create_cgroup_dir(&base, "doomed").expect("create dir");
+        drop(CgroupGuard::new(doomed.clone()));
+        assert!(!doomed.exists(), "armed guard removes the cgroup on drop");
+
+        let kept = create_cgroup_dir(&base, "kept").expect("create dir");
+        let owned = CgroupGuard::new(kept.clone()).disarm();
+        assert_eq!(owned, kept);
+        assert!(kept.is_dir(), "disarmed guard leaves the cgroup in place");
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }

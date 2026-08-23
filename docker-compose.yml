@@ -1,11 +1,17 @@
 services:
   coop:
     build: .
+    # Required by the namespace/cgroup sandbox backend (see README "Deployment").
     privileged: true
     ports:
-      - "7300:7300"
+      # Localhost-only by default. To expose coop beyond this machine, put a
+      # TLS-terminating front proxy in front — do not rebind 0.0.0.0 directly
+      # (see README "Deployment").
+      - "127.0.0.1:7300:7300"
     environment:
-      COOP_API_KEYS: "local:change-me"
+      # No key ships in this file: compose fails fast if COOP_API_KEYS is unset,
+      # and the container (COOP_ENV=production) refuses to boot without it.
+      COOP_API_KEYS: "${COOP_API_KEYS:?set COOP_API_KEYS first, e.g. export COOP_API_KEYS=tenant:$(openssl rand -hex 16)}"
       COOP_SANDBOX: auto
       RUST_LOG: info,coop=debug
     volumes:

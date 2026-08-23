@@ -282,13 +282,19 @@ We publish the harness instead of cherry-picked screenshots. Replace this table 
 ## Deployment
 
 ```bash
+export COOP_API_KEYS="tenant:$(openssl rand -hex 16)"   # required — compose fails fast without it
 docker compose up          # privileged: true is what enables the ns/cgroup backend
 ```
+
+Two deploy defaults are deliberately strict in `docker-compose.yml`:
+
+- **No API key ships in the repo.** `COOP_API_KEYS` must come from your environment; compose aborts immediately if it is unset, and the container (`COOP_ENV=production`) refuses to boot on the development default key. One key per agent/tenant keeps blast radius small.
+- **Localhost-only publish.** The port mapping is `127.0.0.1:7300:7300`, and the Dockerfile's `0.0.0.0` bind only listens inside the container's network namespace. Coop speaks plain HTTP with bearer keys and has no TLS of its own, so to reach it from other machines put a TLS-terminating front proxy (nginx, Caddy, Traefik) on the public interface and proxy to `127.0.0.1:7300`. Do not rebind `0.0.0.0` on the host directly — API keys would cross the network in plaintext.
 
 Hardening checklist for production-ish use:
 
 - dedicated VM (Firecracker/gVisor integration is the stretch goal)
-- rotate the default key; one key per agent/tenant for blast-radius isolation
+- one key per agent/tenant for blast-radius isolation; rotate on any suspicion of leak
 - keep `COOP_DB` on persistent storage; the audit log is the point
 - firewall egress from the host itself; jobs already have none
 
