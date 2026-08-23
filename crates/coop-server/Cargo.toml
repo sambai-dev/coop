@@ -28,5 +28,6 @@ utoipa = { workspace = true }
 uuid = { workspace = true }
 futures-util = { workspace = true }
 dashmap = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]

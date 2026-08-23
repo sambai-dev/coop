@@ -11,7 +11,7 @@ use utoipa::OpenApi;
         version = crate::VERSION,
         description = "Self-hostable sandbox for AI agents. Submit code, stream output over WebSocket, replay any execution from the append-only event log.",
     ),
-    paths(crate::routes::submit, crate::routes::list_jobs, crate::routes::get_job, crate::routes::replay),
+    paths(crate::routes::submit, crate::routes::list_jobs, crate::routes::get_job, crate::routes::replay, crate::routes::status),
     components(schemas(JobSpec, Limits, JobView, SubmitResponse, WireEvent))
 )]
 pub struct ApiDoc;

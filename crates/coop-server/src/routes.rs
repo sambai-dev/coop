@@ -60,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/jobs/{id}", get(get_job))
         .route("/v1/jobs/{id}/replay", get(replay))
         .route("/v1/jobs/{id}/stream", get(stream))
+        .route("/v1/status", get(status))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::ratelimit::middleware,
@@ -347,9 +348,19 @@ async fn job_terminal(state: &AppState, job_id: &str) -> bool {
 }
 
 #[utoipa::path(get, path = "/healthz", responses((status = 200)))]
-async fn health(State(state): State<AppState>) -> Response {
+async fn health() -> Response {
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// Version + sandbox mode detail, behind the authenticated API surface
+/// (the unauthenticated /healthz stays status-only so it leaks nothing).
+#[utoipa::path(
+    get,
+    path = "/v1/status",
+    responses((status = 200), (status = 401, description = "Missing or invalid API key"))
+)]
+pub async fn status(State(state): State<AppState>) -> Response {
     Json(serde_json::json!({
-        "ok": true,
         "version": crate::VERSION,
         "sandbox": state.sandbox_mode.as_str(),
     }))
@@ -358,4 +369,19 @@ async fn health(State(state): State<AppState>) -> Response {
 
 async fn dashboard() -> Html<&'static str> {
     Html(include_str!("dashboard.html"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn healthz_payload_is_status_only() {
+        let resp = health().await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), br#"{"ok":true}"#);
+    }
 }

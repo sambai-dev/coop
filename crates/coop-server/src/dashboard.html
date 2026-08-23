@@ -112,7 +112,8 @@ function headers() { return { Authorization: "Bearer " + keyInput.value.trim(), 
 
 async function loadMeta() {
   try {
-    const r = await fetch("/healthz");
+    const r = await fetch("/v1/status", { headers: { Authorization: "Bearer " + keyInput.value.trim() } });
+    if (!r.ok) return;
     const j = await r.json();
     $("sandbox").textContent = j.sandbox || "?";
     $("version").textContent = j.version || "?";
