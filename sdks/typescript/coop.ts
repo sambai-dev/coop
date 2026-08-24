@@ -82,6 +82,12 @@ export class Coop {
     return this.request("GET", `/v1/jobs/${jobId}`);
   }
 
+  /** Cancel a queued or running job. Resolves once cancellation is accepted;
+   *  poll {@link wait} / {@link get} for the terminal `cancelled` status. */
+  cancel(jobId: string): Promise<void> {
+    return this.request("DELETE", `/v1/jobs/${jobId}`).then(() => undefined);
+  }
+
   jobs(limit = 50): Promise<JobView[]> {
     return this.request("GET", `/v1/jobs?limit=${limit}`);
   }

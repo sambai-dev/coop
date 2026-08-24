@@ -43,7 +43,7 @@ exit code: 0
 
 | README claim | Verified by |
 |---|---|
-| 11 `COOP_*` env vars table | grep against `config.rs` — exact match |
+| 13 `COOP_*` env vars table | grep against `config.rs` — exact match |
 | API endpoint table | grep against `routes.rs` router — exact match incl. `/openapi.json` |
 | Status set (`queued…error`) | `JobStatus` enum + serde snake_case mapping |
 | Hostile suite "7/7 pass in privileged CI" | CI run logs: `test result: ok. 7 passed` |

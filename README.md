@@ -169,15 +169,17 @@ All endpoints require `Authorization: Bearer <key>` (or `?key=` for browser WebS
 | POST | `/v1/jobs` | submit `{language, code, stdin?, limits?}` → `201 {job_id}` |
 | GET | `/v1/jobs?limit=` | list your tenant's recent jobs |
 | GET | `/v1/jobs/{id}` | job view (status, exit code, timestamps) |
-| DELETE | `/v1/jobs/{id}` | cancel a queued/running job (409 if already terminal) |
+| DELETE | `/v1/jobs/{id}` | cancel a queued/running job → terminal `cancelled`; re-cancel → `409` |
 | GET | `/v1/jobs/{id}/replay` | full ordered event list |
 | GET | `/v1/jobs/{id}/result` | one-call outcome: waits up to `?wait_seconds=` (0-300, default 60), folds stdout/stderr/violations into `{status, exit_code, duration_ms, stdout, stderr, truncated, violations}`; `200` when terminal, `202` with partial output if the wait budget expires |
 | GET | `/v1/jobs/{id}/stream` | WebSocket: history + live events |
-| GET | `/v1/metrics` | Prometheus text format (job counts, running jobs) |
+| GET | `/v1/metrics` | Prometheus text format (`coop_jobs_total`, `coop_running_jobs`) |
 | GET | `/healthz` | liveness (`{"ok":true}`, no auth) |
 | GET | `/v1/status` | version + active sandbox mode |
 
 Statuses: `queued → running → succeeded | failed | timed_out | oom_killed | cancelled | error`.
+
+Retention: terminal jobs older than `COOP_RETENTION_HOURS` (default 168; `0` disables) are deleted with their events on each sweep (`COOP_SWEEP_INTERVAL_SECS`, default 3600). On boot, jobs left queued/running by a crashed previous process are marked `error`.
 
 Languages: `python`, `node`, `bash` (interpreter binaries configurable via env).
 
@@ -284,6 +286,8 @@ We publish the harness instead of cherry-picked screenshots. Replace this table 
 | `COOP_ENV` | unset | `prod`/`production`/`release` enables production fail-fast checks (require real API keys, refuse to boot without sandbox) |
 | `COOP_SANDBOX` | `auto` | `auto` \| `ns` \| `off` |
 | `COOP_JOBS_ROOT` | `/var/lib/coop/jobs` (Linux) | scratch dir for job scripts; must live outside any tmpfs the sandbox overlays |
+| `COOP_RETENTION_HOURS` | `168` | delete terminal jobs (and events) older than this; `0` disables sweeps |
+| `COOP_SWEEP_INTERVAL_SECS` | `3600` | seconds between retention sweeps (min 60) |
 | `COOP_PYTHON` / `COOP_NODE` / `COOP_BASH` | PATH lookup | interpreter overrides |
 | `RUST_LOG` | `info` | e.g. `debug`, `coop_server=trace` |
 
