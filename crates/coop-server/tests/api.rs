@@ -262,6 +262,29 @@ async fn runs_python_hello_world_end_to_end() {
 #[tokio::test]
 async fn cancel_queued_job_finalizes_without_execution() {
     let app = spawn_app().await;
+
+    // Deterministic queuing: fill the 2-worker pool with long-running
+    // blockers so the victim below cannot start before its DELETE lands.
+    // (A bare `echo` victim completes in milliseconds and raced this test
+    // on CI: sometimes already terminal, making the expected 200 a 409.)
+    let mut blockers = Vec::new();
+    for _ in 0..2 {
+        let (status, body) = send(
+            &app,
+            request(
+                "POST",
+                "/v1/jobs",
+                Some("test-key"),
+                Some(
+                    r#"{"language":"bash","code":"sleep 30","limits":{"wall_seconds":30}}"#.into(),
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        blockers.push(body["job_id"].as_str().expect("job_id").to_string());
+    }
+
     let (status, body) = send(
         &app,
         request(
@@ -303,6 +326,15 @@ async fn cancel_queued_job_finalizes_without_execution() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
+
+    // Cleanup: cancel the blockers so the pool drains before the app drops.
+    for id in &blockers {
+        let _ = send(
+            &app,
+            request("DELETE", &format!("/v1/jobs/{id}"), Some("test-key"), None),
+        )
+        .await;
+    }
 }
 
 #[tokio::test]
