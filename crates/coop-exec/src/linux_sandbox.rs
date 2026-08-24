@@ -32,6 +32,7 @@ const STAGE_ROOT_MOUNTS: &str = "preparing read-only root mounts";
 const STAGE_TMP_MOUNT: &str = "mounting private tmp";
 const STAGE_SRC_STAGING: &str = "staging the job source";
 const STAGE_CGROUP_ATTACH: &str = "attaching job cgroup";
+const STAGE_SECCOMP: &str = "applying syscall filter";
 const STAGE_EXEC: &str = "starting interpreter";
 
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
@@ -120,6 +121,7 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
         unpriv_userns: !Uid::effective().is_root(),
         euid: Uid::effective().as_raw(),
         egid: Gid::effective().as_raw(),
+        seccomp: ctx.seccomp,
     };
 
     let fork_result = unsafe { fork() }.map_err(io::Error::other)?;
@@ -182,6 +184,7 @@ struct ChildPlan {
     unpriv_userns: bool,
     euid: u32,
     egid: u32,
+    seccomp: bool,
 }
 
 /// Report a sandbox-bootstrap failure to the parent (stage + errno detail)
@@ -327,6 +330,17 @@ fn child_setup(plan: &ChildPlan) -> ! {
 
     let argv_refs: Vec<&CString> = plan.argv.iter().collect();
     let envp_refs: Vec<&CString> = plan.envp.iter().collect();
+
+    // F-005: the filter goes in LAST, after the privilege drop above —
+    // setuid/setgid are on our own trap list, so installing earlier would
+    // SIGSYS-kill the sandbox while dropping credentials. From this point
+    // the interpreter can only use the allowlist (or get ENOSYS / SIGSYS).
+    if plan.seccomp {
+        if let Err(e) = crate::seccomp::install() {
+            report_setup_failure(plan.setup_w, STAGE_SECCOMP, &e);
+        }
+    }
+
     // nix 0.29 returns Result<Infallible, Errno>: execve only ever comes back
     // on failure, so bind the errno and report it (this diverges).
     let Err(e) = execve(&plan.prog, &argv_refs, &envp_refs);
@@ -420,6 +434,7 @@ impl BootstrapFailure {
             STAGE_TMP_MOUNT => STAGE_TMP_MOUNT,
             STAGE_SRC_STAGING => STAGE_SRC_STAGING,
             STAGE_CGROUP_ATTACH => STAGE_CGROUP_ATTACH,
+            STAGE_SECCOMP => STAGE_SECCOMP,
             STAGE_EXEC => STAGE_EXEC,
             _ => "initializing sandbox",
         };
@@ -602,6 +617,15 @@ fn classify(
                     status: OutcomeStatus::TimedOut,
                     exit_code: None,
                     killed_by: Some("wall-clock".into()),
+                }
+            } else if sig == Signal::SIGSYS {
+                // F-005: seccomp trap — the job called a notorious-surface
+                // syscall (ptrace, bpf, module loading, …). Loud failure.
+                sink.violation("seccomp_violation", json!({ "signal": "SIGSYS" }));
+                ExecOutcome {
+                    status: OutcomeStatus::Failed,
+                    exit_code: None,
+                    killed_by: Some("seccomp".into()),
                 }
             } else if sig == Signal::SIGXCPU {
                 sink.violation(

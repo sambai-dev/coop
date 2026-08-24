@@ -124,6 +124,7 @@ On Linux with root, Coop runs each job inside:
 - **namespaces**: mount (read-only bind-remount of `/`, private tmpfs at `/tmp`), PID, network (`CLONE_NEWNET` = no interfaces at all unless explicitly allowed later), IPC, UTS
 - **cgroup v2**: `memory.max`, `memory.swap.max=0`, `cpu.max`, `pids.max`
 - **rlimits**: `CPU` (SIGXCPU), `AS`, `NPROC`, `NOFILE`, `FSIZE`
+- **seccomp-BPF allowlist**: every syscall outside a per-language-common allowlist fails with `ENOSYS` (so glibc fallback chains keep working); notorious kernel-attack-surface calls (`ptrace`, `bpf`, module loading, keyrings, io_uring, namespace escapes…) trap with `SIGSYS` and are reported as `seccomp_violation` in the event log. `socket()` is argument-filtered to `AF_UNIX`. Disable with `COOP_SECCOMP=off`.
 - **privilege drop** to `nobody` when started as root, fresh `/proc`, minimal env
 
 | Defended against | Not defended against (yet) |
@@ -131,8 +132,8 @@ On Linux with root, Coop runs each job inside:
 | fork bombs (`pids.max`, `RLIMIT_NPROC`) | kernel 0-days / container escapes |
 | memory bombs (cgroup OOM kill, hard `RLIMIT_AS`) | side channels / timing attacks |
 | infinite loops & CPU hogs (wall clock + `RLIMIT_CPU`) | malicious interpreter CVEs |
-| disk fill (tmpfs size cap, `RLIMIT_FSIZE`) | sophisticated syscall-level attacks (no seccomp yet) |
-| network access by default (no netns interfaces) | multi-tenant hostile neighbors on one host |
+| disk fill (tmpfs size cap, `RLIMIT_FSIZE`) | sophisticated syscall-level attacks (seccomp allowlist narrows this sharply; no per-language profiles yet) |
+| network access by default (no netns interfaces; `socket()` limited to `AF_UNIX`) | multi-tenant hostile neighbors on one host |
 | read-only rootfs tampering, host file reads | |
 
 Run Coop on a **dedicated VM**, not your workstation, and treat it as defense-in-depth rather than a hard security boundary. gVisor/Firecracker backends behind the same API are the roadmap answer to the right-hand column.
@@ -234,7 +235,7 @@ coop.stream(jobId, (e) => console.log(e.kind, e.data));
 
 ## The hostile-jobs suite
 
-The portfolio piece isn't the happy path — it's proof that the unhappy path is contained. `hostile-jobs/` plus `crates/coop-server/tests/hostile.rs` assert real containment on Linux, and CI runs them in a privileged container on every push — **all 7 currently pass**:
+The portfolio piece isn't the happy path — it's proof that the unhappy path is contained. `hostile-jobs/` plus `crates/coop-server/tests/hostile.rs` assert real containment on Linux, and CI runs them in a privileged container on every push — **all 10 currently pass**:
 
 | Job | Expectation |
 |---|---|
@@ -245,6 +246,7 @@ The portfolio piece isn't the happy path — it's proof that the unhappy path is
 | `disk_filler.py` | fails against tmpfs cap + `RLIMIT_FSIZE` |
 | `escape_probe.py` | cannot read `/etc/shadow` or write outside its box |
 | `pid_bomb.py` | process-spawn storm capped |
+| `ptrace_probe.py` | seccomp allowlist kills the job with SIGSYS (`seccomp_violation`) before it can trace anything |
 
 Run them (root required, namespaces + cgroup v2):
 
@@ -285,6 +287,7 @@ We publish the harness instead of cherry-picked screenshots. Replace this table 
 | `COOP_SWEEP_INTERVAL_SECS` | `3600` | seconds between retention sweeps |
 | `COOP_ENV` | unset | `prod`/`production`/`release` enables production fail-fast checks (require real API keys, refuse to boot without sandbox) |
 | `COOP_SANDBOX` | `auto` | `auto` \| `ns` \| `off` |
+| `COOP_SECCOMP` | `auto` | seccomp-BPF syscall allowlist in sandboxed jobs; `off` disables (namespace backend only) |
 | `COOP_JOBS_ROOT` | `/var/lib/coop/jobs` (Linux) | scratch dir for job scripts; must live outside any tmpfs the sandbox overlays |
 | `COOP_RETENTION_HOURS` | `168` | delete terminal jobs (and events) older than this; `0` disables sweeps |
 | `COOP_SWEEP_INTERVAL_SECS` | `3600` | seconds between retention sweeps (min 60) |
@@ -332,7 +335,8 @@ A full security audit shipped with v0.1.0 — see **[AUDIT.md](AUDIT.md)** for t
 - [x] Week 3 — WebSocket streaming, SQLite event log, replay endpoint
 - [x] Week 4 — API keys, per-tenant rate/concurrency limits, live dashboard
 - [x] Week 5 — Docker deploy, SDKs, benchmarks, this README
-- [ ] seccomp allowlist profiles per language
+- [x] seccomp allowlist for sandboxed jobs (`ptrace`/`bpf`/io_uring/module/keyring surface trapped; per-language profiles still open)
+- [ ] seccomp profiles per language (tighten the common allowlist per interpreter)
 - [ ] Redis-backed queue for multi-node schedulers; Postgres store
 - [ ] resource graphs in the dashboard (CPU/memory sampled per job)
 - [ ] Firecracker microVM backend behind the same API; VM snapshotting for ~5 ms warm starts

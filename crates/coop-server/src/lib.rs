@@ -24,6 +24,8 @@ pub struct AppState {
     pub tenant_sems: Arc<DashMap<String, Arc<Semaphore>>>,
     pub rate: Arc<ratelimit::RateLimiter>,
     pub sandbox_mode: coop_exec::SandboxMode,
+    /// F-005: install a seccomp-BPF allowlist in sandboxed jobs (see Config).
+    pub seccomp: bool,
     /// Cancellation flags for RUNNING jobs, keyed by job id. The scheduler
     /// inserts a flag when a job starts executing; the cancel endpoint flips
     /// it and the executor's poll loop acts on it within one tick (~20 ms).
@@ -39,6 +41,9 @@ pub fn build_app(
     let workers = cfg.workers;
     let (queue_tx, queue_rx) = mpsc::channel(1024);
     let sandbox_mode = resolve_sandbox(&cfg.sandbox, crate::config::is_production())?;
+    // F-005: only meaningful when kernel isolation is actually in play; the
+    // naive backend has no exec boundary to put a filter in front of.
+    let seccomp_enabled = cfg.seccomp && matches!(sandbox_mode, coop_exec::SandboxMode::Namespaces);
 
     // N-1: tenant isolation requires the jobs root to be server-private
     // (0700). The binary path enforces this in main(), but any embedder that
@@ -57,6 +62,7 @@ pub fn build_app(
         tenant_sems: Arc::new(DashMap::new()),
         rate: Arc::new(ratelimit::RateLimiter::new(rate_per_min)),
         sandbox_mode,
+        seccomp: seccomp_enabled,
         cancels: Arc::new(DashMap::new()),
     };
 

@@ -112,9 +112,13 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
     let workdir = std::path::PathBuf::from(&state.cfg.jobs_root).join(format!("job-{job_id}"));
     // N-1: workdirs hold tenant source and artifacts; mode 0700 (no-op off
     // unix) keeps sibling jobs from traversing each other's directories.
+    // The jobs root itself is locked to 0700 on every job (not only at boot
+    // from main) so the isolation invariant holds no matter which entry point
+    // created it — a test harness, a CLI, or an operator's mkdir.
     if let Err(e) = tokio::fs::create_dir_all(&workdir)
         .await
         .and_then(|()| coop_exec::owner_only_dir(&workdir))
+        .and_then(|()| coop_exec::owner_only_dir(std::path::Path::new(&state.cfg.jobs_root)))
     {
         tracing::error!(error = %e, "failed to create workdir");
         op_tx
@@ -134,6 +138,7 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
         workdir: workdir.clone(),
         interpreter_override: state.cfg.interpreter_override(&spec.language),
         cancel: Some(cancel_flag),
+        seccomp: state.seccomp,
     };
 
     tracing::info!(

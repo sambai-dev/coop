@@ -20,6 +20,9 @@ pub struct Config {
     pub retention_hours: u64,
     /// Seconds between retention sweeps.
     pub sweep_interval_secs: u64,
+    /// F-005: install a seccomp-BPF syscall allowlist in sandboxed jobs
+    /// (namespace backend only). Default on; `COOP_SECCOMP=off` disables.
+    pub seccomp: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -150,6 +153,13 @@ impl Config {
                 .parse()
                 .unwrap_or(3600)
                 .max(60),
+            seccomp: !matches!(
+                env_or(getenv, "COOP_SECCOMP", "auto")
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "off" | "none" | "disabled" | "false" | "0"
+            ),
         })
     }
 

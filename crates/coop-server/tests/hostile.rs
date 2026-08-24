@@ -76,14 +76,16 @@ async fn spawn_app_with_root() -> (Router, String) {
         bash_bin: None,
         retention_hours: 0,
         sweep_interval_secs: 3600,
+        seccomp: true,
     };
     let store = Arc::new(Store::open(&db).await.expect("open store"));
     let (app, state, queue_rx) = coop_server::build_app(cfg, store).expect("build app");
+    // Read everything needed off `state` before it moves into the workers.
+    let cfg_jobs_root = state.cfg.jobs_root.clone();
     eprintln!(
         "sandbox resolved by server: {}",
         state.sandbox_mode.as_str()
     );
-    let cfg_jobs_root = state.cfg.jobs_root.clone();
     scheduler::spawn_workers(state, queue_rx);
     (app, cfg_jobs_root)
 }
@@ -216,6 +218,7 @@ const NETWORK_PROBE: &str = include_str!("../../../hostile-jobs/network_probe.py
 const DISK_FILLER: &str = include_str!("../../../hostile-jobs/disk_filler.py");
 const ESCAPE_PROBE: &str = include_str!("../../../hostile-jobs/escape_probe.py");
 const PID_BOMB: &str = include_str!("../../../hostile-jobs/pid_bomb.py");
+const PTRACE_PROBE: &str = include_str!("../../../hostile-jobs/ptrace_probe.py");
 
 #[tokio::test]
 #[ignore]
@@ -338,11 +341,15 @@ async fn network_is_disabled_by_default() {
         serde_json::json!({ "wall_seconds": 10 }),
     )
     .await;
-    expect_status(&app, &id, &["succeeded"]).await;
+    // With the seccomp allowlist active (default since F-005), the probe's
+    // socket() call traps with SIGSYS before Python can even report a
+    // graceful connection failure — an even stronger guarantee than the old
+    // "probe exits clean" behavior, so accept both.
+    let (status, _) = expect_status(&app, &id, &["succeeded", "failed"]).await;
     let stdout = replay_stdout(&app, &id).await;
     assert!(
-        stdout.contains("network blocked"),
-        "probe must confirm the network is unreachable; stdout was:\n{stdout}"
+        stdout.contains("network blocked") || status == "failed",
+        "network must be unreachable; probe said:\n{stdout}"
     );
     assert_host_still_serves(&app).await;
 }
@@ -474,6 +481,50 @@ print('PROBE-HITS', len(hits))
     assert!(
         !stdout.contains(&marker),
         "victim source must never reach another job; stdout was:\n{stdout}"
+    );
+    assert_host_still_serves(&app).await;
+}
+
+/// F-005: the seccomp allowlist traps ptrace with SIGSYS. The probe must die
+/// before it can print a success line, and the violation must surface as
+/// `killed_by = "seccomp"` in the event log.
+#[tokio::test]
+#[ignore]
+async fn ptrace_probe_is_killed_by_seccomp() {
+    if !preflight() {
+        return;
+    }
+    let app = spawn_app().await;
+    let id = submit(
+        &app,
+        "python",
+        PTRACE_PROBE,
+        serde_json::json!({ "wall_seconds": 10 }),
+    )
+    .await;
+
+    // SIGSYS kill lands in `failed` (killed_by=seccomp); if the interpreter
+    // refuses to even load ctypes on some minimal images we accept `error`.
+    let (status, _) = expect_status(&app, &id, &["failed", "error"]).await;
+    assert_eq!(status, "failed", "ptrace probe should be SIGSYS-killed");
+
+    let events = replay_events(&app, &id).await;
+    let killed_by_seccomp = events
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .any(|e| e["kind"] == "violation" && e["data"]["rule"] == "seccomp_violation")
+        })
+        .unwrap_or(false);
+    assert!(
+        killed_by_seccomp,
+        "expected a seccomp_violation event; events were:\n{}",
+        render_events(&events)
+    );
+    let stdout = replay_stdout(&app, &id).await;
+    assert!(
+        !stdout.contains("ptrace returned"),
+        "probe must be killed before reporting success; stdout was:\n{stdout}"
     );
     assert_host_still_serves(&app).await;
 }

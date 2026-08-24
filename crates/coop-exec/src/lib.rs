@@ -3,6 +3,9 @@ pub mod naive;
 #[cfg(target_os = "linux")]
 pub mod linux_sandbox;
 
+#[cfg(target_os = "linux")]
+pub mod seccomp;
+
 use coop_types::Limits;
 use serde_json::Value;
 use std::io;
@@ -44,6 +47,9 @@ pub struct ExecContext {
     /// and reports `OutcomeStatus::Cancelled`. Cloned freely; a missing
     /// token simply means "never cancelled".
     pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Install a seccomp-BPF allowlist before exec (Linux namespace backend
+    /// only). Default on: F-005 mitigation. `COOP_SECCOMP=off` disables it.
+    pub seccomp: bool,
 }
 
 impl ExecContext {

@@ -39,6 +39,7 @@ fn test_config(db: &std::path::Path) -> Config {
         bash_bin: None,
         retention_hours: 0,
         sweep_interval_secs: 3600,
+        seccomp: false,
     }
 }
 

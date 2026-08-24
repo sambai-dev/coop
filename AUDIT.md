@@ -12,7 +12,7 @@
 | F-002 | HIGH | Sandbox | cgroup attach failure was silently ignored — job would run without memory/cpu/pids caps while namespaces still applied | **FIXED** (fail-closed: child exits 126) |
 | F-003 | MEDIUM | Server | Per-job broadcast channels were never freed after job completion → unbounded memory growth over uptime | **FIXED** |
 | F-004 | LOW | Sandbox | Memory cap inconsistency: `RLIMIT_AS`/tmpfs sized to min(mem, 2 GiB) while `memory.max` allowed up to 4 GiB | **FIXED** (single consistent value) |
-| F-005 | MEDIUM | Sandbox | No seccomp filter — syscall surface is that of the interpreter binary | Accepted; roadmap item |
+| F-005 | MEDIUM | Sandbox | No seccomp filter — syscall surface is that of the interpreter binary | **MITIGATED** post-release: seccomp-BPF allowlist installed before `execve` (trap list for `ptrace`/`bpf`/modules/keyrings/io_uring/namespace syscalls → SIGSYS + `seccomp_violation`; unknown calls → `ENOSYS`; `socket()` limited to `AF_UNIX`). Per-language profiles still open. |
 | F-006 | MEDIUM | Sandbox | All jobs share UID `nobody`: `RLIMIT_NPROC` pools across concurrent jobs on one host | Accepted; per-tenant UIDs on roadmap; PID namespaces prevent cross-job process visibility |
 | F-007 | DEPLOY | Ops | Namespace/cgroup backend requires root (or delegated caps); Docker path uses `--privileged` = host-equivalent trust | Documented; dedicated-VM guidance in README |
 | F-008 | LOW | API | Browser WebSocket auth supports `?key=` → keys can appear in access logs/proxies | Documented; header auth preferred for non-browser clients |
@@ -53,6 +53,7 @@ exit code: 0
 
 - `cross_tenant_reads_are_rejected` — second tenant gets 404 on get/replay and cannot see the job in listings
 - fork-bomb probe rewritten to be *measurable*: asserts reported spawn count stays under the cap rather than assuming nonzero exit
+- `ptrace_probe_is_killed_by_seccomp` (post-release, F-005 mitigation) — a job calling `ptrace` dies with SIGSYS and emits a `seccomp_violation` event before printing anything
 
 ## Residual risk statement
 
