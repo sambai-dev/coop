@@ -74,6 +74,8 @@ async fn spawn_app_with_root() -> (Router, String) {
         python_bin: None,
         node_bin: None,
         bash_bin: None,
+        retention_hours: 0,
+        sweep_interval_secs: 3600,
     };
     let store = Arc::new(Store::open(&db).await.expect("open store"));
     let (app, state, queue_rx) = coop_server::build_app(cfg, store).expect("build app");
