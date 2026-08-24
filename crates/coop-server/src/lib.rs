@@ -40,6 +40,15 @@ pub fn build_app(
     let (queue_tx, queue_rx) = mpsc::channel(1024);
     let sandbox_mode = resolve_sandbox(&cfg.sandbox, crate::config::is_production())?;
 
+    // N-1: tenant isolation requires the jobs root to be server-private
+    // (0700). The binary path enforces this in main(), but any embedder that
+    // calls build_app directly must get the same guarantee, or the default-
+    // mode parent lets sandboxed jobs enumerate sibling workdir names.
+    std::fs::create_dir_all(&cfg.jobs_root)
+        .map_err(|e| format!("failed to create jobs root '{}': {e}", cfg.jobs_root))?;
+    coop_exec::owner_only_dir(std::path::Path::new(&cfg.jobs_root))
+        .map_err(|e| format!("failed to lock down jobs root '{}': {e}", cfg.jobs_root))?;
+
     let state = AppState {
         cfg: Arc::new(cfg),
         store,

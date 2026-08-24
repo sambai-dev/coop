@@ -83,8 +83,8 @@ async fn spawn_app_with_root() -> (Router, String) {
         "sandbox resolved by server: {}",
         state.sandbox_mode.as_str()
     );
-    scheduler::spawn_workers(state, queue_rx);
     let cfg_jobs_root = state.cfg.jobs_root.clone();
+    scheduler::spawn_workers(state, queue_rx);
     (app, cfg_jobs_root)
 }
 
