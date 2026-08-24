@@ -1,5 +1,5 @@
 use crate::bus::WireEvent;
-use crate::routes::{JobView, SubmitResponse};
+use crate::routes::{JobView, ResultView, SubmitResponse};
 use axum::Json;
 use coop_types::{JobSpec, Limits};
 use utoipa::OpenApi;
@@ -11,8 +11,8 @@ use utoipa::OpenApi;
         version = crate::VERSION,
         description = "Self-hostable sandbox for AI agents. Submit code, stream output over WebSocket, replay any execution from the append-only event log.",
     ),
-    paths(crate::routes::submit, crate::routes::list_jobs, crate::routes::get_job, crate::routes::cancel_job, crate::routes::replay, crate::routes::metrics, crate::routes::status),
-    components(schemas(JobSpec, Limits, JobView, SubmitResponse, WireEvent))
+    paths(crate::routes::submit, crate::routes::list_jobs, crate::routes::get_job, crate::routes::cancel_job, crate::routes::replay, crate::routes::job_result, crate::routes::metrics, crate::routes::status),
+    components(schemas(JobSpec, Limits, JobView, ResultView, SubmitResponse, WireEvent))
 )]
 pub struct ApiDoc;
 

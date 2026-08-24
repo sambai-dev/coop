@@ -33,13 +33,17 @@ export interface CoopEvent {
 }
 
 export interface JobResult {
+  job_id?: string;
   status: string;
   exit_code?: number;
+  duration_ms?: number;
   stdout: string;
   stderr: string;
+  truncated?: boolean;
+  violations?: Record<string, unknown>[];
 }
 
-const TERMINAL = new Set(["succeeded", "failed", "timed_out", "oom_killed", "error"]);
+const TERMINAL = new Set(["succeeded", "failed", "timed_out", "oom_killed", "cancelled", "error"]);
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -97,6 +101,18 @@ export class Coop {
   }
 
   async result(jobId: string, timeoutMs = 60_000): Promise<JobResult> {
+    // One-call fast path: newer servers fold the event log into a flat
+    // result server-side and wait for us (202 = still running, partial).
+    try {
+      return await this.request(
+        "GET",
+        `/v1/jobs/${jobId}/result?wait_seconds=${Math.ceil(timeoutMs / 1000)}`,
+      );
+    } catch (err) {
+      const msg = String((err as Error)?.message ?? "");
+      if (!/: (404|405):/.test(msg)) throw err;
+      // Older server without /result: fall back to poll + replay.
+    }
     const view = await this.wait(jobId, timeoutMs);
     const events = await this.replay(jobId);
     const stdout: string[] = [];

@@ -116,6 +116,15 @@ fn python_available() -> bool {
         .unwrap_or(false)
 }
 
+fn bash_sleep_available() -> bool {
+    std::process::Command::new("bash")
+        .arg("-c")
+        .arg("command -v sleep")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 #[tokio::test]
 async fn rejects_missing_api_key() {
     let app = spawn_app().await;
@@ -410,4 +419,174 @@ async fn metrics_endpoint_reports_job_counts() {
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("coop_jobs_total"), "{text}");
     assert!(text.contains("coop_running_jobs"), "{text}");
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/jobs/{id}/result
+// ---------------------------------------------------------------------------
+
+async fn submit_bash(app: &Router, code: &str) -> String {
+    let payload =
+        serde_json::json!({ "language": "bash", "code": code, "limits": { "wall_seconds": 15 } })
+            .to_string();
+    let (status, body) = send(
+        app,
+        request("POST", "/v1/jobs", Some("test-key"), Some(payload)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    body["job_id"].as_str().expect("job_id").to_string()
+}
+
+#[tokio::test]
+async fn result_endpoint_folds_output_into_one_response() {
+    if !python_available() {
+        eprintln!("skipping: no python interpreter on PATH");
+        return;
+    }
+    let app = spawn_app().await;
+    let payload = serde_json::json!({
+        "language": "python",
+        "code": "print('out-line'); import sys; print('err-line', file=sys.stderr)",
+    })
+    .to_string();
+    let (status, body) = send(
+        &app,
+        request("POST", "/v1/jobs", Some("test-key"), Some(payload)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let job_id = body["job_id"].as_str().expect("job_id").to_string();
+
+    // Server-side wait: a single call must block until terminal and return
+    // the folded result.
+    let (status, body) = send(
+        &app,
+        request(
+            "GET",
+            &format!("/v1/jobs/{job_id}/result?wait_seconds=30"),
+            Some("test-key"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["job_id"], job_id);
+    assert_eq!(body["status"], "succeeded", "{body}");
+    assert_eq!(body["exit_code"], 0);
+    assert_eq!(body["stdout"], "out-line");
+    assert_eq!(body["stderr"], "err-line");
+    assert_eq!(body["truncated"], false);
+    assert!(body["violations"]
+        .as_array()
+        .expect("violations")
+        .is_empty());
+    assert!(body["duration_ms"].is_i64(), "{body}");
+}
+
+#[tokio::test]
+async fn result_is_tenant_scoped_and_404_for_unknown_jobs() {
+    let app = spawn_app().await;
+    let job_id = submit_bash(&app, "echo scoped").await;
+
+    // Another tenant must see a missing job, not someone else's result.
+    let (status, _) = send(
+        &app,
+        request(
+            "GET",
+            &format!("/v1/jobs/{job_id}/result"),
+            Some("other-key"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "cross-tenant result read must look like a missing job"
+    );
+
+    // Unknown ids look the same way.
+    let (status, _) = send(
+        &app,
+        request(
+            "GET",
+            "/v1/jobs/01a00000-0000-7000-8000-000000000000/result",
+            Some("test-key"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn result_with_zero_wait_returns_202_while_running() {
+    let app = spawn_app().await;
+    if !bash_sleep_available() {
+        eprintln!("skipping: no bash sleep on PATH");
+        return;
+    }
+    let job_id = submit_bash(&app, "sleep 5").await;
+
+    // A zero wait budget must return immediately with a partial view while
+    // the job is still running.
+    let started = std::time::Instant::now();
+    let (status, body) = send(
+        &app,
+        request(
+            "GET",
+            &format!("/v1/jobs/{job_id}/result?wait_seconds=0"),
+            Some("test-key"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    // Not terminal yet; whether the worker has already picked it up
+    // (`queued` vs `running`) is a scheduling race the test must not
+    // depend on.
+    assert!(
+        matches!(body["status"].as_str(), Some("queued" | "running")),
+        "{body}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "wait_seconds=0 must not block"
+    );
+}
+
+#[tokio::test]
+async fn result_waits_for_terminal_within_budget() {
+    if !python_available() {
+        eprintln!("skipping: no python interpreter on PATH");
+        return;
+    }
+    let app = spawn_app().await;
+    let payload = serde_json::json!({
+        "language": "python",
+        "code": "import time; time.sleep(1.5); print('late but done')",
+    })
+    .to_string();
+    let (status, body) = send(
+        &app,
+        request("POST", "/v1/jobs", Some("test-key"), Some(payload)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let job_id = body["job_id"].as_str().expect("job_id").to_string();
+
+    let (status, body) = send(
+        &app,
+        request(
+            "GET",
+            &format!("/v1/jobs/{job_id}/result?wait_seconds=30"),
+            Some("test-key"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "succeeded", "{body}");
+    assert_eq!(body["stdout"], "late but done");
 }

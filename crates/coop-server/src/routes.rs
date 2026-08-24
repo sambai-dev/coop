@@ -54,11 +54,43 @@ impl JobView {
     }
 }
 
+/// One-call job outcome for agent tool loops: the terminal view plus stdout /
+/// stderr folded out of the append-only event log server-side, so clients get
+/// a ready-to-use string instead of replaying raw events themselves.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ResultView {
+    pub job_id: String,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    #[schema(value_type = Option<i64>)]
+    pub duration_ms: Option<i64>,
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+    #[schema(value_type = Vec<Object>)]
+    pub violations: Vec<serde_json::Value>,
+}
+
+/// True when the job exists AND belongs to `tenant`. Foreign jobs are
+/// indistinguishable from missing ones (same IDOR posture as F-001).
+async fn owns_job(state: &AppState, id: &str, tenant: &str) -> bool {
+    matches!(
+        state.store.get_job(id).await,
+        Ok(Some(row)) if row.tenant == tenant
+    )
+}
+
+/// Server-side wait policy for GET /v1/jobs/{id}/result.
+const RESULT_DEFAULT_WAIT_SECONDS: u64 = 60;
+const RESULT_MAX_WAIT_SECONDS: u64 = 300;
+const RESULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/v1/jobs", post(submit).get(list_jobs))
         .route("/v1/jobs/{id}", get(get_job).delete(cancel_job))
         .route("/v1/jobs/{id}/replay", get(replay))
+        .route("/v1/jobs/{id}/result", get(job_result))
         .route("/v1/jobs/{id}/stream", get(stream))
         .route("/v1/metrics", get(metrics))
         .route("/v1/status", get(status))
@@ -165,19 +197,6 @@ pub async fn list_jobs(
         Ok(rows) => Json(rows.iter().map(JobView::from_row).collect::<Vec<_>>()).into_response(),
         Err(e) => internal_error("list jobs", e),
     }
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/jobs/{id}",
-    params(("id" = String, Path, description = "Job id")),
-    responses((status = 200, body = JobView), (status = 404), (status = 401))
-)]
-pub async fn owns_job(state: &AppState, id: &str, tenant: &str) -> bool {
-    matches!(
-        state.store.get_job(id).await,
-        Ok(Some(row)) if row.tenant == tenant
-    )
 }
 
 #[utoipa::path(
@@ -309,6 +328,108 @@ pub async fn replay(
         )
         .into_response(),
         Err(e) => internal_error("load events", e),
+    }
+}
+
+/// One-call outcome for agent tool loops: waits (server-side) for a terminal
+/// state and returns the view plus stdout/stderr folded out of the event log.
+/// `?wait_seconds=` caps the in-request wait (0 = return current state
+/// immediately); when the wait budget expires with the job still running the
+/// response is 202 with whatever has been produced so far.
+#[utoipa::path(
+    get,
+    path = "/v1/jobs/{id}/result",
+    params(
+        ("id" = String, Path, description = "Job id"),
+        ("wait_seconds" = Option<u64>, Query, description = "Max seconds to wait for a terminal state (0-300, default 60)")
+    ),
+    responses(
+        (status = 200, description = "Job reached a terminal state", body = ResultView),
+        (status = 202, description = "Still running when the wait budget expired; partial output included", body = ResultView),
+        (status = 404), (status = 401)
+    )
+)]
+pub async fn job_result(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<Tenant>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if !owns_job(&state, &id, &tenant.0).await {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let wait_seconds = params
+        .get("wait_seconds")
+        .and_then(|w| w.parse::<u64>().ok())
+        .unwrap_or(RESULT_DEFAULT_WAIT_SECONDS)
+        .min(RESULT_MAX_WAIT_SECONDS);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_seconds);
+    let row = loop {
+        match state.store.get_job(&id).await {
+            Ok(Some(row)) => {
+                let terminal = JobStatus::parse(&row.status).is_some_and(|s| s.is_terminal());
+                if terminal || tokio::time::Instant::now() >= deadline {
+                    break row;
+                }
+            }
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(e) => return internal_error("load job for result", e),
+        }
+        tokio::time::sleep(RESULT_POLL_INTERVAL).await;
+    };
+
+    match state.store.events_for(&id).await {
+        Ok(events) => {
+            let view = fold_result(&row, &events);
+            let code = if JobStatus::parse(&row.status).is_some_and(|s| s.is_terminal()) {
+                StatusCode::OK
+            } else {
+                StatusCode::ACCEPTED
+            };
+            (code, Json(view)).into_response()
+        }
+        Err(e) => internal_error("load events for result", e),
+    }
+}
+
+/// Fold an ordered event list into a flat result: stdout/stderr joined
+/// line-wise, truncation flag, and every sandbox violation raised during the
+/// run. Deterministic over the replayable log — no live state involved.
+fn fold_result(row: &JobRow, events: &[coop_store::EventRow]) -> ResultView {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut truncated = false;
+    let mut violations = Vec::new();
+    for event in events {
+        match event.kind.as_str() {
+            "stdout" | "stderr" => {
+                if let Some(line) = event.data.get("line").and_then(serde_json::Value::as_str) {
+                    if event.kind == "stdout" {
+                        stdout.push(line);
+                    } else {
+                        stderr.push(line);
+                    }
+                }
+            }
+            "truncated" => truncated = true,
+            "violation" => violations.push(event.data.clone()),
+            _ => {}
+        }
+    }
+    ResultView {
+        job_id: row.job_id.clone(),
+        status: row.status.clone(),
+        exit_code: row.exit_code,
+        duration_ms: match (row.started_at_ms, row.finished_at_ms) {
+            (Some(started), Some(finished)) => Some(finished - started),
+            _ => None,
+        },
+        stdout: stdout.join("\n"),
+        stderr: stderr.join("\n"),
+        truncated,
+        violations,
     }
 }
 
@@ -458,6 +579,76 @@ async fn dashboard() -> Html<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coop_store::EventRow;
+
+    fn event(seq: i64, kind: &str, data: serde_json::Value) -> EventRow {
+        EventRow {
+            seq,
+            ts_ms: seq * 10,
+            kind: kind.to_string(),
+            data,
+        }
+    }
+
+    fn line(n: i64, stream: &str, text: &str) -> EventRow {
+        event(n, stream, serde_json::json!({ "line": text }))
+    }
+
+    fn row(
+        status: &str,
+        started: Option<i64>,
+        finished: Option<i64>,
+        exit_code: Option<i32>,
+    ) -> JobRow {
+        JobRow {
+            job_id: "job-1".into(),
+            tenant: "t1".into(),
+            language: "python".into(),
+            status: status.into(),
+            created_at_ms: 1,
+            started_at_ms: started,
+            finished_at_ms: finished,
+            exit_code,
+            spec_json: "{}".into(),
+        }
+    }
+
+    #[test]
+    fn fold_result_joins_streams_flags_and_violations() {
+        let r = row("succeeded", Some(10), Some(45), Some(0));
+        let events = vec![
+            event(1, "started", serde_json::json!({})),
+            line(2, "stdout", "one"),
+            line(3, "stderr", "boom"),
+            line(4, "stdout", "two"),
+            event(5, "truncated", serde_json::json!({"stream": "stdout"})),
+            event(
+                6,
+                "violation",
+                serde_json::json!({"rule": "wall_clock_exceeded"}),
+            ),
+            event(7, "finished", serde_json::json!({"status": "succeeded"})),
+        ];
+        let v = fold_result(&r, &events);
+        assert_eq!(v.status, "succeeded");
+        assert_eq!(v.exit_code, Some(0));
+        assert_eq!(v.duration_ms, Some(35));
+        assert_eq!(v.stdout, "one\ntwo");
+        assert_eq!(v.stderr, "boom");
+        assert!(v.truncated);
+        assert_eq!(v.violations.len(), 1);
+        assert_eq!(v.violations[0]["rule"], "wall_clock_exceeded");
+    }
+
+    #[test]
+    fn fold_result_empty_log_yields_empty_fields_and_no_duration() {
+        let v = fold_result(&row("running", None, None, None), &[]);
+        assert_eq!(v.stdout, "");
+        assert_eq!(v.stderr, "");
+        assert!(!v.truncated);
+        assert!(v.violations.is_empty());
+        assert_eq!(v.duration_ms, None);
+    }
 
     #[tokio::test]
     async fn healthz_payload_is_status_only() {

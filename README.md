@@ -53,8 +53,9 @@ curl -s -X POST localhost:7300/v1/jobs \
 ```
 
 ```bash
-curl -s localhost:7300/v1/jobs/<id>        -H "Authorization: Bearer dev-key"   # status + exit code
-curl -s localhost:7300/v1/jobs/<id>/replay -H "Authorization: Bearer dev-key"   # full event history
+curl -s localhost:7300/v1/jobs/<id>        -H "Authorization: Bearer ***"   # status + exit code
+curl -s localhost:7300/v1/jobs/<id>/replay -H "Authorization: Bearer ***"   # full event history
+curl -s "localhost:7300/v1/jobs/<id>/result?wait_seconds=60" -H "Authorization: Bearer ***"   # one-call result for agents
 websocat "localhost:7300/v1/jobs/<id>/stream?key=dev-key"                       # live stdout/stderr frames
 ```
 
@@ -168,23 +169,27 @@ All endpoints require `Authorization: Bearer <key>` (or `?key=` for browser WebS
 | POST | `/v1/jobs` | submit `{language, code, stdin?, limits?}` → `201 {job_id}` |
 | GET | `/v1/jobs?limit=` | list your tenant's recent jobs |
 | GET | `/v1/jobs/{id}` | job view (status, exit code, timestamps) |
+| DELETE | `/v1/jobs/{id}` | cancel a queued/running job (409 if already terminal) |
 | GET | `/v1/jobs/{id}/replay` | full ordered event list |
+| GET | `/v1/jobs/{id}/result` | one-call outcome: waits up to `?wait_seconds=` (0-300, default 60), folds stdout/stderr/violations into `{status, exit_code, duration_ms, stdout, stderr, truncated, violations}`; `200` when terminal, `202` with partial output if the wait budget expires |
 | GET | `/v1/jobs/{id}/stream` | WebSocket: history + live events |
-| GET | `/healthz` | version + active sandbox mode |
+| GET | `/v1/metrics` | Prometheus text format (job counts, running jobs) |
+| GET | `/healthz` | liveness (`{"ok":true}`, no auth) |
+| GET | `/v1/status` | version + active sandbox mode |
 
-Statuses: `queued → running → succeeded | failed | timed_out | oom_killed | error`.
+Statuses: `queued → running → succeeded | failed | timed_out | oom_killed | cancelled | error`.
 
 Languages: `python`, `node`, `bash` (interpreter binaries configurable via env).
 
 ## Wiring it to an agent
 
-The point of Coop is being the place your agent's code actually runs. The loop is four lines on either side:
+The point of Coop is being the place your agent's code actually runs. The loop is one call on either side:
 
 ```
 ┌──────────────┐   "run this python"   ┌─────────────────┐
 │  Your agent  │ ────────────────────▶ │      Coop       │
 │ (any LLM/    │ ◀──────────────────── │ sandbox + audit │
-│  framework)  │    stream / result     └─────────────────┘
+│  framework)  │    one-call result     └─────────────────┘
 └──────────────┘
 ```
 
@@ -196,7 +201,7 @@ coop = Coop("http://sandbox.internal:7300", "tenant-key")
 
 def run_agent_code(code: str) -> str:
     job = coop.submit("python", code, limits={"wall_seconds": 30, "mem_mb": 256})
-    return coop.result(job["job_id"])          # blocks until terminal state
+    return coop.result(job["job_id"])          # one call: waits + returns {status, exit_code, stdout, stderr}
 
 # wherever your tool-calling loop executes code:
 #   tool_output = run_agent_code(llm_tool_call["code"])
@@ -274,6 +279,9 @@ We publish the harness instead of cherry-picked screenshots. Replace this table 
 | `COOP_WORKERS` | `4` | executor worker tasks |
 | `COOP_TENANT_CONCURRENCY` | `2` | max parallel jobs per tenant |
 | `COOP_RATE_PER_MIN` | `120` | requests/min per tenant |
+| `COOP_RETENTION_HOURS` | `168` | delete terminal jobs (and events) older than this; `0` disables sweeping |
+| `COOP_SWEEP_INTERVAL_SECS` | `3600` | seconds between retention sweeps |
+| `COOP_ENV` | unset | `prod`/`production`/`release` enables production fail-fast checks (require real API keys, refuse to boot without sandbox) |
 | `COOP_SANDBOX` | `auto` | `auto` \| `ns` \| `off` |
 | `COOP_JOBS_ROOT` | `/var/lib/coop/jobs` (Linux) | scratch dir for job scripts; must live outside any tmpfs the sandbox overlays |
 | `COOP_PYTHON` / `COOP_NODE` / `COOP_BASH` | PATH lookup | interpreter overrides |

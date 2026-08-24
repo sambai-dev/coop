@@ -3,7 +3,7 @@ import time
 import urllib.error
 import urllib.request
 
-TERMINAL = {"succeeded", "failed", "timed_out", "oom_killed", "error"}
+TERMINAL = {"succeeded", "failed", "timed_out", "oom_killed", "cancelled", "error"}
 
 
 class CoopError(RuntimeError):
@@ -62,6 +62,16 @@ class Coop:
         raise TimeoutError(f"job {job_id} still running after {timeout}s")
 
     def result(self, job_id, timeout=60.0):
+        # One-call fast path: newer servers fold the event log into a flat
+        # result server-side and wait for us (202 = still running, partial).
+        try:
+            return self._request(
+                "GET", f"/v1/jobs/{job_id}/result?wait_seconds={int(timeout)}"
+            )
+        except CoopError as e:
+            if e.status not in (404, 405):
+                raise
+            # Older server without /result: fall back to poll + replay.
         view = self.wait(job_id, timeout=timeout)
         stdout, stderr = [], []
         for event in self.replay(job_id):
