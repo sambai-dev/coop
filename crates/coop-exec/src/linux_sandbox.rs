@@ -144,6 +144,7 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
             let sctx = SuperviseCtx {
                 child,
                 sink,
+                cancel: ctx.cancel.clone(),
                 cg_dir: cg_guard.disarm(),
                 limits: ctx.limits,
                 oom_before,
@@ -378,11 +379,24 @@ impl LineRouter<'_> {
 struct SuperviseCtx {
     child: nix::unistd::Pid,
     sink: Arc<dyn Sink>,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     cg_dir: PathBuf,
     limits: Limits,
     oom_before: u64,
     started: Instant,
     setup_lines: Lines<BufReader<tokio::net::UnixStream>>,
+}
+
+impl SuperviseCtx {
+    /// Cancellation parity with the `naive` backend: the scheduler registers
+    /// this flag per running job and the DELETE endpoint flips it; checked
+    /// every supervisor poll tick.
+    #[inline]
+    fn is_cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 /// F5: what the child reported over the setup socket. `stage` is a canonical,
