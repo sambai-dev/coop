@@ -68,6 +68,7 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
     let mut counts = (0usize, 0usize);
     let mut truncated = false;
     let mut timed_out = false;
+    let mut cancelled = false;
     let mut killed_on_timeout = false;
     let mut reaped: Option<std::process::ExitStatus> = None;
     let mut rx_closed = false;
@@ -119,7 +120,17 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
                     );
                 }
                 Ok(None) => {
-                    if !killed_on_timeout && std::time::Instant::now() >= wall_deadline {
+                    // Cancellation beats the wall clock: kill the whole group
+                    // immediately and classify the run as cancelled.
+                    if ctx.is_cancelled() && !killed_on_timeout {
+                        killed_on_timeout = true;
+                        cancelled = true;
+                        sink.violation("job_cancelled", serde_json::json!({
+                            "wall_seconds": ctx.limits.wall_seconds
+                        }));
+                        kill_process_group(child_pid);
+                        let _ = child.start_kill();
+                    } else if !killed_on_timeout && std::time::Instant::now() >= wall_deadline {
                         killed_on_timeout = true;
                         timed_out = true;
                         sink.violation("wall_clock_exceeded", serde_json::json!({
@@ -139,7 +150,21 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
         Some(status) => status,
         None => child.wait().await?,
     };
-    Ok(classify(status.code(), unix_signal(&status), timed_out))
+    if timed_out {
+        return Ok(ExecOutcome {
+            status: OutcomeStatus::TimedOut,
+            exit_code: status.code(),
+            killed_by: Some("wall-clock".into()),
+        });
+    }
+    if cancelled {
+        return Ok(ExecOutcome {
+            status: OutcomeStatus::Cancelled,
+            exit_code: status.code().or(unix_signal(&status)),
+            killed_by: Some("cancelled".into()),
+        });
+    }
+    Ok(classify(status.code(), unix_signal(&status), false))
 }
 
 /// N-2: once the channel is closed (`done`), park forever instead of spinning

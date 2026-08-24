@@ -24,6 +24,11 @@ pub struct AppState {
     pub tenant_sems: Arc<DashMap<String, Arc<Semaphore>>>,
     pub rate: Arc<ratelimit::RateLimiter>,
     pub sandbox_mode: coop_exec::SandboxMode,
+    /// Cancellation flags for RUNNING jobs, keyed by job id. The scheduler
+    /// inserts a flag when a job starts executing; the cancel endpoint flips
+    /// it and the executor's poll loop acts on it within one tick (~20 ms).
+    /// Entries are removed when the job finishes.
+    pub cancels: Arc<DashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 pub fn build_app(
@@ -43,6 +48,7 @@ pub fn build_app(
         tenant_sems: Arc::new(DashMap::new()),
         rate: Arc::new(ratelimit::RateLimiter::new(rate_per_min)),
         sandbox_mode,
+        cancels: Arc::new(DashMap::new()),
     };
 
     tracing::debug!(

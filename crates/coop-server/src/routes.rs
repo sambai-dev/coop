@@ -57,9 +57,10 @@ impl JobView {
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/v1/jobs", post(submit).get(list_jobs))
-        .route("/v1/jobs/{id}", get(get_job))
+        .route("/v1/jobs/{id}", get(get_job).delete(cancel_job))
         .route("/v1/jobs/{id}/replay", get(replay))
         .route("/v1/jobs/{id}/stream", get(stream))
+        .route("/v1/metrics", get(metrics))
         .route("/v1/status", get(status))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -195,6 +196,89 @@ pub async fn get_job(
         Ok(_) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => internal_error("get job", e),
     }
+}
+
+/// Cancel a job. Running jobs are killed (whole process group) within one
+/// executor poll tick and finish as `cancelled`; queued jobs are marked
+/// `cancelled` immediately so the scheduler skips them. Idempotent: an
+/// already-terminal job returns 409 with its current status.
+#[utoipa::path(
+    delete,
+    path = "/v1/jobs/{id}",
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, description = "Cancellation accepted"),
+        (status = 404, description = "Unknown or foreign job"),
+        (status = 409, description = "Job already in a terminal state"),
+        (status = 401, description = "Missing or invalid API key")
+    )
+)]
+pub async fn cancel_job(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<Tenant>,
+    Path(id): Path<String>,
+) -> Response {
+    let row = match state.store.get_job(&id).await {
+        Ok(Some(row)) if row.tenant == tenant.0 => row,
+        Ok(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return internal_error("load job for cancel", e),
+    };
+
+    match JobStatus::parse(&row.status) {
+        Some(status) if status.is_terminal() => {
+            // Idempotency guard: cancelling a finished job is a caller error,
+            // not a silent success.
+            return (StatusCode::CONFLICT, format!("job already {}", row.status)).into_response();
+        }
+        _ => {}
+    }
+
+    if let Some(flag) = state.cancels.get(&id) {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(job_id = %id, tenant = %tenant.0, "job cancellation requested");
+        return StatusCode::OK.into_response();
+    }
+
+    // No flag means the job is queued but not yet picked up by a worker.
+    // Finalize it directly; the worker will see a terminal status when it
+    // loads the row and bail out before executing anything.
+    if let Err(e) = state.store.finish(&id, "cancelled", None).await {
+        return internal_error("cancel queued job", e);
+    }
+    tracing::info!(job_id = %id, tenant = %tenant.0, "queued job cancelled");
+    StatusCode::OK.into_response()
+}
+
+/// Prometheus text-format metrics derived from the job store plus live
+/// executor state. No per-tenant labels here: this endpoint is for ops
+/// dashboards, not per-customer billing.
+#[utoipa::path(
+    get,
+    path = "/v1/metrics",
+    responses((status = 200, description = "Prometheus text format"), (status = 401))
+)]
+pub async fn metrics(State(state): State<AppState>) -> Response {
+    let mut body = String::with_capacity(512);
+    body.push_str("# HELP coop_jobs_total Total jobs by status.\n");
+    body.push_str("# TYPE coop_jobs_total counter\n");
+    match state.store.count_by_status().await {
+        Ok(rows) => {
+            for (status, n) in rows {
+                body.push_str(&format!("coop_jobs_total{{status=\"{status}\"}} {n}\n"));
+            }
+        }
+        Err(e) => return internal_error("count jobs for metrics", e),
+    }
+    body.push_str(&format!(
+        "# HELP coop_running_jobs Jobs currently executing.\n# TYPE coop_running_jobs gauge\ncoop_running_jobs {}\n",
+        state.cancels.len()
+    ));
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4")],
+        body,
+    )
+        .into_response()
 }
 
 #[utoipa::path(

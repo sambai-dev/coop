@@ -39,6 +39,20 @@ pub struct ExecContext {
     pub limits: Limits,
     pub workdir: PathBuf,
     pub interpreter_override: Option<String>,
+    /// Cancellation signal. When the referenced flag flips to true, the
+    /// executor kills the job (whole process group) at its next poll tick
+    /// and reports `OutcomeStatus::Cancelled`. Cloned freely; a missing
+    /// token simply means "never cancelled".
+    pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl ExecContext {
+    #[inline]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -74,6 +74,7 @@ async fn naive_mode_does_not_leak_host_env_to_jobs() {
         limits: Limits::default(),
         workdir: workdir.clone(),
         interpreter_override: Some(find_bash().to_string_lossy().into_owned()),
+        cancel: None,
     };
 
     let outcome = execute(ctx, sink.clone(), SandboxMode::Off)

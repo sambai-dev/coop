@@ -67,6 +67,7 @@ pub enum JobStatus {
     Failed,
     TimedOut,
     OomKilled,
+    Cancelled,
     Error,
 }
 
@@ -79,6 +80,7 @@ impl JobStatus {
             JobStatus::Failed => "failed",
             JobStatus::TimedOut => "timed_out",
             JobStatus::OomKilled => "oom_killed",
+            JobStatus::Cancelled => "cancelled",
             JobStatus::Error => "error",
         }
     }
@@ -91,6 +93,7 @@ impl JobStatus {
             "failed" => JobStatus::Failed,
             "timed_out" => JobStatus::TimedOut,
             "oom_killed" => JobStatus::OomKilled,
+            "cancelled" => JobStatus::Cancelled,
             "error" => JobStatus::Error,
             _ => return None,
         })
@@ -107,6 +110,7 @@ pub enum OutcomeStatus {
     Failed,
     TimedOut,
     OomKilled,
+    Cancelled,
 }
 
 impl From<OutcomeStatus> for JobStatus {
@@ -116,6 +120,7 @@ impl From<OutcomeStatus> for JobStatus {
             OutcomeStatus::Failed => JobStatus::Failed,
             OutcomeStatus::TimedOut => JobStatus::TimedOut,
             OutcomeStatus::OomKilled => JobStatus::OomKilled,
+            OutcomeStatus::Cancelled => JobStatus::Cancelled,
         }
     }
 }

@@ -9,7 +9,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-const TERMINAL: [&str; 5] = ["succeeded", "failed", "timed_out", "oom_killed", "error"];
+const TERMINAL: [&str; 6] = [
+    "succeeded",
+    "failed",
+    "timed_out",
+    "oom_killed",
+    "cancelled",
+    "error",
+];
 
 fn test_config(db: &std::path::Path) -> Config {
     let mut api_keys = HashMap::new();
@@ -30,6 +37,8 @@ fn test_config(db: &std::path::Path) -> Config {
         python_bin: None,
         node_bin: None,
         bash_bin: None,
+        retention_hours: 0,
+        sweep_interval_secs: 3600,
     }
 }
 
@@ -235,4 +244,170 @@ async fn runs_python_hello_world_end_to_end() {
         .collect();
     assert!(kinds.contains(&"started"));
     assert!(kinds.contains(&"finished"));
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation (DELETE /v1/jobs/{id})
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cancel_queued_job_finalizes_without_execution() {
+    let app = spawn_app().await;
+    let (status, body) = send(
+        &app,
+        request(
+            "POST",
+            "/v1/jobs",
+            Some("test-key"),
+            Some(r#"{"language":"bash","code":"echo should-never-run","limits":{"wall_seconds":30}}"#.into()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let job_id = body["job_id"].as_str().expect("job_id").to_string();
+
+    let (status, _) = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/v1/jobs/{job_id}"),
+            Some("test-key"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The job must reach a terminal `cancelled` state without running.
+    let view = wait_terminal(&app, &job_id).await;
+    assert_eq!(view["status"], "cancelled", "{view}");
+
+    // Cancelling again is a 409 (idempotency guard), not a silent success.
+    let (status, _) = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/v1/jobs/{job_id}"),
+            Some("test-key"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn cancel_running_job_kills_it_before_wall_clock() {
+    let app = spawn_app().await;
+    let (status, body) = send(
+        &app,
+        request(
+            "POST",
+            "/v1/jobs",
+            Some("test-key"),
+            Some(r#"{"language":"bash","code":"sleep 60","limits":{"wall_seconds":60}}"#.into()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let job_id = body["job_id"].as_str().expect("job_id").to_string();
+
+    // Wait until it is actually running so we exercise the kill path, not
+    // the queued-skip path.
+    for _ in 0..100 {
+        let (_, v) = send(
+            &app,
+            request("GET", &format!("/v1/jobs/{job_id}"), Some("test-key"), None),
+        )
+        .await;
+        if v["status"] == "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let started = std::time::Instant::now();
+    let (status, _) = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/v1/jobs/{job_id}"),
+            Some("test-key"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let view = wait_terminal(&app, &job_id).await;
+    assert_eq!(view["status"], "cancelled", "{view}");
+    // Must be cancelled far before the 60s wall clock.
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "cancel took too long: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn cancel_is_tenant_scoped() {
+    let app = spawn_app().await;
+    let (_, body) = send(
+        &app,
+        request(
+            "POST",
+            "/v1/jobs",
+            Some("test-key"),
+            Some(r#"{"language":"bash","code":"echo t1","limits":{"wall_seconds":15}}"#.into()),
+        ),
+    )
+    .await;
+    let job_id = body["job_id"].as_str().expect("job_id").to_string();
+
+    // Tenant t2 cannot see or cancel tenant t1's job.
+    let (status, _) = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/v1/jobs/{job_id}"),
+            Some("other-key"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn metrics_endpoint_reports_job_counts() {
+    let app = spawn_app().await;
+    send(
+        &app,
+        request(
+            "POST",
+            "/v1/jobs",
+            Some("test-key"),
+            Some(r#"{"language":"bash","code":"echo hi","limits":{"wall_seconds":15}}"#.into()),
+        ),
+    )
+    .await;
+
+    let res = app
+        .clone()
+        .oneshot(request("GET", "/v1/metrics", Some("test-key"), None))
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    let ct = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.starts_with("text/plain"), "content-type was {ct}");
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("coop_jobs_total"), "{text}");
+    assert!(text.contains("coop_running_jobs"), "{text}");
 }

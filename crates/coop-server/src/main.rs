@@ -36,7 +36,22 @@ async fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     });
+
+    // Boot recovery: jobs left queued/running by a previous process lifetime
+    // can never finish — mark them error so listings and tenant accounting
+    // start clean. Logged loudly because it usually means the last shutdown
+    // was a crash.
+    match state.store.recover_stale_running().await {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            recovered = n,
+            "marked stale queued/running jobs from previous process as error"
+        ),
+        Err(e) => tracing::error!(error = %e, "boot recovery sweep failed"),
+    }
+
     scheduler::spawn_workers(state.clone(), queue_rx);
+    scheduler::spawn_retention_sweeper(state.clone());
 
     let addr = state.cfg.addr.clone();
     let listener = TcpListener::bind(&addr).await.expect("failed to bind");

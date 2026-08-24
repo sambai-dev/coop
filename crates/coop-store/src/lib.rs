@@ -204,6 +204,73 @@ impl Store {
         Ok(rows.into_iter().map(Self::row_to_job).collect())
     }
 
+    /// Count jobs grouped by status (all tenants). Used by the metrics
+    /// endpoint; cheap on the small SQLite event store.
+    pub async fn count_by_status(&self) -> StoreResult<Vec<(String, i64)>> {
+        let rows =
+            sqlx::query("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status ORDER BY status")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get::<String, _>("status"), r.get::<i64, _>("n")))
+            .collect())
+    }
+
+    /// Retention sweep: delete terminal jobs older than `max_age_ms` and
+    /// their events, then reclaim space. Returns (jobs_deleted, events_deleted).
+    pub async fn prune_older_than(&self, max_age_ms: i64) -> StoreResult<(u64, u64)> {
+        let cutoff = now_ms() - max_age_ms;
+        let mut tx = self.pool.begin().await?;
+        // Event rows first (child rows by creation time; events inherit the
+        // job's age via its row, so select the ids being deleted).
+        let expired: Vec<String> = sqlx::query(
+            "SELECT job_id FROM jobs WHERE status IN ('succeeded','failed','timed_out','oom_killed','cancelled','error')
+             AND created_at_ms < ?1",
+        )
+        .bind(cutoff)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .map(|r| r.get("job_id"))
+        .collect();
+        if expired.is_empty() {
+            tx.rollback().await?;
+            return Ok((0, 0));
+        }
+        let placeholders = expired.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let event_sql = format!("DELETE FROM events WHERE job_id IN ({placeholders})");
+        let mut q = sqlx::query(&event_sql);
+        for id in &expired {
+            q = q.bind(id);
+        }
+        let events_deleted = q.execute(&mut *tx).await?.rows_affected();
+        let job_sql = format!("DELETE FROM jobs WHERE job_id IN ({placeholders})");
+        let mut q = sqlx::query(&job_sql);
+        for id in &expired {
+            q = q.bind(id);
+        }
+        let jobs_deleted = q.execute(&mut *tx).await?.rows_affected();
+        tx.commit().await?;
+        Ok((jobs_deleted, events_deleted))
+    }
+
+    /// Boot recovery: any job stuck in a non-terminal state from a previous
+    /// process lifetime is marked `error`. A crashed server cannot finish or
+    /// cancel them anymore, and leaving them running would poison tenant
+    /// concurrency accounting on restart.
+    pub async fn recover_stale_running(&self) -> StoreResult<u64> {
+        let now = now_ms();
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'error', exit_code = NULL, finished_at_ms = ?2
+             WHERE status IN ('queued','running')",
+        )
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     fn row_to_job(r: sqlx::sqlite::SqliteRow) -> JobRow {
         JobRow {
             job_id: r.get("job_id"),

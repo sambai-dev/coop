@@ -436,6 +436,7 @@ async fn supervise(
     let mut setup_done = false;
     let mut bootstrap_failure: Option<BootstrapFailure> = None;
     let mut drain_deadline: Option<Instant> = None;
+    let mut cancelled = false;
 
     while reaped.is_none() || !out_done || !err_done || !setup_done {
         let drain_guard = async {
@@ -477,7 +478,17 @@ async fn supervise(
 
             polled = poll_status(ctx.child, reaped.is_some()) => match polled.expect("not pending") {
                 Ok(WaitStatus::StillAlive) => {
-                    if !killed_on_timeout && Instant::now() >= deadline {
+                    // Cancellation beats the wall clock: kill the whole group
+                    // now and classify the run as cancelled.
+                    if !killed_on_timeout && ctx.is_cancelled() {
+                        killed_on_timeout = true;
+                        cancelled = true;
+                        ctx.sink.violation(
+                            "job_cancelled",
+                            json!({"wall_seconds": ctx.limits.wall_seconds}),
+                        );
+                        let _ = kill(neg_pid(ctx.child), Signal::SIGKILL);
+                    } else if !killed_on_timeout && Instant::now() >= deadline {
                         killed_on_timeout = true;
                         ctx.sink.violation(
                             "wall_clock_exceeded",
@@ -535,6 +546,7 @@ async fn supervise(
         ctx.limits,
         oom_after > ctx.oom_before,
         killed_on_timeout,
+        cancelled,
         ctx.sink.as_ref(),
     ))
 }
@@ -544,6 +556,7 @@ fn classify(
     limits: Limits,
     oom: bool,
     killed_on_timeout: bool,
+    cancelled: bool,
     sink: &dyn Sink,
 ) -> ExecOutcome {
     match status {
@@ -563,6 +576,12 @@ fn classify(
                     status: OutcomeStatus::OomKilled,
                     exit_code: None,
                     killed_by: Some("cgroup-oom".into()),
+                }
+            } else if cancelled && sig == Signal::SIGKILL {
+                ExecOutcome {
+                    status: OutcomeStatus::Cancelled,
+                    exit_code: None,
+                    killed_by: Some("cancelled".into()),
                 }
             } else if killed_on_timeout && sig == Signal::SIGKILL {
                 ExecOutcome {

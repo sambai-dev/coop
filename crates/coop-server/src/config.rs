@@ -15,6 +15,11 @@ pub struct Config {
     pub python_bin: Option<String>,
     pub node_bin: Option<String>,
     pub bash_bin: Option<String>,
+    /// F-009 retention: delete terminal jobs (and their events) older than
+    /// this many hours. 0 disables sweeping entirely.
+    pub retention_hours: u64,
+    /// Seconds between retention sweeps.
+    pub sweep_interval_secs: u64,
 }
 
 impl std::fmt::Debug for Config {
@@ -138,6 +143,13 @@ impl Config {
             python_bin: getenv("COOP_PYTHON"),
             node_bin: getenv("COOP_NODE"),
             bash_bin: getenv("COOP_BASH"),
+            retention_hours: env_or(getenv, "COOP_RETENTION_HOURS", "168")
+                .parse()
+                .unwrap_or(168),
+            sweep_interval_secs: env_or(getenv, "COOP_SWEEP_INTERVAL_SECS", "3600")
+                .parse()
+                .unwrap_or(3600)
+                .max(60),
         })
     }
 

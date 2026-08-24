@@ -1,9 +1,10 @@
 use crate::bus::WireEvent;
 use crate::AppState;
 use coop_exec::{ExecContext, Sink, Stream};
-use coop_types::JobSpec;
+use coop_types::{JobSpec, JobStatus};
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Semaphore};
 
 enum Op {
@@ -68,6 +69,14 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
         }
     };
 
+    // A cancelled-while-queued job arrives here after the DELETE endpoint
+    // already finalized it. Skip silently; do not consume a worker slot.
+    if let Some(status) = JobStatus::parse(&row.status) {
+        if status.is_terminal() {
+            return;
+        }
+    }
+
     let spec: JobSpec = match serde_json::from_str(&row.spec_json) {
         Ok(spec) => spec,
         Err(e) => {
@@ -91,6 +100,14 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
     let pump = tokio::spawn(pump_events(state.clone(), job_id.clone(), op_rx));
 
     op_tx.send(Op::Started).ok();
+
+    // Cancellation: register a flag for the running job; the DELETE endpoint
+    // flips it and the executor's poll loop (20 ms tick) acts on it. Removed
+    // on every exit path so the map cannot grow unbounded.
+    let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state
+        .cancels
+        .insert(job_id.clone(), Arc::clone(&cancel_flag));
 
     let workdir = std::path::PathBuf::from(&state.cfg.jobs_root).join(format!("job-{job_id}"));
     // N-1: workdirs hold tenant source and artifacts; mode 0700 (no-op off
@@ -116,6 +133,7 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
         limits: spec.limits.clamped(),
         workdir: workdir.clone(),
         interpreter_override: state.cfg.interpreter_override(&spec.language),
+        cancel: Some(cancel_flag),
     };
 
     tracing::info!(
@@ -169,6 +187,7 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
 
     drop(permit);
     let _ = tokio::fs::remove_dir_all(&workdir).await;
+    state.cancels.remove(&job_id);
     pump.await.ok();
 }
 
@@ -198,6 +217,38 @@ fn finish_via(
     })
     .ok();
     drop(tx);
+}
+
+/// F-009 retention: periodically delete terminal jobs older than
+/// `retention_hours` together with their events. A no-op when retention is
+/// disabled (0). Errors are logged and swept again next interval — a failed
+/// sweep must never take the server down.
+pub fn spawn_retention_sweeper(state: AppState) {
+    if state.cfg.retention_hours == 0 {
+        tracing::info!("retention disabled (COOP_RETENTION_HOURS=0); event log grows unbounded");
+        return;
+    }
+    let max_age_ms = (state.cfg.retention_hours * 3600 * 1000) as i64;
+    let interval = Duration::from_secs(state.cfg.sweep_interval_secs);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await; // first tick fires immediately; skip it
+        loop {
+            ticker.tick().await;
+            match state.store.prune_older_than(max_age_ms).await {
+                Ok((jobs, events)) if jobs > 0 => {
+                    tracing::info!(
+                        jobs_deleted = jobs,
+                        events_deleted = events,
+                        "retention sweep pruned expired jobs"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "retention sweep failed"),
+            }
+        }
+    });
 }
 
 fn short_key(job_id: &str) -> String {
