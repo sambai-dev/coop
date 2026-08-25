@@ -37,6 +37,21 @@ impl Sink for JobSink {
     }
 }
 
+/// RAII guard for the per-job cancellation flag (deep-hunt #4). Every early
+/// return after the flag is registered must remove it, otherwise the map and
+/// the `coop_running_jobs` gauge grow forever. The guard is disarmed by
+/// forgetting or dropping after an explicit remove in the normal path.
+struct CancelGuard {
+    map: Arc<dashmap::DashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    job_id: String,
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.map.remove(&self.job_id);
+    }
+}
+
 pub fn spawn_workers(state: AppState, rx: mpsc::Receiver<String>) {
     let rx = Arc::new(tokio::sync::Mutex::new(rx));
     for worker_id in 0..state.cfg.workers {
@@ -92,8 +107,19 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
         Err(_) => return,
     };
 
-    if let Err(e) = state.store.set_started(&job_id).await {
-        tracing::error!(error = %e, "could not mark job started");
+    // Deep-hunt fix (#3): conditional transition so a concurrent cancel
+    // cannot be overwritten. The old `set_started` was unconditional and
+    // turned a just-cancelled row back to `running`.
+    match state.store.set_started_if_queued(&job_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(job_id = %job_id, "job was cancelled while queued — skipping execution");
+            return;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, job_id = %job_id, "could not mark job started");
+            return;
+        }
     }
 
     let (op_tx, op_rx) = mpsc::unbounded_channel::<Op>();
@@ -102,12 +128,20 @@ async fn handle_job(state: AppState, job_id: String, worker_id: usize) {
     op_tx.send(Op::Started).ok();
 
     // Cancellation: register a flag for the running job; the DELETE endpoint
-    // flips it and the executor's poll loop (20 ms tick) acts on it. Removed
-    // on every exit path so the map cannot grow unbounded.
-    let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    state
+    // flips it and the executor's poll loop (20 ms tick) acts on it. The
+    // entry API keeps a concurrently-installed cancellation (`true`) intact;
+    // the `CancelGuard` guarantees removal on *every* exit path (including
+    // workdir creation failure and panics in `execute`), fixing the leak
+    // class F-003 called out in the audit.
+    let cancel_flag = state
         .cancels
-        .insert(job_id.clone(), Arc::clone(&cancel_flag));
+        .entry(job_id.clone())
+        .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        .clone();
+    let _cancel_guard = CancelGuard {
+        map: Arc::clone(&state.cancels),
+        job_id: job_id.clone(),
+    };
 
     let workdir = std::path::PathBuf::from(&state.cfg.jobs_root).join(format!("job-{job_id}"));
     // N-1: workdirs hold tenant source and artifacts; mode 0700 (no-op off

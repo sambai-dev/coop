@@ -174,3 +174,26 @@ pub fn owner_only_file(path: &Path) -> io::Result<()> {
         Ok(())
     }
 }
+
+/// Create-or-truncate `path` and write `bytes`, applying mode 0600 *at
+/// creation time* on unix. Writing first and chmodding after leaves a brief
+/// umask-dependent window in which tenant source is world-readable on the
+/// host; opening with the mode up front closes it.
+pub fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
+    }
+}

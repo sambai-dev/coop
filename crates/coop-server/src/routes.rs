@@ -160,6 +160,11 @@ pub async fn submit(
     state.bus.register(&job_id);
 
     if state.queue_tx.send(job_id.clone()).await.is_err() {
+        // Workers have shut down (only way this channel closes) — clean up the
+        // freshly created row and bus entry rather than leaving a zombie
+        // `queued` job that lingers until retention sweeps.
+        let _ = state.store.finish(&job_id, "error", None).await;
+        state.bus.remove(&job_id);
         return (StatusCode::SERVICE_UNAVAILABLE, "job queue saturated").into_response();
     }
 
@@ -232,6 +237,7 @@ pub async fn get_job(
         (status = 401, description = "Missing or invalid API key")
     )
 )]
+#[allow(clippy::needless_return)]
 pub async fn cancel_job(
     State(state): State<AppState>,
     Extension(tenant): Extension<Tenant>,
@@ -254,18 +260,36 @@ pub async fn cancel_job(
 
     if let Some(flag) = state.cancels.get(&id) {
         flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        tracing::info!(job_id = %id, tenant = %tenant.0, "job cancellation requested");
+        tracing::info!(job_id = %id, tenant = %tenant.0, "job cancellation requested (running)");
         return StatusCode::OK.into_response();
     }
 
-    // No flag means the job is queued but not yet picked up by a worker.
-    // Finalize it directly; the worker will see a terminal status when it
-    // loads the row and bail out before executing anything.
-    if let Err(e) = state.store.finish(&id, "cancelled", None).await {
-        return internal_error("cancel queued job", e);
+    // Queued (or just-started) path: conditional DB cancel. On success the
+    // worker's conditional start (`set_started_if_queued`) will see the row
+    // no longer queued and bail before executing. On failure the job
+    // started between our load and now but before its cancel flag existed —
+    // install a flag ourselves so the executor's next tick kills it.
+    match state.store.cancel_if_queued(&id).await {
+        Ok(true) => {
+            tracing::info!(job_id = %id, tenant = %tenant.0, "queued job cancelled");
+            return StatusCode::OK.into_response();
+        }
+        Ok(false) => {
+            let flag = state
+                .cancels
+                .entry(id.clone())
+                .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+                .clone();
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(
+                job_id = %id,
+                tenant = %tenant.0,
+                "job cancellation requested (race — flag installed)"
+            );
+            return StatusCode::OK.into_response();
+        }
+        Err(e) => return internal_error("cancel queued job", e),
     }
-    tracing::info!(job_id = %id, tenant = %tenant.0, "queued job cancelled");
-    StatusCode::OK.into_response()
 }
 
 /// Prometheus text-format metrics derived from the job store plus live
@@ -455,6 +479,21 @@ async fn stream_socket(state: AppState, job_id: String, socket: WebSocket) {
     }
 
     loop {
+        // `live.is_none()` means the per-job broadcast channel has been
+        // removed (job finished and `pump_events` called `bus.remove`) or
+        // never existed for a finished job. In that state `next_live` parks
+        // forever and the old code waited on client traffic only, pinning
+        // the task indefinitely for finished jobs. Wake periodically to
+        // check terminal state and (re-)drain persisted history.
+        let is_idle = live.is_none();
+        let idle_wake = async {
+            if is_idle {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+
         tokio::select! {
             biased;
 
@@ -470,18 +509,25 @@ async fn stream_socket(state: AppState, job_id: String, socket: WebSocket) {
             },
 
             event = next_live(&mut live) => match event {
+                // `None` is unreachable (`next_live` parks forever when
+                // `live` is `None`) — kept for type completeness.
                 None => {
                     if job_terminal(&state, &job_id).await {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(250)).await;
                 }
                 Some(Err(RecvError::Lagged(_))) => {
                     if !send_history(&state, &job_id, &mut tx, &mut sent_max).await {
                         break;
                     }
+                    if job_terminal(&state, &job_id).await {
+                        break;
+                    }
                 }
                 Some(Err(RecvError::Closed)) => {
+                    if job_terminal(&state, &job_id).await {
+                        break;
+                    }
                     live = None;
                 }
                 Some(Ok(ev)) => {
@@ -497,6 +543,21 @@ async fn stream_socket(state: AppState, job_id: String, socket: WebSocket) {
                     }
                 }
             },
+
+            _ = idle_wake => {
+                if job_terminal(&state, &job_id).await {
+                    break;
+                }
+                if live.is_none() {
+                    live = state.bus.subscribe(&job_id);
+                    if !send_history(&state, &job_id, &mut tx, &mut sent_max).await {
+                        break;
+                    }
+                    if job_terminal(&state, &job_id).await {
+                        break;
+                    }
+                }
+            }
         }
     }
 

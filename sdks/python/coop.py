@@ -63,15 +63,30 @@ class Coop:
 
     def result(self, job_id, timeout=60.0):
         # One-call fast path: newer servers fold the event log into a flat
-        # result server-side and wait for us (202 = still running, partial).
-        try:
-            return self._request(
-                "GET", f"/v1/jobs/{job_id}/result?wait_seconds={int(timeout)}"
-            )
-        except CoopError as e:
-            if e.status not in (404, 405):
-                raise
-            # Older server without /result: fall back to poll + replay.
+        # result server-side and wait for us. 202 (server budget expired,
+        # still running) returns a partial view — keep long-polling until
+        # terminal or our deadline, rather than handing back a non-terminal
+        # result as if it were final (deep-hunt fix).
+        deadline = time.time() + timeout
+        while True:
+            remaining = max(0, int(deadline - time.time()))
+            try:
+                view = self._request(
+                    "GET", f"/v1/jobs/{job_id}/result?wait_seconds={remaining}"
+                )
+            except CoopError as e:
+                if e.status not in (404, 405):
+                    raise
+                # Older server without /result: fall back to poll + replay.
+                return self._result_via_polling(job_id, deadline)
+            if view.get("status") in TERMINAL:
+                return view
+            if time.time() >= deadline:
+                raise TimeoutError(f"job {job_id} still running after {timeout}s")
+            time.sleep(0.25)
+
+    def _result_via_polling(self, job_id, deadline):
+        timeout = max(0.0, deadline - time.time())
         view = self.wait(job_id, timeout=timeout)
         stdout, stderr = [], []
         for event in self.replay(job_id):

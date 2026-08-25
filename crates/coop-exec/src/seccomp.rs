@@ -607,6 +607,35 @@ pub fn build_filter() -> Vec<libc::sock_filter> {
         prog.push(trap());
     }
 
+    // clone() with namespace-creating flags is trapped (deep-hunt note on
+    // the “namespace escapes … trap” doc claim — plain clone/fork/vfork
+    // threads are still allowed; only CLONE_NEW* is loud).
+    // Flags live in arg0 low word on x86_64; mask the NEW* bits and trap
+    // when any are set.
+    const CLONE_NS_MASK: u32 = 0x7C02_0000; // NEWUSER|NEWNS|NEWNET|NEWPID|NEWIPC|NEWUTS
+    prog.push(bpf_jump(
+        libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+        nr::clone,
+        0,
+        5,
+    ));
+    prog.push(bpf_stmt(
+        libc::BPF_LD | libc::BPF_W | libc::BPF_ABS,
+        u32::from(OFFSET_ARG0_LO),
+    ));
+    prog.push(bpf_stmt(
+        libc::BPF_ALU | libc::BPF_AND | libc::BPF_K,
+        CLONE_NS_MASK,
+    ));
+    prog.push(bpf_jump(
+        libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+        0,
+        1,
+        0,
+    ));
+    prog.push(trap());
+    prog.push(allow());
+
     // socket(domain): AF_UNIX allowed; every other family gets EAFNOSUPPORT.
     prog.push(bpf_jump(
         libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
@@ -759,7 +788,8 @@ mod tests {
         const CLASS_LD: u16 = libc::BPF_LD as u16;
         const CLASS_JMP: u16 = libc::BPF_JMP as u16;
         const CLASS_RET: u16 = libc::BPF_RET as u16;
-        let mut acc: u32 = 0; // last BPF_ABS load
+        const CLASS_ALU: u16 = libc::BPF_ALU as u16;
+        let mut acc: u32 = 0; // last BPF_ABS load / ALU accumulator
         let mut ip = 0usize;
         loop {
             let insn = &prog[ip];
@@ -771,6 +801,12 @@ mod tests {
                         16 => arg0,
                         other => panic!("unexpected ABS offset {other}"),
                     };
+                    ip += 1;
+                }
+                CLASS_ALU => {
+                    // Only AND K is used by the filter (clone namespace mask).
+                    // BPF_AND = 0x50; combined code = ALU(0x04) | AND(0x50) | K(0x00)=0x54
+                    acc &= insn.k;
                     ip += 1;
                 }
                 CLASS_JMP => {
@@ -805,5 +841,11 @@ mod tests {
         let inet = simulate(nr::socket, 2);
         assert_eq!(inet & 0x7fff_0000, libc::SECCOMP_RET_ERRNO);
         assert_eq!(inet & 0xffff, libc::EAFNOSUPPORT as u32);
+        // clone() without namespace flags → ALLOW; with NEW* → TRAP
+        assert_eq!(simulate(nr::clone, 0), libc::SECCOMP_RET_ALLOW);
+        let ns_clone = simulate(nr::clone, 0x1000_0000); // CLONE_NEWUSER
+        assert_eq!(ns_clone & 0x7fff_0000, libc::SECCOMP_RET_TRAP);
+        let ns_net = simulate(nr::clone, 0x4000_0000); // CLONE_NEWNET
+        assert_eq!(ns_net & 0x7fff_0000, libc::SECCOMP_RET_TRAP);
     }
 }

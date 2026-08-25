@@ -107,13 +107,22 @@ impl Store {
         Ok(())
     }
 
-    pub async fn set_started(&self, job_id: &str) -> StoreResult<()> {
-        sqlx::query("UPDATE jobs SET status = 'running', started_at_ms = ?2 WHERE job_id = ?1")
-            .bind(job_id)
-            .bind(now_ms())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    /// Conditionally mark a queued job as started. Returns `false` when the
+    /// row is no longer `queued` (e.g. it was cancelled while waiting in the
+    /// queue), in which case the caller must not execute it. The guard on
+    /// `status = 'queued'` closes the cancel-vs-start race: a DELETE that
+    /// finalized the row between dequeue and start can no longer be
+    /// overwritten back to `running`.
+    pub async fn set_started_if_queued(&self, job_id: &str) -> StoreResult<bool> {
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'running', started_at_ms = ?2
+             WHERE job_id = ?1 AND status = 'queued'",
+        )
+        .bind(job_id)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn finish(
@@ -132,6 +141,22 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Finalize a still-queued job as `cancelled`. Returns `false` when the
+    /// job was no longer queued (already running or terminal) — the caller
+    /// then falls back to the executor cancellation flag instead of touching
+    /// the row.
+    pub async fn cancel_if_queued(&self, job_id: &str) -> StoreResult<bool> {
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'cancelled', exit_code = NULL, finished_at_ms = ?2
+             WHERE job_id = ?1 AND status = 'queued'",
+        )
+        .bind(job_id)
+        .bind(now_ms())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn append_event(
@@ -259,13 +284,18 @@ impl Store {
     /// process lifetime is marked `error`. A crashed server cannot finish or
     /// cancel them anymore, and leaving them running would poison tenant
     /// concurrency accounting on restart.
+    ///
+    /// Regression guard (deep-hunt): this used to bind positionally against
+    /// an explicit `?2` placeholder. sqlx resolves positional binds by
+    /// parameter *name*, so `?2` stayed unbound and SQLite stored NULL in
+    /// `finished_at_ms`. Plain ordinal placeholders keep every parameter
+    /// bound.
     pub async fn recover_stale_running(&self) -> StoreResult<u64> {
-        let now = now_ms();
         let result = sqlx::query(
-            "UPDATE jobs SET status = 'error', exit_code = NULL, finished_at_ms = ?2
+            "UPDATE jobs SET status = 'error', exit_code = NULL, finished_at_ms = ?1
              WHERE status IN ('queued','running')",
         )
-        .bind(now)
+        .bind(now_ms())
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())

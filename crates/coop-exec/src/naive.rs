@@ -10,8 +10,7 @@ use tokio::time::Duration;
 
 pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcome> {
     let src = ctx.workdir.join(format!("job.{}", ext_for(&ctx.language)));
-    tokio::fs::write(&src, &ctx.code).await?;
-    crate::owner_only_file(&src)?;
+    crate::write_private_file(&src, ctx.code.as_bytes())?;
 
     let interp = resolve_interpreter(&ctx.language, ctx.interpreter_override.as_deref());
     let mut cmd = Command::new(interp);
@@ -42,11 +41,19 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
     // process-group leader on unix (pgid == pid).
     let child_pid = child.id().expect("freshly spawned child has a pid");
 
-    if let Some(input) = ctx.stdin.clone() {
-        if let Some(mut si) = child.stdin.take() {
+    // Deep-hunt fix (worker-wedge DoS): never await the stdin transfer on the
+    // supervision path. A child that never drains its pipe (e.g. a busy loop
+    // that ignores stdin) would previously park `write_all` *before* any
+    // wall-clock/cancel logic existed, wedging the worker task permanently
+    // while the job sat in `running` forever. The transfer now runs on its
+    // own task; when supervision kills the process group the pipe closes and
+    // the pending write errors out, so timeouts stay authoritative.
+    if let Some(mut si) = child.stdin.take() {
+        let input = ctx.stdin.clone().unwrap_or_default();
+        tokio::spawn(async move {
             let _ = si.write_all(input.as_bytes()).await;
             let _ = si.shutdown().await;
-        }
+        });
     }
 
     let stdout = child.stdout.take().expect("stdout piped");
@@ -66,7 +73,9 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
     let wall_deadline = started + wall;
 
     let mut counts = (0usize, 0usize);
-    let mut truncated = false;
+    // Per-stream truncation flags: each stream emits exactly one `truncated`
+    // event when it crosses the line cap, independent of the other stream.
+    let mut truncated = (false, false);
     let mut timed_out = false;
     let mut cancelled = false;
     let mut killed_on_timeout = false;
@@ -94,15 +103,15 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
 
             item = recv_output(&mut rx, rx_closed) => match item {
                 Some((stream, line)) => {
-                    let count = match stream {
-                        Stream::Stdout => &mut counts.0,
-                        Stream::Stderr => &mut counts.1,
+                    let (count, truncated) = match stream {
+                        Stream::Stdout => (&mut counts.0, &mut truncated.0),
+                        Stream::Stderr => (&mut counts.1, &mut truncated.1),
                     };
                     if *count < MAX_OUTPUT_LINES {
                         *count += 1;
                         sink.output(stream, line);
-                    } else if !truncated {
-                        truncated = true;
+                    } else if !*truncated {
+                        *truncated = true;
                         sink.truncated(stream);
                     }
                 }

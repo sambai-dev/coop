@@ -38,18 +38,21 @@ const STAGE_EXEC: &str = "starting interpreter";
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcome> {
-    // N7: arm a guard so every error path before supervision starts (source
-    // write, interpreter resolution, CString/socket setup, fork) removes the
+    // N7: arm a guard so every error path before supervision starts (knob
+    // writes, interpreter resolution, CString/socket setup, fork) removes the
     // fresh cgroup instead of orphaning a directory with live knobs on every
-    // failed submit. `disarm` hands ownership to `supervise`, which cleans up
-    // from then on.
-    let cg_guard = CgroupGuard::new(prepare_cgroup(&ctx.limits, &ctx.job_key)?);
+    // failed submit. The guard is created immediately after the per-job
+    // directory exists, so even a failed knob write inside
+    // `write_cgroup_limits` cleans up after itself; `disarm` hands ownership
+    // to `supervise`, which cleans up from then on.
+    let base = prepare_cgroup_base()?;
+    let cg_guard = CgroupGuard::new(create_cgroup_dir(&base, &ctx.job_key)?);
+    write_cgroup_limits(cg_guard.path(), &ctx.limits)?;
     let started = Instant::now();
 
     let src_name = format!("job.{}", ext_for(&ctx.language));
     let src_path = ctx.workdir.join(&src_name);
-    tokio::fs::write(&src_path, &ctx.code).await?;
-    crate::owner_only_file(&src_path)?;
+    crate::write_private_file(&src_path, ctx.code.as_bytes())?;
 
     let interp = resolve_interpreter(&ctx.language, ctx.interpreter_override.as_deref());
     let interp_abs = find_in_path(Path::new(&interp))
@@ -106,6 +109,7 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
         envp,
         src_host: src_c,
         src_staged: staged_c,
+        stdin: ctx.stdin.as_deref().map(|s| s.as_bytes().to_vec()),
         cpu_seconds: u64::from(ctx.limits.cpu_seconds.clamp(1, 240)),
         mem_bytes,
         max_pids: u64::from(ctx.limits.max_pids),
@@ -143,6 +147,8 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
             let err_tokio = tokio::net::UnixStream::from_std(err_std)?;
             let setup_tokio = tokio::net::UnixStream::from_std(setup_std)?;
 
+            let cpu_before = read_cpu_usage(cg_guard.path());
+            let cpu_budget_usec = u64::from(ctx.limits.cpu_seconds.clamp(1, 240)) * 1_000_000;
             let sctx = SuperviseCtx {
                 child,
                 sink,
@@ -150,6 +156,8 @@ pub async fn run(ctx: ExecContext, sink: Arc<dyn Sink>) -> io::Result<ExecOutcom
                 cg_dir: cg_guard.disarm(),
                 limits: ctx.limits,
                 oom_before,
+                cpu_before,
+                cpu_budget_usec,
                 started,
                 setup_lines: BufReader::new(setup_tokio).lines(),
             };
@@ -171,6 +179,7 @@ struct ChildPlan {
     envp: Vec<CString>,
     src_host: CString,
     src_staged: CString,
+    stdin: Option<Vec<u8>>,
     cpu_seconds: u64,
     mem_bytes: u64,
     max_pids: u64,
@@ -324,8 +333,26 @@ fn child_setup(plan: &ChildPlan) -> ! {
     let _ = dup2(plan.err_w, 2);
     let _ = close(plan.out_w);
     let _ = close(plan.err_w);
-    if let Ok(null) = fs::File::open("/dev/null") {
-        let _ = dup2(null.as_raw_fd(), 0);
+    // Deep-hunt fix: honor submitted stdin on the namespace backend by
+    // staging it onto the job-private tmpfs and wiring it to fd 0 (was:
+    // silent /dev/null, so agents got different behavior per sandbox mode).
+    match &plan.stdin {
+        Some(bytes) => {
+            let p = Path::new("/tmp/stdin");
+            if fs::write(p, bytes).is_ok() {
+                let _ = fs::set_permissions(p, fs::Permissions::from_mode(0o444));
+                if let Ok(f) = fs::File::open(p) {
+                    let _ = dup2(f.as_raw_fd(), 0);
+                }
+            } else if let Ok(null) = fs::File::open("/dev/null") {
+                let _ = dup2(null.as_raw_fd(), 0);
+            }
+        }
+        None => {
+            if let Ok(null) = fs::File::open("/dev/null") {
+                let _ = dup2(null.as_raw_fd(), 0);
+            }
+        }
     }
 
     let argv_refs: Vec<&CString> = plan.argv.iter().collect();
@@ -371,20 +398,20 @@ async fn poll_status(child: nix::unistd::Pid, reaped: bool) -> Option<nix::Resul
 struct LineRouter<'a> {
     sink: &'a Arc<dyn Sink>,
     counts: (usize, usize),
-    truncated: bool,
+    truncated: (bool, bool),
 }
 
 impl LineRouter<'_> {
     fn route(&mut self, stream: Stream, line: String) {
-        let count = match stream {
-            Stream::Stdout => &mut self.counts.0,
-            Stream::Stderr => &mut self.counts.1,
+        let (count, truncated) = match stream {
+            Stream::Stdout => (&mut self.counts.0, &mut self.truncated.0),
+            Stream::Stderr => (&mut self.counts.1, &mut self.truncated.1),
         };
         if *count < MAX_OUTPUT_LINES {
             *count += 1;
             self.sink.output(stream, line);
-        } else if !self.truncated {
-            self.truncated = true;
+        } else if !*truncated {
+            *truncated = true;
             self.sink.truncated(stream);
         }
     }
@@ -397,6 +424,8 @@ struct SuperviseCtx {
     cg_dir: PathBuf,
     limits: Limits,
     oom_before: u64,
+    cpu_before: u64,
+    cpu_budget_usec: u64,
     started: Instant,
     setup_lines: Lines<BufReader<tokio::net::UnixStream>>,
 }
@@ -453,10 +482,11 @@ async fn supervise(
     let wall = Duration::from_secs(ctx.limits.wall_seconds.max(1) as u64);
     let deadline = ctx.started + wall;
     let mut killed_on_timeout = false;
+    let mut killed_on_cpu = false;
     let mut router = LineRouter {
         sink: &ctx.sink,
         counts: (0, 0),
-        truncated: false,
+        truncated: (false, false),
     };
 
     let mut reaped: Option<WaitStatus> = None;
@@ -508,8 +538,11 @@ async fn supervise(
             polled = poll_status(ctx.child, reaped.is_some()) => match polled.expect("not pending") {
                 Ok(WaitStatus::StillAlive) => {
                     // Cancellation beats the wall clock: kill the whole group
-                    // now and classify the run as cancelled.
-                    if !killed_on_timeout && ctx.is_cancelled() {
+                    // now and classify the run as cancelled. CPU budget
+                    // (tree-wide, via cpu.stat polling) is the last defense
+                    // before RLIMIT_CPU; all three compete for SIGKILL but
+                    // leave distinct violation markers.
+                    if !killed_on_timeout && !killed_on_cpu && ctx.is_cancelled() {
                         killed_on_timeout = true;
                         cancelled = true;
                         ctx.sink.violation(
@@ -517,11 +550,28 @@ async fn supervise(
                             json!({"wall_seconds": ctx.limits.wall_seconds}),
                         );
                         let _ = kill(neg_pid(ctx.child), Signal::SIGKILL);
-                    } else if !killed_on_timeout && Instant::now() >= deadline {
+                    } else if !killed_on_timeout
+                        && !killed_on_cpu
+                        && Instant::now() >= deadline
+                    {
                         killed_on_timeout = true;
                         ctx.sink.violation(
                             "wall_clock_exceeded",
                             json!({"wall_seconds": ctx.limits.wall_seconds}),
+                        );
+                        let _ = kill(neg_pid(ctx.child), Signal::SIGKILL);
+                    } else if !killed_on_timeout
+                        && !killed_on_cpu
+                        && cpu_budget_exceeded(
+                            &ctx.cg_dir,
+                            ctx.cpu_before,
+                            ctx.cpu_budget_usec,
+                        )
+                    {
+                        killed_on_cpu = true;
+                        ctx.sink.violation(
+                            "cpu_limit_exceeded",
+                            json!({"cpu_seconds": ctx.limits.cpu_seconds}),
                         );
                         let _ = kill(neg_pid(ctx.child), Signal::SIGKILL);
                     }
@@ -576,6 +626,7 @@ async fn supervise(
         oom_after > ctx.oom_before,
         killed_on_timeout,
         cancelled,
+        killed_on_cpu,
         ctx.sink.as_ref(),
     ))
 }
@@ -586,6 +637,7 @@ fn classify(
     oom: bool,
     killed_on_timeout: bool,
     cancelled: bool,
+    killed_on_cpu: bool,
     sink: &dyn Sink,
 ) -> ExecOutcome {
     match status {
@@ -617,6 +669,12 @@ fn classify(
                     status: OutcomeStatus::TimedOut,
                     exit_code: None,
                     killed_by: Some("wall-clock".into()),
+                }
+            } else if killed_on_cpu && sig == Signal::SIGKILL {
+                ExecOutcome {
+                    status: OutcomeStatus::Failed,
+                    exit_code: None,
+                    killed_by: Some("cgroup-cpu".into()),
                 }
             } else if sig == Signal::SIGSYS {
                 // F-005: seccomp trap — the job called a notorious-surface
@@ -657,40 +715,33 @@ fn neg_pid(pid: nix::unistd::Pid) -> nix::unistd::Pid {
     nix::unistd::Pid::from_raw(-pid.as_raw())
 }
 
-fn prepare_cgroup(limits: &Limits, job_key: &str) -> io::Result<PathBuf> {
+fn prepare_cgroup_base() -> io::Result<PathBuf> {
     let cgroup_root = Path::new("/sys/fs/cgroup");
     let base = cgroup_root.join("coop-jobs");
-
     fs::create_dir_all(&base)
         .map_err(|e| io::Error::other(format!("cgroup: create {}: {e}", base.display())))?;
-
     enable_controllers_for(cgroup_root);
     enable_controllers_for(&base);
+    Ok(base)
+}
 
-    // F4: the old code ran `remove_dir_all` followed by `create_dir_all` here.
-    // That pair is racy and unsafe: two same-key jobs could interleave
-    // remove/create, and the remove could delete the cgroup of a *live* job
-    // that had just been handed this path. `create_dir` is a single atomic
-    // mkdir(2) that fails with `AlreadyExists` instead, so an existing
-    // directory is never deleted blindly — recovery lives in
-    // `create_cgroup_dir`.
-    let dir = create_cgroup_dir(&base, job_key)?;
-
+fn write_cgroup_limits(dir: &Path, limits: &Limits) -> io::Result<()> {
     let mem_bytes = limits.mem_mb as u64 * 1024 * 1024;
     fs::write(dir.join("memory.max"), mem_bytes.to_string())
         .map_err(|e| io::Error::other(format!("cgroup: write memory.max: {e}")))?;
     if let Err(e) = fs::write(dir.join("memory.swap.max"), "0") {
         tracing::debug!(error = %e, "memory.swap.max not available; continuing");
     }
-    fs::write(
-        dir.join("cpu.max"),
-        format!("{} 1000000", limits.cpu_seconds as u64 * 1_000_000),
-    )
-    .map_err(|e| io::Error::other(format!("cgroup: write cpu.max: {e}")))?;
+    // Cumulative CPU is enforced tree-wide by polling `cpu.stat` in
+    // `supervise()`. The kernel's `cpu.max` is a *rate* limiter
+    // (quota/period), not a budget, so leaving a tight quota here only
+    // throttles parallelism without bounding total CPU. Uncap the rate and
+    // let the supervisor own the `cpu_seconds` contract.
+    fs::write(dir.join("cpu.max"), "max 1000000")
+        .map_err(|e| io::Error::other(format!("cgroup: write cpu.max: {e}")))?;
     fs::write(dir.join("pids.max"), limits.max_pids.to_string())
         .map_err(|e| io::Error::other(format!("cgroup: write pids.max: {e}")))?;
-
-    Ok(dir)
+    Ok(())
 }
 
 /// Create the per-job cgroup directory atomically (F4). `fs::create_dir` is
@@ -830,6 +881,23 @@ fn read_oom_kills(dir: &Path) -> u64 {
                 .and_then(|v| v.trim().parse().ok())
         })
         .unwrap_or(0)
+}
+
+fn read_cpu_usage(dir: &Path) -> u64 {
+    let Ok(text) = fs::read_to_string(dir.join("cpu.stat")) else {
+        return 0;
+    };
+    text.lines()
+        .find_map(|l| {
+            l.strip_prefix("usage_usec")
+                .and_then(|v| v.trim().parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+fn cpu_budget_exceeded(dir: &Path, before: u64, budget_usec: u64) -> bool {
+    let cur = read_cpu_usage(dir);
+    cur.saturating_sub(before) >= budget_usec
 }
 
 fn cleanup_cgroup(dir: &Path) {

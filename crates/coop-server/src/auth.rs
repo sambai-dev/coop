@@ -84,7 +84,16 @@ pub async fn middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
-    let key = extract_bearer(&req).or_else(|| extract_query_key(&req));
+    // `?key=` exists solely for browser WebSockets (no custom headers there);
+    // restricting it to the stream endpoint keeps keys out of access logs for
+    // plain REST calls (deep-hunt note on AUDIT.md F-008's stated scope).
+    let key = extract_bearer(&req).or_else(|| {
+        if req.uri().path().ends_with("/stream") {
+            extract_query_key(&req)
+        } else {
+            None
+        }
+    });
     let Some(key) = key else {
         return (StatusCode::UNAUTHORIZED, "missing API key").into_response();
     };

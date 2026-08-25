@@ -26,6 +26,26 @@ impl Sink for Collect {
     fn truncated(&self, _stream: Stream) {}
 }
 
+fn is_usable_bash(p: &PathBuf) -> bool {
+    // WSL's C:\Windows\System32\bash.exe answers --version but fails on
+    // Windows paths (the job script is a Windows path). Probe with a real
+    // script file containing a Windows path so the WSL shim is rejected.
+    let probe_dir = std::env::temp_dir().join(format!("coop-bash-probe-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&probe_dir);
+    let probe_file = probe_dir.join("probe.sh");
+    if std::fs::write(&probe_file, "echo probe-ok\n").is_err() {
+        return false;
+    }
+    let ok = std::process::Command::new(p)
+        .arg(&probe_file)
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("probe-ok"))
+        .unwrap_or(false);
+    let _ = std::fs::remove_file(&probe_file);
+    let _ = std::fs::remove_dir(&probe_dir);
+    ok
+}
+
 fn find_bash() -> PathBuf {
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {
@@ -33,14 +53,21 @@ fn find_bash() -> PathBuf {
             let candidate = dir.join("bash.exe");
             #[cfg(not(windows))]
             let candidate = dir.join("bash");
-            if candidate.is_file() {
+            if candidate.is_file() && is_usable_bash(&candidate) {
                 return candidate;
             }
         }
     }
-    for fallback in ["/bin/bash", "/usr/bin/bash"] {
+    // Explicit Git-for-Windows location that is often not on PATH ordering
+    // but is the only usable bash on many Windows dev machines.
+    for fallback in [
+        "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+        "C:\\Program Files\\Git\\bin\\bash.exe",
+        "/bin/bash",
+        "/usr/bin/bash",
+    ] {
         let candidate = PathBuf::from(fallback);
-        if candidate.is_file() {
+        if candidate.is_file() && is_usable_bash(&candidate) {
             return candidate;
         }
     }

@@ -108,18 +108,32 @@ export class Coop {
 
   async result(jobId: string, timeoutMs = 60_000): Promise<JobResult> {
     // One-call fast path: newer servers fold the event log into a flat
-    // result server-side and wait for us (202 = still running, partial).
-    try {
-      return await this.request(
-        "GET",
-        `/v1/jobs/${jobId}/result?wait_seconds=${Math.ceil(timeoutMs / 1000)}`,
-      );
-    } catch (err) {
-      const msg = String((err as Error)?.message ?? "");
-      if (!/: (404|405):/.test(msg)) throw err;
-      // Older server without /result: fall back to poll + replay.
+    // result server-side and wait for us. 202 (server budget expired,
+    // still running) returns a partial view — keep long-polling until
+    // terminal or our deadline, rather than handing back a non-terminal
+    // result as if it were final (deep-hunt fix).
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      try {
+        const view = await this.request<JobResult>(
+          "GET",
+          `/v1/jobs/${jobId}/result?wait_seconds=${remaining}`,
+        );
+        if (TERMINAL.has(view.status)) return view;
+      } catch (err) {
+        const msg = String((err as Error)?.message ?? "");
+        if (!/: (404|405):/.test(msg)) throw err;
+        return this.resultViaPolling(jobId, deadline);
+      }
+      if (Date.now() >= deadline) throw new Error(`job ${jobId} still running after ${timeoutMs}ms`);
+      await sleep(250);
     }
-    const view = await this.wait(jobId, timeoutMs);
+  }
+
+  private async resultViaPolling(jobId: string, deadline: number): Promise<JobResult> {
+    const remaining = Math.max(0, deadline - Date.now());
+    const view = await this.wait(jobId, remaining);
     const events = await this.replay(jobId);
     const stdout: string[] = [];
     const stderr: string[] = [];

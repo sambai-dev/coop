@@ -120,8 +120,6 @@ async function loadMeta() {
   } catch {}
 }
 
-function pill(status) { return `<span class="pill s-${status}">${status}</span>`; }
-
 function fmtMs(row) {
   if (row.started_at_ms && row.finished_at_ms) return row.finished_at_ms - row.started_at_ms;
   return row.status === "running" ? "…" : "";
@@ -138,7 +136,20 @@ async function refresh() {
     for (const j of jobs) {
       const tr = document.createElement("tr");
       tr.className = "job" + (j.job_id === selected ? " active" : "");
-      tr.innerHTML = `<td>${j.job_id.slice(0, 8)}</td><td>${j.language}</td><td>${pill(j.status)}</td><td>${j.exit_code ?? ""}</td><td>${fmtMs(j)}</td>`;
+      const idTd = document.createElement("td");
+      idTd.textContent = j.job_id.slice(0, 8);
+      const langTd = document.createElement("td");
+      langTd.textContent = j.language;
+      const stTd = document.createElement("td");
+      const pill = document.createElement("span");
+      pill.className = "pill s-" + j.status;
+      pill.textContent = j.status;
+      stTd.appendChild(pill);
+      const exitTd = document.createElement("td");
+      exitTd.textContent = j.exit_code ?? "";
+      const msTd = document.createElement("td");
+      msTd.textContent = fmtMs(j);
+      tr.append(idTd, langTd, stTd, exitTd, msTd);
       tr.onclick = () => watch(j.job_id);
       tb.appendChild(tr);
     }

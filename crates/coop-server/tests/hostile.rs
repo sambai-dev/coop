@@ -528,3 +528,93 @@ async fn ptrace_probe_is_killed_by_seccomp() {
     );
     assert_host_still_serves(&app).await;
 }
+
+/// Deep-hunt: the ns backend used to silently wire fd 0 to /dev/null, so
+/// submitted stdin never reached the job (the naive backend honored it).
+/// Staged stdin must arrive on the job-private tmpfs.
+#[tokio::test]
+#[ignore]
+async fn stdin_reaches_sandboxed_jobs() {
+    if !preflight() {
+        return;
+    }
+    let app = spawn_app().await;
+    // bash `read` consumes exactly one line from fd 0; echo proves it arrived.
+    let payload = serde_json::json!({ "wall_seconds": 10 });
+    let code = r#"read -r line; echo "GOT:$line""#.to_string();
+    // Use the `stdin` field via raw submit (the helper below has no stdin param)
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/jobs")
+        .header(axum::http::header::AUTHORIZATION, "Bearer test-key")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            serde_json::json!({"language":"bash","code":code,"stdin":"hello-ns\n","limits":payload}).to_string(),
+        ))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), axum::http::StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let id = v["job_id"].as_str().unwrap().to_string();
+
+    let (status, _) = expect_status(&app, &id, &["succeeded"]).await;
+    assert_eq!(status, "succeeded");
+    let stdout = replay_stdout(&app, &id).await;
+    assert!(
+        stdout.contains("GOT:hello-ns"),
+        "stdin must reach sandboxed job; stdout was:\n{stdout}"
+    );
+    assert_host_still_serves(&app).await;
+}
+
+/// Deep-hunt: cumulative CPU is now polling `cpu.stat` tree-wide, not the
+/// kernel's `cpu.max` rate limiter. A multi-threaded spin that burns
+/// `cpu_seconds` core-seconds total must be killed even though the old
+/// `cpu.max` quota (cpu_seconds cores * 1s) would have let it run.
+#[tokio::test]
+#[ignore]
+async fn cpu_budget_is_enforced_tree_wide() {
+    if !preflight() {
+        return;
+    }
+    let app = spawn_app().await;
+    let code = r#"
+import threading
+def spin():
+    while True:
+        pass
+ts=[threading.Thread(target=spin) for _ in range(4)]
+[t.start() for t in ts]
+for t in ts: t.join()
+"#;
+    let id = submit(
+        &app,
+        "python",
+        code,
+        serde_json::json!({ "wall_seconds": 20, "cpu_seconds": 1 }),
+    )
+    .await;
+    let (status, elapsed) = expect_status(&app, &id, &["failed"]).await;
+    assert_eq!(status, "failed", "CPU-budget exceeded must be Failed");
+    assert!(
+        elapsed < 15.0,
+        "4-thread spin with cpu_seconds=1 must be killed in ~1 core-second (~0.25s wall), took {elapsed:.2}s"
+    );
+    let events = replay_events(&app, &id).await;
+    let has_violation = events
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .any(|e| e["kind"] == "violation" && e["data"]["rule"] == "cpu_limit_exceeded")
+        })
+        .unwrap_or(false);
+    assert!(
+        has_violation,
+        "expected cpu_limit_exceeded violation; events:\n{}",
+        render_events(&events)
+    );
+    assert_host_still_serves(&app).await;
+}

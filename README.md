@@ -122,7 +122,7 @@ Workspace layout:
 On Linux with root, Coop runs each job inside:
 
 - **namespaces**: mount (read-only bind-remount of `/`, private tmpfs at `/tmp`), PID, network (`CLONE_NEWNET` = no interfaces at all unless explicitly allowed later), IPC, UTS
-- **cgroup v2**: `memory.max`, `memory.swap.max=0`, `cpu.max`, `pids.max`
+- **cgroup v2**: `memory.max`, `memory.swap.max=0`, `pids.max`, and a cumulative CPU budget enforced by polling `cpu.stat` (tree-wide; see below)
 - **rlimits**: `CPU` (SIGXCPU), `AS`, `NPROC`, `NOFILE`, `FSIZE`
 - **seccomp-BPF allowlist**: every syscall outside a per-language-common allowlist fails with `ENOSYS` (so glibc fallback chains keep working); notorious kernel-attack-surface calls (`ptrace`, `bpf`, module loading, keyrings, io_uring, namespace escapes…) trap with `SIGSYS` and are reported as `seccomp_violation` in the event log. `socket()` is argument-filtered to `AF_UNIX`. Disable with `COOP_SECCOMP=off`.
 - **privilege drop** to `nobody` when started as root, fresh `/proc`, minimal env
@@ -131,7 +131,7 @@ On Linux with root, Coop runs each job inside:
 |---|---|
 | fork bombs (`pids.max`, `RLIMIT_NPROC`) | kernel 0-days / container escapes |
 | memory bombs (cgroup OOM kill, hard `RLIMIT_AS`) | side channels / timing attacks |
-| infinite loops & CPU hogs (wall clock + `RLIMIT_CPU`) | malicious interpreter CVEs |
+| infinite loops & CPU hogs (wall clock + cumulative `cpu.stat` budget + `RLIMIT_CPU`) | malicious interpreter CVEs |
 | disk fill (tmpfs size cap, `RLIMIT_FSIZE`) | sophisticated syscall-level attacks (seccomp allowlist narrows this sharply; no per-language profiles yet) |
 | network access by default (no netns interfaces; `socket()` limited to `AF_UNIX`) | multi-tenant hostile neighbors on one host |
 | read-only rootfs tampering, host file reads | |
@@ -142,7 +142,7 @@ If you start `coop` without root (or on macOS/Windows dev machines) it falls bac
 
 Two deliberate engineering choices worth calling out:
 
-- **Direct cgroupfs writes instead of a cgroup wrapper crate.** The v2 interface is four small files (`memory.max`, `cpu.max`, `pids.max`, `cgroup.procs`). Writing them directly gives deterministic control over exactly which knobs we set, works under systemd delegation, and drops a dependency whose abstraction we'd have to fight anyway.
+- **Direct cgroupfs writes instead of a cgroup wrapper crate.** The v2 interface is a handful of small files (`memory.max`, `pids.max`, `cgroup.procs`, plus `cpu.stat` polling for the cumulative budget). Writing them directly gives deterministic control over exactly which knobs we set, works under systemd delegation, and drops a dependency whose abstraction we'd have to fight anyway.
 - **`fork()` + `execve()` with pre-built argv/env.** All CStrings, paths, and cgroup setup happen before the fork; the child only does async-signal-safe-adjacent syscalls (unshare/mount/rlimits/exec). This is the same shape ion-style sandboxes use; the MT-fork caveats are documented and bounded because the child never allocates meaningfully before `exec`.
 
 ### Streaming is the product
