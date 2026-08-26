@@ -2011,7 +2011,11 @@ fn workload_exec(plan: &SandboxPlan, exec_read: StdUnixStream, exec_write: StdUn
     }
 
     let Err(error) = execve(&program, &argv, &env_refs);
-    fail(STAGE_EXEC, io::Error::other(error));
+    fail(STAGE_EXEC, errno_as_io_error(error));
+}
+
+fn errno_as_io_error(error: nix::errno::Errno) -> io::Error {
+    error.into()
 }
 
 fn apply_limits(limits: &Limits) -> io::Result<()> {
@@ -2116,6 +2120,95 @@ fn clear_capability_sets() -> io::Result<()> {
     Ok(())
 }
 
+fn verify_capability_sets() -> io::Result<()> {
+    let mut header = CapHeader {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let mut data = [
+        CapData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+        CapData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+    ];
+    if unsafe {
+        libc::syscall(
+            libc::SYS_capget,
+            &mut header as *mut CapHeader,
+            data.as_mut_ptr(),
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if data
+        .iter()
+        .any(|word| word.effective != 0 || word.permitted != 0 || word.inheritable != 0)
+    {
+        return Err(io::Error::other(
+            "effective, permitted, or inheritable capabilities were retained",
+        ));
+    }
+
+    // Linux capability IDs are contiguous. The first EINVAL after at least
+    // capability zero is cap_last_cap + 1; every valid ID must be absent from
+    // both the bounding and ambient sets.
+    for capability in 0..=63 {
+        let bounding = unsafe { libc::prctl(libc::PR_CAPBSET_READ, capability, 0, 0, 0) };
+        match bounding {
+            0 => {}
+            1 => {
+                return Err(io::Error::other(format!(
+                    "capability {capability} remained in the bounding set"
+                )))
+            }
+            -1 => {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINVAL) && capability > 0 {
+                    break;
+                }
+                return Err(error);
+            }
+            value => {
+                return Err(io::Error::other(format!(
+                    "PR_CAPBSET_READ returned unexpected value {value}"
+                )))
+            }
+        }
+
+        let ambient = unsafe {
+            libc::prctl(
+                libc::PR_CAP_AMBIENT,
+                libc::PR_CAP_AMBIENT_IS_SET,
+                capability,
+                0,
+                0,
+            )
+        };
+        match ambient {
+            0 => {}
+            1 => {
+                return Err(io::Error::other(format!(
+                    "capability {capability} remained in the ambient set"
+                )))
+            }
+            -1 => return Err(io::Error::last_os_error()),
+            value => {
+                return Err(io::Error::other(format!(
+                    "PR_CAP_AMBIENT_IS_SET returned unexpected value {value}"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
 fn verify_workload_identity() -> io::Result<()> {
     let mut ruid = 0;
     let mut euid = 0;
@@ -2139,21 +2232,26 @@ fn verify_workload_identity() -> io::Result<()> {
             io::Error::other("supplementary groups were retained")
         });
     }
-    let status = fs::read_to_string("/proc/self/status")?;
-    for field in ["CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:"] {
-        let value = status
-            .lines()
-            .find_map(|line| line.strip_prefix(field))
-            .map(str::trim)
-            .unwrap_or("missing");
-        if value != "0000000000000000" {
-            return Err(io::Error::other(format!("{field} was not cleared")));
+    verify_capability_sets()?;
+
+    let no_new_privs = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
+    match no_new_privs {
+        1 => {}
+        -1 => return Err(io::Error::last_os_error()),
+        value => {
+            return Err(io::Error::other(format!(
+                "no_new_privs verification returned {value}"
+            )))
         }
     }
-    if !status.lines().any(|line| line == "NoNewPrivs:\t1") {
-        return Err(io::Error::other("no_new_privs was not set"));
+    let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
+    match dumpable {
+        0 => Ok(()),
+        -1 => Err(io::Error::last_os_error()),
+        value => Err(io::Error::other(format!(
+            "workload remained dumpable ({value})"
+        ))),
     }
-    Ok(())
 }
 
 fn mount_proc() -> io::Result<()> {
@@ -2402,6 +2500,12 @@ mod tests {
     fn rootfs_rejects_host_root() {
         let work = std::env::temp_dir();
         assert!(validate_rootfs(Path::new("/"), &work).is_err());
+    }
+
+    #[test]
+    fn interpreter_errno_conversion_preserves_the_kernel_error() {
+        let error = errno_as_io_error(nix::errno::Errno::EACCES);
+        assert_eq!(error.raw_os_error(), Some(libc::EACCES));
     }
 
     #[test]

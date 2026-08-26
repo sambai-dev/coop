@@ -57,6 +57,11 @@ for _ in $(seq 1 60); do
     ready=true
     break
   fi
+  # Startup preflight failures terminate the service. Surface their logs now
+  # instead of idling through the complete readiness allowance.
+  if ! docker inspect --format '{{.State.Running}}' "$name" | grep -qx true; then
+    break
+  fi
   sleep 1
 done
 test "$ready" = true

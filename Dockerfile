@@ -46,7 +46,8 @@ LABEL org.opencontainers.image.title="Coop" \
 
 # Interpreters exist both outside and inside the job rootfs. Jobs pivot into
 # the private /opt/coop/rootfs tree before exec.
-RUN install -d -m 0700 /data /var/lib/coop/jobs /opt/coop/rootfs
+RUN install -d -o root -g root -m 0700 /data /var/lib/coop/jobs /opt/coop \
+    && install -d -o root -g root -m 0755 /opt/coop/rootfs
 
 COPY --from=sandbox-rootfs / /opt/coop/rootfs
 COPY --from=build /src/target/release/coop /usr/local/bin/coop

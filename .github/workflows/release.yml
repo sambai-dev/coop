@@ -22,7 +22,6 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      checks: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -80,10 +79,10 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace --all-targets
+      - name: Install pinned cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Audit locked dependencies
-        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo audit --deny warnings
 
   sdk-gate:
     name: SDK release gate
@@ -196,6 +195,14 @@ jobs:
             test -x /opt/coop/rootfs/usr/bin/python3
             test -x /opt/coop/rootfs/usr/bin/node
             test -x /opt/coop/rootfs/usr/bin/bash
+            test "$(stat -c %a /opt/coop)" = 700
+            test "$(stat -c %U:%G /opt/coop)" = root:root
+            test "$(stat -c %a /opt/coop/rootfs)" = 755
+            test "$(stat -c %U:%G /opt/coop/rootfs)" = root:root
+            test "$(stat -c %a /data)" = 700
+            test "$(stat -c %U:%G /data)" = root:root
+            test "$(stat -c %a /var/lib/coop/jobs)" = 700
+            test "$(stat -c %U:%G /var/lib/coop/jobs)" = root:root
           '
       - name: Smoke final image through the namespace backend
         env:
@@ -245,10 +252,12 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = x86_64
           test "$(id -u)" = 0
-          test -s /sys/fs/cgroup/cgroup.controllers
-          grep -qw memory /sys/fs/cgroup/cgroup.controllers
-          grep -qw pids /sys/fs/cgroup/cgroup.controllers
-          grep -qw cpu /sys/fs/cgroup/cgroup.controllers
+          test -r /sys/fs/cgroup/cgroup.controllers
+          controllers=$(cat /sys/fs/cgroup/cgroup.controllers)
+          test -n "$controllers"
+          grep -qw memory <<<"$controllers"
+          grep -qw pids <<<"$controllers"
+          grep -qw cpu <<<"$controllers"
           actual_kernel=$(uname -r | cut -d- -f1)
           test "$(printf '%s\n' 5.14 "$actual_kernel" | sort -V | head -n1)" = 5.14
           probe="/sys/fs/cgroup/coop-release-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
