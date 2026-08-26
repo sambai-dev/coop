@@ -655,15 +655,6 @@ async fn windows_default_bash_uses_a_probed_native_runtime() {
         );
     }
 
-    if let Some(program_files) = std::env::var_os("ProgramFiles") {
-        let usr_bin = std::path::PathBuf::from(program_files).join(r"Git\usr\bin\bash.exe");
-        if usr_bin.is_file() {
-            coop_exec::preflight_naive_interpreter("bash", Some(&usr_bin.to_string_lossy()))
-                .await
-                .expect_err("Git usr/bin Bash cannot find external tools under the sanitized PATH");
-        }
-    }
-
     let resolved = match coop_exec::preflight_naive_interpreter("bash", None).await {
         Ok(path) => path,
         Err(error) => {

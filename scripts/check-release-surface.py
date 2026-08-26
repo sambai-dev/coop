@@ -218,6 +218,14 @@ def check_pins_and_packaging() -> int:
     for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"]:
         workflow_source = read(workflow)
         require(
+            "cargo install cargo-audit --version 0.22.2 --locked" in workflow_source,
+            f"{workflow} does not install the exact locked cargo-audit release",
+        )
+        require(
+            "cargo audit --deny warnings" in workflow_source,
+            f"{workflow} does not fail on RustSec warnings",
+        )
+        require(
             f"DEBIAN_SNAPSHOT: {snapshot}" in workflow_source,
             f"{workflow} hostile rootfs does not use Docker's Debian snapshot {snapshot}",
         )

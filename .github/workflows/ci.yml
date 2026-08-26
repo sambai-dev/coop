@@ -154,7 +154,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      checks: write
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -162,10 +161,10 @@ jobs:
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action
         with:
           toolchain: 1.89.0
+      - name: Install pinned cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Audit locked dependencies
-        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo audit --deny warnings
 
   container-build:
     name: container and private rootfs
@@ -243,10 +242,12 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = x86_64
           test "$(id -u)" = 0
-          test -s /sys/fs/cgroup/cgroup.controllers
-          grep -qw memory /sys/fs/cgroup/cgroup.controllers
-          grep -qw pids /sys/fs/cgroup/cgroup.controllers
-          grep -qw cpu /sys/fs/cgroup/cgroup.controllers
+          test -r /sys/fs/cgroup/cgroup.controllers
+          controllers=$(cat /sys/fs/cgroup/cgroup.controllers)
+          test -n "$controllers"
+          grep -qw memory <<<"$controllers"
+          grep -qw pids <<<"$controllers"
+          grep -qw cpu <<<"$controllers"
           actual_kernel=$(uname -r | cut -d- -f1)
           test "$(printf '%s\n' 5.14 "$actual_kernel" | sort -V | head -n1)" = 5.14
           probe="/sys/fs/cgroup/coop-ci-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

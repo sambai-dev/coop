@@ -293,9 +293,9 @@ pub(crate) async fn preflight_interpreter(
     let code = match language {
         "python" => "print('COOP_NAIVE_PREFLIGHT_OK')",
         "node" => "console.log('COOP_NAIVE_PREFLIGHT_OK')",
-        // `cat` is intentionally external. Git's bin/bash.exe bootstraps its
-        // Unix tool path under Coop's sanitized environment; usr/bin/bash.exe
-        // does not, even though an echo-only canary would appear healthy.
+        // `cat` is intentionally external. A candidate is accepted only when
+        // its Unix tool path works under Coop's sanitized environment; an
+        // echo-only canary would miss a partially usable Bash installation.
         "bash" => concat!(
             "probe_value=\"$(printf '%s' COOP_NATIVE_BASH | cat)\" || exit 70\n",
             "test \"$probe_value\" = COOP_NATIVE_BASH || exit 71\n",
@@ -851,9 +851,9 @@ pub(crate) fn resolve_native_windows_bash(override_bin: Option<&str>) -> io::Res
             push_path_candidates(&mut candidates, &configured);
         }
     } else {
-        // Prefer Git's bin/bash.exe. Unlike usr/bin/bash.exe, this launcher
-        // establishes Git's /usr/bin mapping even with Coop's sanitized PATH,
-        // so scripts can use external utilities such as cat and sed.
+        // Prefer Git's bin/bash.exe because it normally establishes Git's
+        // Unix tool mapping itself. Other native candidates remain eligible
+        // when the bounded startup canary proves external tools work.
         push_known_git_bash_candidates(&mut candidates);
         push_path_candidates(&mut candidates, std::path::Path::new("bash.exe"));
     }
