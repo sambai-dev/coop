@@ -1,12 +1,53 @@
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 pub struct Tenant(pub String);
+
+#[derive(Debug, Clone)]
+pub struct StreamTicket {
+    pub job_id: String,
+    pub tenant: String,
+    pub expires_at_ms: i64,
+}
+
+pub const STREAM_TICKET_TTL_MS: i64 = 30_000;
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+/// Mint a high-entropy, one-use WebSocket credential. Two independently
+/// randomized UUIDv7 values provide substantially more entropy than a job id
+/// while keeping the implementation dependency-free.
+pub fn issue_stream_ticket(state: &crate::AppState, job_id: &str, tenant: &str) -> (String, i64) {
+    let expires_at_ms = now_ms() + STREAM_TICKET_TTL_MS;
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::now_v7().simple(),
+        uuid::Uuid::now_v7().simple()
+    );
+    state
+        .stream_tickets
+        .retain(|_, ticket| ticket.expires_at_ms > now_ms());
+    state.stream_tickets.insert(
+        token.clone(),
+        StreamTicket {
+            job_id: job_id.to_string(),
+            tenant: tenant.to_string(),
+            expires_at_ms,
+        },
+    );
+    (token, expires_at_ms)
+}
 
 fn key_digest(key: &str) -> [u8; 32] {
     Sha256::digest(key.as_bytes()).into()
@@ -39,14 +80,16 @@ fn authenticate(api_keys: &HashMap<String, String>, presented: &str) -> Option<S
 fn extract_bearer(req: &Request) -> Option<String> {
     let value = req.headers().get(header::AUTHORIZATION)?;
     let value = value.to_str().ok()?;
-    value.strip_prefix("Bearer ").map(str::to_string)
+    let (scheme, credential) = value.split_once(' ')?;
+    (scheme.eq_ignore_ascii_case("bearer") && !credential.is_empty())
+        .then(|| credential.to_string())
 }
 
-fn extract_query_key(req: &Request) -> Option<String> {
+fn extract_query_param(req: &Request, name: &str) -> Option<String> {
     let query = req.uri().query()?;
     for pair in query.split('&') {
         if let Some((k, v)) = pair.split_once('=') {
-            if k == "key" {
+            if k == name {
                 return urldecode(v);
             }
         }
@@ -84,26 +127,73 @@ pub async fn middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
-    // `?key=` exists solely for browser WebSockets (no custom headers there);
-    // restricting it to the stream endpoint keeps keys out of access logs for
-    // plain REST calls (deep-hunt note on AUDIT.md F-008's stated scope).
-    let key = extract_bearer(&req).or_else(|| {
-        if req.uri().path().ends_with("/stream") {
-            extract_query_key(&req)
-        } else {
-            None
-        }
-    });
-    let Some(key) = key else {
-        return (StatusCode::UNAUTHORIZED, "missing API key").into_response();
-    };
-    match authenticate(&state.cfg.api_keys, &key) {
-        Some(tenant) => {
-            req.extensions_mut().insert(Tenant(tenant));
-            next.run(req).await
-        }
-        None => (StatusCode::UNAUTHORIZED, "invalid API key").into_response(),
+    if let Some(key) = extract_bearer(&req) {
+        return match authenticate(&state.cfg.api_keys, &key) {
+            Some(tenant) => {
+                req.extensions_mut().insert(Tenant(tenant));
+                next.run(req).await
+            }
+            None => crate::routes::api_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_api_key",
+                "invalid API key",
+                false,
+            ),
+        };
     }
+
+    let path = req.uri().path().to_string();
+    if path.ends_with("/stream") {
+        if let Some(token) = extract_query_param(&req, "ticket") {
+            if let Some(grant) = state.stream_tickets.get(&token).map(|entry| entry.clone()) {
+                let expected_path = format!("/v1/jobs/{}/stream", grant.job_id);
+                if grant.expires_at_ms > now_ms() && path == expected_path {
+                    // Only one racing upgrade can consume the credential.
+                    if state.stream_tickets.remove(&token).is_some() {
+                        req.extensions_mut().insert(Tenant(grant.tenant));
+                        return next.run(req).await;
+                    }
+                }
+                if grant.expires_at_ms <= now_ms() {
+                    state.stream_tickets.remove(&token);
+                }
+            }
+            return crate::routes::api_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_stream_ticket",
+                "stream ticket is invalid, expired, or already used",
+                false,
+            );
+        }
+
+        // Compatibility for local development only. Production never accepts
+        // long-lived API keys in URLs, where proxies and access logs expose
+        // them. Clients should migrate to POST .../stream-ticket.
+        if !state.cfg.production {
+            if let Some(key) = extract_query_param(&req, "key") {
+                return match authenticate(&state.cfg.api_keys, &key) {
+                    Some(tenant) => {
+                        tracing::warn!("deprecated WebSocket ?key= authentication used");
+                        req.extensions_mut().insert(Tenant(tenant));
+                        next.run(req).await
+                    }
+                    None => crate::routes::api_error(
+                        StatusCode::UNAUTHORIZED,
+                        "invalid_api_key",
+                        "invalid API key",
+                        false,
+                    ),
+                };
+            }
+        }
+    }
+
+    crate::routes::api_error(
+        StatusCode::UNAUTHORIZED,
+        "missing_api_key",
+        "missing bearer API key",
+        false,
+    )
 }
 
 #[cfg(test)]

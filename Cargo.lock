@@ -150,19 +150,22 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "coop-exec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "coop-types",
  "libc",
  "nix",
+ "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
+ "windows-sys",
 ]
 
 [[package]]
 name = "coop-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "coop-exec",
@@ -170,6 +173,8 @@ dependencies = [
  "coop-types",
  "dashmap",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "serde",
  "serde_json",
  "sha2",
@@ -184,16 +189,18 @@ dependencies = [
 
 [[package]]
 name = "coop-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "futures-util",
  "serde_json",
+ "sha2",
  "sqlx",
  "tracing",
 ]
 
 [[package]]
 name = "coop-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",

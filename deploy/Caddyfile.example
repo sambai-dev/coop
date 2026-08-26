@@ -1,0 +1,20 @@
+# Caddy handles WebSocket upgrades automatically. Keep the Coop upstream on
+# loopback, disable sensitive request/query logging, and restrict clients at
+# the network or identity-aware proxy layer.
+{
+	servers {
+		timeouts {
+			read_body 30s
+			read_header 30s
+			# /result can legitimately wait 300s before writing a response.
+			write 6m
+			idle 10m
+		}
+		max_header_size 32KB
+	}
+}
+
+coop.example.internal {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:7300
+}

@@ -5,10 +5,13 @@
 //!
 //! - **allowlist**: an explicit common set of syscalls needed by CPython,
 //!   Node, and bash for ordinary compute/file work executes normally;
-//! - **trap list**: notorious kernel-attack-surface syscalls (`ptrace`, `bpf`,
-//!   module loading, keyrings, io_uring, namespace escapes, …) return
-//!   `SECCOMP_RET_TRAP`, killing the job with `SIGSYS` so the violation is
-//!   loud and observable in the event log;
+//! - **kill list**: notorious kernel-attack-surface syscalls (`ptrace`, `bpf`,
+//!   module loading, keyrings, namespace escapes, …) return
+//!   `SECCOMP_RET_KILL_PROCESS`. Unlike `TRAP`, this cannot be caught by a
+//!   tenant-installed SIGSYS handler;
+//! - **explicit errno deny list**: capability probes for disabled facilities
+//!   such as io_uring receive `EPERM`, allowing runtimes to fall back without
+//!   making the kernel facility usable;
 //! - **everything else**: `SECCOMP_RET_ERRNO(ENOSYS)` instead of a kill, so
 //!   glibc/Node feature probes (`clone3`, `faccessat2`, `epoll_pwait2`, …)
 //!   fall back to older syscalls the way they do on old kernels;
@@ -430,8 +433,8 @@ const ALLOWED: &[u32] = &[
     nr::setpgid,
     nr::setpriority,
     nr::setrlimit,
+    nr::setsid,
     nr::sigaltstack,
-    nr::socketpair,
     nr::stat,
     nr::statfs,
     nr::statx,
@@ -454,8 +457,8 @@ const ALLOWED: &[u32] = &[
 ];
 
 /// Notorious kernel-attack-surface syscalls: module loading, BPF, ptrace,
-/// keyrings, io_uring, namespace manipulation, raw clock/hostname control…
-/// These return `SECCOMP_RET_TRAP` → `SIGSYS` kills the job loudly instead of
+/// keyrings, namespace manipulation, raw clock/hostname control…
+/// These return `SECCOMP_RET_KILL_PROCESS` and cannot be caught instead of
 /// a silent `ENOSYS` that a probe could mistake for "unsupported".
 const TRAP: &[u32] = &[
     nr::acct,
@@ -472,9 +475,6 @@ const TRAP: &[u32] = &[
     nr::fsmount,
     nr::fspick,
     nr::init_module,
-    nr::io_uring_enter,
-    nr::io_uring_register,
-    nr::io_uring_setup,
     nr::ioperm,
     nr::iopl,
     nr::kcmp,
@@ -531,6 +531,15 @@ const TRAP: &[u32] = &[
     nr::vhangup,
 ];
 
+/// Disabled kernel facilities that legitimate runtimes probe during startup.
+/// Returning EPERM preserves feature-detection fallback while ensuring neither
+/// ring creation nor use of an inherited io_uring descriptor is possible.
+const ERRNO_DENY: &[u32] = &[
+    nr::io_uring_enter,
+    nr::io_uring_register,
+    nr::io_uring_setup,
+];
+
 // seccomp_data offsets on x86_64 (little-endian):
 //   offset 0 -> nr (u32);  offset 4 -> arch (u32);  offset 16 -> args[0] low
 const OFFSET_NR: u8 = 0;
@@ -572,13 +581,14 @@ fn errno_ret(err: i32) -> libc::sock_filter {
 }
 
 #[allow(non_snake_case)]
-fn trap() -> libc::sock_filter {
-    bpf_stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_TRAP)
+fn kill_process() -> libc::sock_filter {
+    bpf_stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_KILL_PROCESS)
 }
 
 /// Build the complete filter program. Pure so tests can validate its shape.
 pub fn build_filter() -> Vec<libc::sock_filter> {
-    let mut prog = Vec::with_capacity(ALLOWED.len() * 2 + TRAP.len() * 2 + 12);
+    let mut prog =
+        Vec::with_capacity(ALLOWED.len() * 2 + TRAP.len() * 2 + ERRNO_DENY.len() * 2 + 18);
 
     // Wrong architecture (x32 included) → kill loudly.
     prog.push(bpf_stmt(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 4));
@@ -588,13 +598,23 @@ pub fn build_filter() -> Vec<libc::sock_filter> {
         1,
         0,
     ));
-    prog.push(trap());
+    prog.push(kill_process());
 
     // Load syscall number.
     prog.push(bpf_stmt(
         libc::BPF_LD | libc::BPF_W | libc::BPF_ABS,
         u32::from(OFFSET_NR),
     ));
+
+    // x32 shares AUDIT_ARCH_X86_64 but uses a different syscall-number ABI.
+    // Reject it uncatchably before comparing any x86_64 syscall table entry.
+    prog.push(bpf_jump(
+        libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K,
+        0x4000_0000,
+        0,
+        1,
+    ));
+    prog.push(kill_process());
 
     // Trap list first: notorious surface dies regardless of arguments.
     for &n in TRAP {
@@ -604,7 +624,19 @@ pub fn build_filter() -> Vec<libc::sock_filter> {
             0,
             1,
         ));
-        prog.push(trap());
+        prog.push(kill_process());
+    }
+
+    // Explicit errno-deny list: the facility remains unavailable, but a
+    // capability probe can observe the denial and select a safe fallback.
+    for &n in ERRNO_DENY {
+        prog.push(bpf_jump(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            n,
+            0,
+            1,
+        ));
+        prog.push(errno_ret(libc::EPERM));
     }
 
     // clone() with namespace-creating flags is trapped (deep-hunt note on
@@ -612,7 +644,7 @@ pub fn build_filter() -> Vec<libc::sock_filter> {
     // threads are still allowed; only CLONE_NEW* is loud).
     // Flags live in arg0 low word on x86_64; mask the NEW* bits and trap
     // when any are set.
-    const CLONE_NS_MASK: u32 = 0x7C02_0000; // NEWUSER|NEWNS|NEWNET|NEWPID|NEWIPC|NEWUTS
+    const CLONE_NS_MASK: u32 = 0x7E02_0080; // all CLONE_NEW* incl. CGROUP/TIME
     prog.push(bpf_jump(
         libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
         nr::clone,
@@ -633,13 +665,20 @@ pub fn build_filter() -> Vec<libc::sock_filter> {
         1,
         0,
     ));
-    prog.push(trap());
+    prog.push(kill_process());
     prog.push(allow());
 
-    // socket(domain): AF_UNIX allowed; every other family gets EAFNOSUPPORT.
+    // socket(domain) and socketpair(domain): AF_UNIX allowed; every other
+    // family gets EAFNOSUPPORT.
     prog.push(bpf_jump(
         libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
         nr::socket,
+        1,
+        0,
+    ));
+    prog.push(bpf_jump(
+        libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+        nr::socketpair,
         0,
         4,
     ));
@@ -705,17 +744,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tables_are_sorted_and_disjoint() {
+    fn tables_are_unique_and_pairwise_disjoint() {
         // Order carries no semantics in a linear JEQ chain, but duplicates
-        // and overlap with the trap list would silently weaken intent.
-        let mut allowed = ALLOWED.to_vec();
-        allowed.sort_unstable();
-        assert!(
-            allowed.windows(2).all(|w| w[0] != w[1]),
-            "ALLOWED must not contain duplicates"
-        );
-        for a in ALLOWED {
-            assert!(!TRAP.contains(a), "syscall {a} must not be in both tables");
+        // and overlap between verdict tables would silently weaken intent.
+        for (name, table) in [
+            ("ALLOWED", ALLOWED),
+            ("TRAP", TRAP),
+            ("ERRNO_DENY", ERRNO_DENY),
+        ] {
+            let mut entries = table.to_vec();
+            entries.sort_unstable();
+            assert!(
+                entries.windows(2).all(|window| window[0] != window[1]),
+                "{name} must not contain duplicates"
+            );
+        }
+        for call in ALLOWED {
+            assert!(!TRAP.contains(call), "syscall {call} overlaps TRAP");
+            assert!(
+                !ERRNO_DENY.contains(call),
+                "syscall {call} overlaps ERRNO_DENY"
+            );
+        }
+        for call in TRAP {
+            assert!(
+                !ERRNO_DENY.contains(call),
+                "syscall {call} overlaps ERRNO_DENY"
+            );
         }
     }
 
@@ -727,13 +782,23 @@ mod tests {
             nr::init_module,
             nr::keyctl,
             nr::setns,
-            nr::io_uring_setup,
             nr::userfaultfd,
             nr::perf_event_open,
             nr::mount,
         ] {
             assert!(!ALLOWED.contains(&call), "{call} must not be allowed");
             assert!(TRAP.contains(&call), "{call} must be trapped");
+        }
+        for call in [
+            nr::io_uring_setup,
+            nr::io_uring_enter,
+            nr::io_uring_register,
+        ] {
+            assert!(!ALLOWED.contains(&call), "{call} must not be allowed");
+            assert!(
+                ERRNO_DENY.contains(&call),
+                "{call} must be explicitly errno-denied"
+            );
         }
     }
 
@@ -810,7 +875,12 @@ mod tests {
                     ip += 1;
                 }
                 CLASS_JMP => {
-                    ip += if acc == insn.k {
+                    let matches = if insn.code & 0xf0 == libc::BPF_JSET as u16 {
+                        acc & insn.k != 0
+                    } else {
+                        acc == insn.k
+                    };
+                    ip += if matches {
                         1 + insn.jt as usize
                     } else {
                         1 + insn.jf as usize
@@ -827,25 +897,45 @@ mod tests {
         // ordinary calls → ALLOW
         assert_eq!(simulate(nr::write, 0), libc::SECCOMP_RET_ALLOW);
         assert_eq!(simulate(nr::openat, 0), libc::SECCOMP_RET_ALLOW);
-        // trap list → TRAP (high bits carry SECCOMP_RET_TRAP)
+        // kill list → KILL_PROCESS, which cannot be caught by the workload.
         let trapped = simulate(nr::ptrace, 0);
-        assert_eq!(trapped & 0x7fff_0000, libc::SECCOMP_RET_TRAP);
+        assert_eq!(trapped & 0xffff_0000, libc::SECCOMP_RET_KILL_PROCESS);
         let bpf_trapped = simulate(nr::bpf, 0);
-        assert_eq!(bpf_trapped & 0x7fff_0000, libc::SECCOMP_RET_TRAP);
+        assert_eq!(bpf_trapped & 0xffff_0000, libc::SECCOMP_RET_KILL_PROCESS);
+        // io_uring stays unavailable, but runtime capability probes survive.
+        for call in [
+            nr::io_uring_setup,
+            nr::io_uring_enter,
+            nr::io_uring_register,
+        ] {
+            let denied = simulate(call, 0);
+            assert_eq!(denied & 0x7fff_0000, libc::SECCOMP_RET_ERRNO);
+            assert_eq!(denied & 0xffff, libc::EPERM as u32);
+        }
         // unknown-but-harmless → ENOSYS
         let verdict = simulate(9999, 0);
         assert_eq!(verdict & 0x7fff_0000, libc::SECCOMP_RET_ERRNO);
         assert_eq!(verdict & 0xffff, libc::ENOSYS as u32);
-        // socket(AF_UNIX) → ALLOW; socket(AF_INET=2) → EAFNOSUPPORT
+        // socket/socketpair(AF_UNIX) → ALLOW; exotic domains → EAFNOSUPPORT
         assert_eq!(simulate(nr::socket, AF_UNIX), libc::SECCOMP_RET_ALLOW);
         let inet = simulate(nr::socket, 2);
         assert_eq!(inet & 0x7fff_0000, libc::SECCOMP_RET_ERRNO);
         assert_eq!(inet & 0xffff, libc::EAFNOSUPPORT as u32);
+        assert_eq!(simulate(nr::socketpair, AF_UNIX), libc::SECCOMP_RET_ALLOW);
+        for domain in [2, 30] {
+            let exotic_pair = simulate(nr::socketpair, domain);
+            assert_eq!(exotic_pair & 0x7fff_0000, libc::SECCOMP_RET_ERRNO);
+            assert_eq!(exotic_pair & 0xffff, libc::EAFNOSUPPORT as u32);
+        }
         // clone() without namespace flags → ALLOW; with NEW* → TRAP
         assert_eq!(simulate(nr::clone, 0), libc::SECCOMP_RET_ALLOW);
         let ns_clone = simulate(nr::clone, 0x1000_0000); // CLONE_NEWUSER
-        assert_eq!(ns_clone & 0x7fff_0000, libc::SECCOMP_RET_TRAP);
+        assert_eq!(ns_clone & 0xffff_0000, libc::SECCOMP_RET_KILL_PROCESS);
         let ns_net = simulate(nr::clone, 0x4000_0000); // CLONE_NEWNET
-        assert_eq!(ns_net & 0x7fff_0000, libc::SECCOMP_RET_TRAP);
+        assert_eq!(ns_net & 0xffff_0000, libc::SECCOMP_RET_KILL_PROCESS);
+        let ns_time = simulate(nr::clone, 0x80); // CLONE_NEWTIME
+        assert_eq!(ns_time & 0xffff_0000, libc::SECCOMP_RET_KILL_PROCESS);
+        let x32 = simulate(0x4000_0000 | nr::write, 0);
+        assert_eq!(x32 & 0xffff_0000, libc::SECCOMP_RET_KILL_PROCESS);
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::{Component, Path};
 
 pub const DEV_DEFAULT_API_KEY: &str = "local:coop-dev-key";
 
@@ -12,6 +13,17 @@ pub struct Config {
     pub rate_per_min: u32,
     pub sandbox: String,
     pub jobs_root: String,
+    /// A private, purpose-built root filesystem used by the namespace
+    /// executor. Host `/` is never an acceptable sandbox root.
+    pub rootfs: Option<String>,
+    /// Dedicated single-threaded bootstrap executable for namespace setup.
+    pub sandbox_helper: Option<String>,
+    /// Whether production policy is active. Kept in the parsed configuration
+    /// so embedded servers cannot accidentally use the caller process' env.
+    pub production: bool,
+    /// Conspicuous acknowledgement required for the unisolated executor in
+    /// production. This is deliberately separate from `COOP_SANDBOX=off`.
+    pub unsafe_allow_naive: bool,
     pub python_bin: Option<String>,
     pub node_bin: Option<String>,
     pub bash_bin: Option<String>,
@@ -39,6 +51,10 @@ impl std::fmt::Debug for Config {
             .field("rate_per_min", &self.rate_per_min)
             .field("sandbox", &self.sandbox)
             .field("jobs_root", &self.jobs_root)
+            .field("rootfs", &self.rootfs)
+            .field("sandbox_helper", &self.sandbox_helper)
+            .field("production", &self.production)
+            .field("unsafe_allow_naive", &self.unsafe_allow_naive)
             .field("python_bin", &self.python_bin)
             .field("node_bin", &self.node_bin)
             .field("bash_bin", &self.bash_bin)
@@ -52,6 +68,320 @@ fn env_or(getenv: &dyn Fn(&str) -> Option<String>, key: &str, default: &str) -> 
         .unwrap_or_else(|| default.to_string())
 }
 
+fn parse_number<T>(
+    getenv: &dyn Fn(&str) -> Option<String>,
+    key: &str,
+    default: &str,
+    min: T,
+    max: T,
+) -> Result<T, String>
+where
+    T: std::str::FromStr + PartialOrd + Copy + std::fmt::Display,
+{
+    let raw = env_or(getenv, key, default);
+    let value = raw
+        .parse::<T>()
+        .map_err(|_| format!("{key} must be a base-10 integer, got {raw:?}"))?;
+    if value < min || value > max {
+        return Err(format!(
+            "{key} must be between {min} and {max}, got {value}"
+        ));
+    }
+    Ok(value)
+}
+
+fn env_true(getenv: &dyn Fn(&str) -> Option<String>, key: &str) -> bool {
+    matches!(
+        getenv(key)
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// Reject paths for which a permissions call could affect a broad or
+/// redirected part of the host. The executor creates children beneath this
+/// directory, so it must be an absolute, dedicated, non-symlink path.
+pub fn validate_jobs_root(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("COOP_JOBS_ROOT must be an absolute path".to_string());
+    }
+    if path
+        .components()
+        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err("COOP_JOBS_ROOT must not contain '.' or '..' components".to_string());
+    }
+
+    let normal_components = path
+        .components()
+        .filter(|part| matches!(part, Component::Normal(_)))
+        .count();
+    if normal_components < 2 {
+        return Err(format!(
+            "COOP_JOBS_ROOT={} is too broad; choose a dedicated directory such as /var/lib/coop/jobs",
+            path.display()
+        ));
+    }
+
+    // Known broad directories are dangerous even though some have two path
+    // components on Windows (for example C:\\Users).
+    let lexical: std::path::PathBuf = path.components().collect();
+    let normalized = lexical
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let normalized = normalized.trim_end_matches('/');
+    let broad = [
+        "/applications",
+        "/library",
+        "/network",
+        "/system",
+        "/users",
+        "/volumes",
+        "/app",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/tmp",
+        "/var",
+        "/var/cache",
+        "/var/lib",
+        "/var/log",
+        "/var/run",
+        "/var/spool",
+        "/var/tmp",
+        "/usr",
+        "/usr/bin",
+        "/usr/include",
+        "/usr/lib",
+        "/usr/lib64",
+        "/usr/local",
+        "/usr/local/bin",
+        "/usr/local/etc",
+        "/usr/local/lib",
+        "/usr/local/sbin",
+        "/usr/sbin",
+        "/usr/share",
+        "/opt",
+        "/home",
+        "/lib",
+        "/lib64",
+        "/media",
+        "/mnt",
+        "/proc",
+        "/private",
+        "/private/etc",
+        "/private/tmp",
+        "/private/var",
+        "/private/var/lib",
+        "/private/var/tmp",
+        "/root",
+        "/run",
+        "/sbin",
+        "/srv",
+        "/sys",
+        "/workspace",
+        "c:/windows",
+        "c:/windows/system32",
+        "c:/program files",
+        "c:/program files (x86)",
+        "c:/programdata",
+        "c:/users",
+    ];
+    if broad.contains(&normalized) {
+        return Err(format!(
+            "COOP_JOBS_ROOT={} is a shared system directory; choose a dedicated child",
+            path.display()
+        ));
+    }
+    let mut dynamic_forbidden = vec![std::env::temp_dir()];
+    if let Ok(current) = std::env::current_dir() {
+        dynamic_forbidden.push(current);
+    }
+    for variable in ["HOME", "USERPROFILE"] {
+        if let Some(value) = std::env::var_os(variable) {
+            dynamic_forbidden.push(value.into());
+        }
+    }
+    if dynamic_forbidden.iter().any(|candidate| {
+        candidate
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .eq_ignore_ascii_case(normalized)
+    }) {
+        return Err(format!(
+            "COOP_JOBS_ROOT={} must not be a home, temporary, or current working directory",
+            path.display()
+        ));
+    }
+
+    validate_existing_jobs_root_chain(path, false)
+}
+
+/// Validate, create, lock down, and revalidate the jobs directory. Strict
+/// mode is for Linux production/namespace execution, where every existing
+/// component must be root-owned and immune to group/world path replacement.
+pub fn prepare_jobs_root(path: &Path, strict: bool) -> Result<(), String> {
+    validate_jobs_root(path)?;
+    validate_existing_jobs_root_chain(path, strict)?;
+    if std::fs::symlink_metadata(path).is_ok() {
+        require_existing_jobs_root_private(path)?;
+    } else {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("COOP_JOBS_ROOT {} has no dedicated parent", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut parents = std::fs::DirBuilder::new();
+            parents.recursive(true).mode(0o700);
+            parents.create(parent).map_err(|error| {
+                format!(
+                    "failed to create COOP_JOBS_ROOT parent {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create COOP_JOBS_ROOT parent {}: {error}",
+                parent.display()
+            )
+        })?;
+
+        // Validate the freshly completed parent chain before the atomic leaf
+        // create. Existing shared directories are never chmodded: if another
+        // creator wins this race, it must already satisfy the private-leaf
+        // invariant or startup fails without mutating it.
+        validate_existing_jobs_root_chain(parent, strict)?;
+        #[cfg(unix)]
+        let create_result = {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut leaf = std::fs::DirBuilder::new();
+            leaf.mode(0o700).create(path)
+        };
+        #[cfg(not(unix))]
+        let create_result = std::fs::create_dir(path);
+        match create_result {
+            Ok(()) => coop_exec::owner_only_dir(path).map_err(|error| {
+                format!(
+                    "failed to lock down newly created COOP_JOBS_ROOT {}: {error}",
+                    path.display()
+                )
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                require_existing_jobs_root_private(path)?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to create COOP_JOBS_ROOT {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    validate_existing_jobs_root_chain(path, strict)
+}
+
+fn require_existing_jobs_root_private(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .map_err(|error| {
+                format!(
+                    "cannot inspect existing COOP_JOBS_ROOT {}: {error}",
+                    path.display()
+                )
+            })?
+            .permissions()
+            .mode()
+            & 0o7777;
+        if mode != 0o700 {
+            return Err(format!(
+                "existing COOP_JOBS_ROOT {} must already have mode 0700; refusing to chmod a potentially shared directory (found {mode:04o})",
+                path.display()
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn validate_existing_jobs_root_chain(path: &Path, strict: bool) -> Result<(), String> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = strict;
+    for ancestor in path.ancestors() {
+        let metadata = match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect COOP_JOBS_ROOT ancestor {}: {error}",
+                    ancestor.display()
+                ))
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            #[cfg(target_os = "macos")]
+            if is_trusted_macos_system_alias(ancestor) {
+                continue;
+            }
+            return Err(format!(
+                "COOP_JOBS_ROOT must not traverse a symlink: {}",
+                ancestor.display()
+            ));
+        }
+        if !metadata.is_dir() {
+            return Err(format!(
+                "COOP_JOBS_ROOT ancestor {} is not a directory",
+                ancestor.display()
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        if strict {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+                return Err(format!(
+                    "COOP_JOBS_ROOT strict mode requires root-owned, non-group/world-writable components; {} is insecure",
+                    ancestor.display()
+                ));
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(format!(
+                    "COOP_JOBS_ROOT must not traverse a junction or reparse point: {}",
+                    ancestor.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn is_trusted_macos_system_alias(path: &Path) -> bool {
+    let expected = match path.to_str() {
+        Some("/var") => "/private/var",
+        Some("/tmp") => "/private/tmp",
+        Some("/etc") => "/private/etc",
+        _ => return false,
+    };
+    path.canonicalize()
+        .is_ok_and(|target| target == Path::new(expected))
+}
+
 fn default_jobs_root() -> String {
     if cfg!(target_os = "linux") {
         "/var/lib/coop/jobs".to_string()
@@ -61,6 +391,19 @@ fn default_jobs_root() -> String {
             .to_string_lossy()
             .into_owned()
     }
+}
+
+fn default_sandbox_helper() -> Option<String> {
+    let executable = std::env::current_exe().ok()?;
+    let name = if cfg!(windows) {
+        "coop-sandbox-init.exe"
+    } else {
+        "coop-sandbox-init"
+    };
+    let candidate = executable.parent()?.join(name);
+    candidate
+        .is_file()
+        .then(|| candidate.to_string_lossy().into_owned())
 }
 
 fn is_production_env(value: Option<String>) -> bool {
@@ -116,50 +459,90 @@ impl Config {
             if entry.is_empty() {
                 continue;
             }
-            match entry.split_once(':') {
-                Some((tenant, key)) => {
-                    api_keys.insert(key.to_string(), tenant.to_string());
-                }
+            let (tenant, key) = match entry.split_once(':') {
+                Some((tenant, key)) => (tenant.trim(), key.trim()),
+                None if !production => ("local", entry),
                 None => {
-                    api_keys.insert(entry.to_string(), "local".to_string());
+                    return Err(
+                        "each production COOP_API_KEYS entry must use tenant:key syntax"
+                            .to_string(),
+                    )
                 }
+            };
+            if tenant.is_empty() {
+                return Err("COOP_API_KEYS contains a blank tenant".to_string());
             }
+            if key.is_empty() {
+                return Err(format!(
+                    "COOP_API_KEYS contains a blank key for tenant {tenant:?}"
+                ));
+            }
+            if production && (key == "coop-dev-key" || key.len() < 16) {
+                return Err(format!(
+                    "production API key for tenant {tenant:?} is public or too short (minimum 16 characters)"
+                ));
+            }
+            if api_keys
+                .insert(key.to_string(), tenant.to_string())
+                .is_some()
+            {
+                return Err("COOP_API_KEYS contains a duplicate key".to_string());
+            }
+        }
+
+        if api_keys.is_empty() {
+            return Err("COOP_API_KEYS did not contain any usable tenant keys".to_string());
+        }
+
+        let sandbox = env_or(getenv, "COOP_SANDBOX", "auto");
+        let unsafe_allow_naive = env_true(getenv, "COOP_UNSAFE_ALLOW_NAIVE");
+        let seccomp = !matches!(
+            env_or(getenv, "COOP_SECCOMP", "auto")
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "off" | "none" | "disabled" | "false" | "0"
+        );
+        if production && !seccomp {
+            return Err("COOP_SECCOMP cannot be disabled in production".to_string());
         }
 
         Ok(Self {
             addr: env_or(getenv, "COOP_ADDR", "127.0.0.1:7300"),
             db_path: env_or(getenv, "COOP_DB", "coop.db"),
             api_keys,
-            workers: env_or(getenv, "COOP_WORKERS", "4")
-                .parse()
-                .unwrap_or(4)
-                .max(1),
-            tenant_concurrency: env_or(getenv, "COOP_TENANT_CONCURRENCY", "2")
-                .parse()
-                .unwrap_or(2)
-                .max(1),
-            rate_per_min: env_or(getenv, "COOP_RATE_PER_MIN", "120")
-                .parse()
-                .unwrap_or(120),
-            sandbox: env_or(getenv, "COOP_SANDBOX", "auto"),
+            workers: parse_number(getenv, "COOP_WORKERS", "4", 1usize, 256usize)?,
+            tenant_concurrency: parse_number(
+                getenv,
+                "COOP_TENANT_CONCURRENCY",
+                "2",
+                1usize,
+                256usize,
+            )?,
+            rate_per_min: parse_number(getenv, "COOP_RATE_PER_MIN", "120", 1u32, 1_000_000u32)?,
+            sandbox,
             jobs_root: env_or(getenv, "COOP_JOBS_ROOT", &default_jobs_root()),
+            rootfs: getenv("COOP_ROOTFS")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            sandbox_helper: getenv("COOP_SANDBOX_HELPER")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .or_else(default_sandbox_helper),
+            production,
+            unsafe_allow_naive,
             python_bin: getenv("COOP_PYTHON"),
             node_bin: getenv("COOP_NODE"),
             bash_bin: getenv("COOP_BASH"),
-            retention_hours: env_or(getenv, "COOP_RETENTION_HOURS", "168")
-                .parse()
-                .unwrap_or(168),
-            sweep_interval_secs: env_or(getenv, "COOP_SWEEP_INTERVAL_SECS", "3600")
-                .parse()
-                .unwrap_or(3600)
-                .max(60),
-            seccomp: !matches!(
-                env_or(getenv, "COOP_SECCOMP", "auto")
-                    .trim()
-                    .to_ascii_lowercase()
-                    .as_str(),
-                "off" | "none" | "disabled" | "false" | "0"
-            ),
+            retention_hours: parse_number(getenv, "COOP_RETENTION_HOURS", "168", 0u64, 87_600u64)?,
+            sweep_interval_secs: parse_number(
+                getenv,
+                "COOP_SWEEP_INTERVAL_SECS",
+                "3600",
+                60u64,
+                86_400u64,
+            )?,
+            seccomp,
         })
     }
 
@@ -208,18 +591,230 @@ mod tests {
 
     #[test]
     fn prod_mode_with_explicit_keys_does_not_get_dev_default() {
-        let cfg = Config::from_sources(&source(&[("COOP_API_KEYS", "acme:s3cr3t")]), true).unwrap();
-        assert_eq!(cfg.api_keys.get("s3cr3t").map(String::as_str), Some("acme"));
+        let cfg = Config::from_sources(
+            &source(&[("COOP_API_KEYS", "acme:correct-horse-battery-staple")]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.api_keys
+                .get("correct-horse-battery-staple")
+                .map(String::as_str),
+            Some("acme")
+        );
         assert!(!cfg.api_keys.contains_key("coop-dev-key"));
     }
 
     #[test]
     fn debug_output_never_contains_plaintext_keys() {
-        let cfg =
-            Config::from_sources(&source(&[("COOP_API_KEYS", "acme:s3cr3t-value")]), true).unwrap();
+        let cfg = Config::from_sources(
+            &source(&[("COOP_API_KEYS", "acme:s3cr3t-value-that-is-long")]),
+            true,
+        )
+        .unwrap();
         let rendered = format!("{cfg:?}");
-        assert!(!rendered.contains("s3cr3t-value"), "leaked: {rendered}");
+        assert!(
+            !rendered.contains("s3cr3t-value-that-is-long"),
+            "leaked: {rendered}"
+        );
         assert!(rendered.contains("redacted"), "{rendered}");
+    }
+
+    #[test]
+    fn blank_tenants_keys_and_public_production_keys_are_rejected() {
+        for raw in [
+            ":a-long-enough-secret",
+            "acme:",
+            "acme:coop-dev-key",
+            "acme:too-short",
+        ] {
+            let err =
+                Config::from_sources(&source(&[("COOP_API_KEYS", raw)]), true).expect_err(raw);
+            assert!(
+                err.contains("blank") || err.contains("short") || err.contains("public"),
+                "{raw}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_numeric_configuration_is_not_silently_defaulted() {
+        for (key, value) in [
+            ("COOP_WORKERS", "many"),
+            ("COOP_TENANT_CONCURRENCY", "0"),
+            ("COOP_RATE_PER_MIN", "-1"),
+            ("COOP_SWEEP_INTERVAL_SECS", "59"),
+        ] {
+            let err = Config::from_sources(&source(&[(key, value)]), false).expect_err(key);
+            assert!(err.contains(key), "{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn production_cannot_disable_seccomp() {
+        let err = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("COOP_SECCOMP", "off"),
+            ]),
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("COOP_SECCOMP"), "{err}");
+    }
+
+    #[test]
+    fn jobs_root_must_be_absolute_and_dedicated() {
+        assert!(validate_jobs_root(Path::new("relative/jobs")).is_err());
+        let root = if cfg!(windows) {
+            Path::new("C:\\")
+        } else {
+            Path::new("/")
+        };
+        assert!(validate_jobs_root(root).is_err());
+        let dedicated =
+            std::env::temp_dir().join(format!("coop-config-test-{}/jobs", uuid::Uuid::now_v7()));
+        assert!(
+            validate_jobs_root(&dedicated).is_ok(),
+            "{}",
+            dedicated.display()
+        );
+    }
+
+    #[test]
+    fn shared_system_leaf_is_rejected_before_any_permission_change() {
+        let configured = if cfg!(windows) {
+            Path::new("C:\\Program Files")
+        } else {
+            Path::new("/usr/local")
+        };
+        let shared = if cfg!(unix) {
+            Path::new("/usr/bin")
+        } else {
+            configured
+        };
+        #[cfg(unix)]
+        let before = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(shared)
+                .expect("standard shared system directory exists")
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+
+        let error =
+            validate_jobs_root(configured).expect_err("shared system leaf is never dedicated");
+        assert!(
+            error.contains("shared system directory") || error.contains("too broad"),
+            "{error}"
+        );
+        assert!(validate_jobs_root(shared).is_err());
+        if cfg!(unix) {
+            for broad in [
+                "/opt",
+                "/private/var/lib",
+                "/usr/local",
+                "/var/lib",
+                "/workspace",
+            ] {
+                assert!(
+                    validate_jobs_root(Path::new(broad)).is_err(),
+                    "broad shared path was accepted: {broad}"
+                );
+            }
+            let dotted = Path::new("/usr/./bin");
+            let dotted_error = validate_jobs_root(dotted)
+                .expect_err("dot components must not bypass the shared-root policy");
+            assert!(
+                dotted_error.contains("shared system directory"),
+                "{dotted_error}"
+            );
+            let repeated = validate_jobs_root(Path::new("/usr//bin"))
+                .expect_err("repeated separators must not bypass the shared-root policy");
+            assert!(repeated.contains("shared system directory"), "{repeated}");
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let after = std::fs::metadata(shared)
+                .expect("validation did not alter the directory")
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(after, before, "validation must be strictly non-mutating");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_non_private_leaf_is_rejected_without_chmod() {
+        use std::os::unix::fs::PermissionsExt;
+        let base =
+            std::env::temp_dir().join(format!("coop-existing-root-{}", uuid::Uuid::now_v7()));
+        let root = base.join("jobs");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = prepare_jobs_root(&root, false)
+            .expect_err("startup must not chmod an arbitrary existing directory");
+        assert!(error.contains("must already have mode 0700"), "{error}");
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn development_jobs_root_under_os_temp_is_prepared_owner_only() {
+        let root =
+            std::env::temp_dir().join(format!("coop-config-prepare-{}/jobs", uuid::Uuid::now_v7()));
+        prepare_jobs_root(&root, false).expect("prepare development jobs root");
+        assert!(root.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strict_jobs_root_rejects_shared_writable_ancestor() {
+        let root =
+            std::env::temp_dir().join(format!("coop-config-strict-{}/jobs", uuid::Uuid::now_v7()));
+        let error = prepare_jobs_root(&root, true).unwrap_err();
+        assert!(
+            error.contains("root-owned") || error.contains("writable"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jobs_root_rejects_dangling_symlink_component() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("coop-config-link-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&base).unwrap();
+        let link = base.join("redirect");
+        symlink(base.join("missing-target"), &link).unwrap();
+        let error = validate_jobs_root(&link.join("jobs")).unwrap_err();
+        assert!(error.contains("symlink"), "{error}");
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_default_temp_jobs_root_accepts_trusted_system_aliases() {
+        let root = std::env::temp_dir().join("coop-jobs");
+        validate_jobs_root(&root).expect("macOS /var or /tmp system alias is trusted");
     }
 
     #[test]

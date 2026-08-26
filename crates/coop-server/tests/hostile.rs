@@ -11,7 +11,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
-const TERMINAL: [&str; 5] = ["succeeded", "failed", "timed_out", "oom_killed", "error"];
+const TERMINAL: [&str; 6] = [
+    "succeeded",
+    "failed",
+    "timed_out",
+    "oom_killed",
+    "cancelled",
+    "error",
+];
 
 fn init_tracing() {
     use std::sync::Once;
@@ -53,8 +60,37 @@ fn preflight() -> bool {
         return false;
     }
 
+    for variable in ["COOP_ROOTFS", "COOP_SANDBOX_HELPER"] {
+        let configured = std::env::var(variable).ok();
+        if configured
+            .as_deref()
+            .is_none_or(|value| !std::path::Path::new(value).exists())
+        {
+            eprintln!("SKIP: {variable} must point to a prepared containment test artifact");
+            return false;
+        }
+    }
+
     eprintln!("preflight: root=yes, cgroup-v2=yes — running containment suite");
     true
+}
+
+fn coop_cgroup_jobs_root() -> std::path::PathBuf {
+    let membership =
+        std::fs::read_to_string("/proc/self/cgroup").expect("read unified cgroup membership");
+    let relative = membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .expect("unified cgroup v2 membership");
+    let mut delegated =
+        std::path::Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/'));
+    if delegated
+        .file_name()
+        .is_some_and(|name| name == "coop-supervisor")
+    {
+        delegated.pop();
+    }
+    delegated.join("coop-jobs")
 }
 
 async fn spawn_app_with_root() -> (Router, String) {
@@ -71,6 +107,10 @@ async fn spawn_app_with_root() -> (Router, String) {
         rate_per_min: 10_000,
         sandbox: "ns".to_string(),
         jobs_root,
+        rootfs: std::env::var("COOP_ROOTFS").ok(),
+        sandbox_helper: std::env::var("COOP_SANDBOX_HELPER").ok(),
+        production: false,
+        unsafe_allow_naive: false,
         python_bin: None,
         node_bin: None,
         bash_bin: None,
@@ -79,7 +119,7 @@ async fn spawn_app_with_root() -> (Router, String) {
         seccomp: true,
     };
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, state, queue_rx) = coop_server::build_app(cfg, store).expect("build app");
+    let (app, state, queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
     // Read everything needed off `state` before it moves into the workers.
     let cfg_jobs_root = state.cfg.jobs_root.clone();
     eprintln!(
@@ -151,11 +191,8 @@ async fn replay_events(app: &Router, job_id: &str) -> serde_json::Value {
 }
 
 async fn replay_stdout(app: &Router, job_id: &str) -> String {
-    replay_events(app, job_id)
-        .await
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    let replay = replay_events(app, job_id).await;
+    event_values(&replay)
         .iter()
         .filter(|e| e["kind"] == "stdout")
         .filter_map(|e| e["data"]["line"].as_str().map(str::to_string))
@@ -163,23 +200,32 @@ async fn replay_stdout(app: &Router, job_id: &str) -> String {
         .join("\n")
 }
 
+fn event_values(replay: &serde_json::Value) -> &[serde_json::Value] {
+    replay
+        .get("events")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
 fn render_events(events: &serde_json::Value) -> String {
-    events
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .map(|e| {
-                    format!(
-                        "  {:>3} [{:<9}] {}",
-                        e["seq"],
-                        e["kind"].as_str().unwrap_or("?"),
-                        e["data"]
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
+    let rendered = event_values(events)
+        .iter()
+        .map(|e| {
+            format!(
+                "  {:>3} [{:<9}] {}",
+                e["seq"],
+                e["kind"].as_str().unwrap_or("?"),
+                e["data"]
+            )
         })
-        .unwrap_or_else(|| "<no events>".to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if rendered.is_empty() {
+        "<no events>".to_string()
+    } else {
+        rendered
+    }
 }
 
 async fn expect_status(app: &Router, job_id: &str, acceptable: &[&str]) -> (String, f64) {
@@ -227,6 +273,19 @@ async fn contains_fork_bomb() {
         return;
     }
     let app = spawn_app().await;
+    let capabilities = send_raw(
+        &app,
+        Request::builder()
+            .method("GET")
+            .uri("/v1/capabilities")
+            .header(header::AUTHORIZATION, "Bearer test-key")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(capabilities["execution"]["isolated"], true);
+    assert_eq!(capabilities["execution"]["seccomp"], true);
+    assert_eq!(capabilities["execution"]["networking"], "disabled");
     let id = submit(
         &app,
         "bash",
@@ -240,8 +299,8 @@ async fn contains_fork_bomb() {
         "fork bomb must be contained quickly, took {elapsed}s"
     );
     let stdout = replay_stdout(&app, &id).await;
-    let spawned: u32 = stdout
-        .split("spawned=")
+    let alive: u32 = stdout
+        .split("alive=")
         .nth(1)
         .map(|rest| {
             rest.chars()
@@ -252,8 +311,8 @@ async fn contains_fork_bomb() {
         })
         .unwrap_or(0);
     assert!(
-        spawned <= 100,
-        "pids.max must cap spawning; job reported spawned={spawned}\nstdout:\n{stdout}"
+        alive <= 33,
+        "pids.max must cap the live process tree; job reported alive={alive}\nstdout:\n{stdout}"
     );
     assert_host_still_serves(&app).await;
 }
@@ -301,7 +360,28 @@ async fn contains_memory_bomb() {
         serde_json::json!({ "wall_seconds": 15, "mem_mb": 128 }),
     )
     .await;
-    expect_status(&app, &id, &["oom_killed", "failed"]).await;
+    let (status, _) = expect_status(&app, &id, &["oom_killed"]).await;
+    assert_eq!(
+        status, "oom_killed",
+        "aggregate cgroup OOM must remain classifiable when PID1 cannot send a final frame"
+    );
+    let events = replay_events(&app, &id).await;
+    let values = event_values(&events);
+    assert!(
+        values
+            .iter()
+            .any(|event| event["kind"] == "violation"
+                && event["data"]["rule"] == "memory_cap_exceeded"),
+        "expected memory_cap_exceeded violation; events:\n{}",
+        render_events(&events)
+    );
+    assert!(
+        !values.iter().any(|event| {
+            event["kind"] == "violation" && event["data"]["rule"] == "executor_error"
+        }),
+        "cgroup OOM must not degrade to executor_error; events:\n{}",
+        render_events(&events)
+    );
     assert_host_still_serves(&app).await;
 }
 
@@ -341,15 +421,71 @@ async fn network_is_disabled_by_default() {
         serde_json::json!({ "wall_seconds": 10 }),
     )
     .await;
-    // With the seccomp allowlist active (default since F-005), the probe's
-    // socket() call traps with SIGSYS before Python can even report a
-    // graceful connection failure — an even stronger guarantee than the old
-    // "probe exits clean" behavior, so accept both.
-    let (status, _) = expect_status(&app, &id, &["succeeded", "failed"]).await;
+    let (status, _) = expect_status(&app, &id, &["succeeded"]).await;
+    assert_eq!(status, "succeeded");
     let stdout = replay_stdout(&app, &id).await;
     assert!(
-        stdout.contains("network blocked") || status == "failed",
+        stdout.contains("network blocked"),
         "network must be unreachable; probe said:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("RUNTIME-PROBES-DENIED-SAFELY"),
+        "io_uring and non-UNIX socketpair probes must return safe errno denials; stdout:\n{stdout}"
+    );
+    let detail = send_raw(
+        &app,
+        Request::builder()
+            .method("GET")
+            .uri(format!("/v1/jobs/{id}"))
+            .header(header::AUTHORIZATION, "Bearer test-key")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["effective_spec"]["limits"]["allow_network"], false);
+    assert_eq!(detail["execution_policy"]["network_allowed"], false);
+    assert_eq!(detail["execution_policy"]["networking"], "disabled");
+    assert_eq!(detail["execution_policy"]["bootstrap_ready"], true);
+    assert_eq!(detail["execution_policy"]["isolated"], true);
+    assert_eq!(detail["execution_policy"]["private_rootfs"], true);
+    assert_eq!(detail["execution_policy"]["dedicated_bootstrap"], true);
+    assert_eq!(detail["execution_policy"]["seccomp"], true);
+    for enforced in [
+        "wall_seconds",
+        "cpu_seconds",
+        "mem_mb",
+        "max_pids",
+        "max_file_mb",
+    ] {
+        assert_eq!(
+            detail["execution_policy"]["limit_enforcement"][enforced], true,
+            "namespace receipt must attest {enforced}: {detail}"
+        );
+        assert!(
+            detail["effective_spec"]["limits"][enforced].is_number(),
+            "namespace effective limit missing {enforced}: {detail}"
+        );
+    }
+    assert_eq!(detail["receipt"]["network_allowed"], false);
+    assert_eq!(detail["receipt"]["networking"], "disabled");
+    assert_eq!(detail["receipt"]["bootstrap_ready"], true);
+
+    let node = submit(
+        &app,
+        "node",
+        "console.log('NODE-SECCOMP-OK')",
+        serde_json::json!({ "wall_seconds": 10, "mem_mb": 128 }),
+    )
+    .await;
+    let (node_status, _) = expect_status(&app, &node, &["succeeded"]).await;
+    assert_eq!(
+        node_status, "succeeded",
+        "Node must survive its denied io_uring capability probe at low resident-memory limits"
+    );
+    let node_stdout = replay_stdout(&app, &node).await;
+    assert!(
+        node_stdout.contains("NODE-SECCOMP-OK"),
+        "Node did not reach console.log; stdout:\n{node_stdout}"
     );
     assert_host_still_serves(&app).await;
 }
@@ -419,6 +555,74 @@ async fn pid_bomb_is_capped() {
         stdout.contains("spawn refused"),
         "process-spawn storm must hit pids.max; stdout was:\n{stdout}"
     );
+    assert_host_still_serves(&app).await;
+}
+
+/// Per-job pids.max must not be supplemented with RLIMIT_NPROC while every
+/// workload shares host UID 65534: that rlimit is UID-wide and lets one job
+/// deny fork/thread creation to an otherwise empty sibling cgroup.
+#[tokio::test]
+#[ignore]
+async fn pid_limits_are_independent_across_concurrent_jobs() {
+    if !preflight() {
+        return;
+    }
+    let app = spawn_app().await;
+    let aggressor_code = r#"import os, time
+children = []
+for _ in range(48):
+    pid = os.fork()
+    if pid == 0:
+        time.sleep(10)
+        os._exit(0)
+    children.append(pid)
+print('AGGRESSOR-READY=' + str(len(children)), flush=True)
+time.sleep(10)
+"#;
+    let aggressor = submit(
+        &app,
+        "python",
+        aggressor_code,
+        serde_json::json!({ "wall_seconds": 15, "max_pids": 64 }),
+    )
+    .await;
+
+    let ready_deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let stdout = replay_stdout(&app, &aggressor).await;
+        if stdout.contains("AGGRESSOR-READY=48") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < ready_deadline,
+            "aggressor did not fill its own cgroup:\n{stdout}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let victim = submit(
+        &app,
+        "python",
+        "import os\npid=os.fork()\nif pid == 0: os._exit(0)\nos.waitpid(pid, 0)\nprint('VICTIM-FORK-OK')",
+        serde_json::json!({ "wall_seconds": 5, "max_pids": 8 }),
+    )
+    .await;
+    expect_status(&app, &victim, &["succeeded"]).await;
+    assert!(replay_stdout(&app, &victim)
+        .await
+        .contains("VICTIM-FORK-OK"));
+
+    let request = Request::builder()
+        .method("DELETE")
+        .uri(format!("/v1/jobs/{aggressor}"))
+        .header(header::AUTHORIZATION, "Bearer test-key")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::OK
+    );
+    expect_status(&app, &aggressor, &["cancelled"]).await;
     assert_host_still_serves(&app).await;
 }
 
@@ -509,13 +713,9 @@ async fn ptrace_probe_is_killed_by_seccomp() {
     assert_eq!(status, "failed", "ptrace probe should be SIGSYS-killed");
 
     let events = replay_events(&app, &id).await;
-    let killed_by_seccomp = events
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .any(|e| e["kind"] == "violation" && e["data"]["rule"] == "seccomp_violation")
-        })
-        .unwrap_or(false);
+    let killed_by_seccomp = event_values(&events)
+        .iter()
+        .any(|e| e["kind"] == "violation" && e["data"]["rule"] == "seccomp_violation");
     assert!(
         killed_by_seccomp,
         "expected a seccomp_violation event; events were:\n{}",
@@ -604,17 +804,267 @@ for t in ts: t.join()
         "4-thread spin with cpu_seconds=1 must be killed in ~1 core-second (~0.25s wall), took {elapsed:.2}s"
     );
     let events = replay_events(&app, &id).await;
-    let has_violation = events
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .any(|e| e["kind"] == "violation" && e["data"]["rule"] == "cpu_limit_exceeded")
-        })
-        .unwrap_or(false);
+    let has_violation = event_values(&events)
+        .iter()
+        .any(|e| e["kind"] == "violation" && e["data"]["rule"] == "cpu_limit_exceeded");
     assert!(
         has_violation,
         "expected cpu_limit_exceeded violation; events:\n{}",
         render_events(&events)
     );
     assert_host_still_serves(&app).await;
+}
+
+/// The production boundary is the purpose-built rootfs, not a read-only view
+/// of the host/container root. Even a world-readable marker outside that
+/// root must be absent from the workload namespace.
+#[tokio::test]
+#[ignore]
+async fn private_rootfs_hides_world_readable_host_files_and_old_root() {
+    if !preflight() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+
+    let marker_path =
+        std::env::temp_dir().join(format!("coop-host-marker-{}", uuid::Uuid::now_v7()));
+    let marker = format!("HOST-ONLY-{}", uuid::Uuid::now_v7());
+    std::fs::write(&marker_path, &marker).expect("write host marker");
+    std::fs::set_permissions(&marker_path, std::fs::Permissions::from_mode(0o644))
+        .expect("world-readable marker");
+
+    let app = spawn_app().await;
+    let code = format!(
+        r#"import os
+targets = [{marker_path:?}, '/data/coop.db', '/proc/1/root/.pivot_old']
+leaks = []
+for path in targets:
+    try:
+        if os.path.isdir(path):
+            leaks.append(path + ':DIR')
+        else:
+            with open(path, 'rb') as fh:
+                leaks.append(path + ':' + fh.read(4096).decode('utf-8', 'replace'))
+    except OSError:
+        pass
+assert os.path.isdir('/.pivot_old')
+assert os.listdir('/.pivot_old') == [], os.listdir('/.pivot_old')
+assert not any('/.pivot_old' in line for line in open('/proc/self/mountinfo'))
+print('LEAKS', leaks)
+"#,
+        marker_path = marker_path.to_string_lossy(),
+    );
+    let id = submit(
+        &app,
+        "python",
+        &code,
+        serde_json::json!({ "wall_seconds": 10 }),
+    )
+    .await;
+    expect_status(&app, &id, &["succeeded"]).await;
+    let stdout = replay_stdout(&app, &id).await;
+    assert!(!stdout.contains(&marker), "host marker leaked:\n{stdout}");
+    assert!(
+        stdout.contains("LEAKS []"),
+        "old root or data mount was visible:\n{stdout}"
+    );
+    let _ = std::fs::remove_file(marker_path);
+}
+
+/// PID1 is a trusted reaper and the interpreter is PID2. The server's host
+/// PID must not appear in the workload's freshly mounted procfs.
+#[tokio::test]
+#[ignore]
+async fn pid_namespace_has_real_pid1_and_hides_server() {
+    if !preflight() {
+        return;
+    }
+    let app = spawn_app().await;
+    let server_pid = std::process::id();
+    let code = format!(
+        r#"import os
+assert os.getpid() == 2, os.getpid()
+assert os.path.exists('/proc/1/status')
+assert not os.path.exists('/proc/{server_pid}'), 'server visible in procfs'
+child = os.fork()
+if child == 0:
+    os._exit(0)
+assert os.waitpid(child, 0)[0] == child
+print('PID-BOUNDARY-OK')
+"#,
+    );
+    let id = submit(
+        &app,
+        "python",
+        &code,
+        serde_json::json!({ "wall_seconds": 10 }),
+    )
+    .await;
+    expect_status(&app, &id, &["succeeded"]).await;
+    assert!(replay_stdout(&app, &id).await.contains("PID-BOUNDARY-OK"));
+}
+
+/// Credentials are verified again from the tenant process rather than
+/// trusting successful setup syscalls alone.
+#[tokio::test]
+#[ignore]
+async fn sandbox_credentials_groups_and_capabilities_are_zero() {
+    if !preflight() {
+        return;
+    }
+    let app = spawn_app().await;
+    let code = r#"import os, signal
+assert os.getresuid() == (65534, 65534, 65534), os.getresuid()
+assert os.getresgid() == (65534, 65534, 65534), os.getresgid()
+assert os.getgroups() == [], os.getgroups()
+status = dict(line.split(':', 1) for line in open('/proc/self/status') if ':' in line)
+for key in ('CapInh','CapPrm','CapEff','CapBnd','CapAmb'):
+    assert int(status[key].strip(), 16) == 0, (key, status[key])
+assert status['NoNewPrivs'].strip() == '1'
+child = os.fork()
+if child == 0:
+    try:
+        os.setuid(0)
+        os._exit(42)
+    except PermissionError:
+        os._exit(0)
+_, child_status = os.waitpid(child, 0)
+assert ((os.WIFEXITED(child_status) and os.WEXITSTATUS(child_status) == 0) or
+        (os.WIFSIGNALED(child_status) and os.WTERMSIG(child_status) == signal.SIGSYS)), child_status
+print('CREDENTIALS-OK')
+"#;
+    let id = submit(
+        &app,
+        "python",
+        code,
+        serde_json::json!({ "wall_seconds": 10 }),
+    )
+    .await;
+    expect_status(&app, &id, &["succeeded"]).await;
+    assert!(replay_stdout(&app, &id).await.contains("CREDENTIALS-OK"));
+}
+
+/// A double-forked, setsid descendant is outside the leader's process group.
+/// PID1 and cgroup.kill must still remove it before the job completes.
+#[tokio::test]
+#[ignore]
+async fn pid1_kills_setsided_background_descendant_and_cgroup_is_removed() {
+    if !preflight() {
+        return;
+    }
+    let app = spawn_app().await;
+    let code = r#"import os, sys, time
+pid = os.fork()
+if pid == 0:
+    os.setsid()
+    print('DETACHED-READY', flush=True)
+    while True:
+        time.sleep(1)
+time.sleep(1)
+print('PRIMARY-DONE', flush=True)
+"#;
+    let id = submit(
+        &app,
+        "python",
+        code,
+        serde_json::json!({ "wall_seconds": 10 }),
+    )
+    .await;
+    let cgroup = coop_cgroup_jobs_root().join(format!(
+        "job-{}",
+        id.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+    ));
+    let observation_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut observed = Vec::<(u32, String)>::new();
+    while std::time::Instant::now() < observation_deadline {
+        if let Ok(procs) = std::fs::read_to_string(cgroup.join("cgroup.procs")) {
+            let pids = procs
+                .lines()
+                .filter_map(|line| line.parse::<u32>().ok())
+                .collect::<Vec<_>>();
+            if pids.len() >= 3 {
+                observed = pids
+                    .into_iter()
+                    .filter_map(|pid| {
+                        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                            .ok()
+                            .map(|stat| (pid, stat))
+                    })
+                    .collect();
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        observed.len() >= 3,
+        "did not observe PID1, primary, and detached descendant in {}",
+        cgroup.display()
+    );
+    expect_status(&app, &id, &["succeeded"]).await;
+    let stdout = replay_stdout(&app, &id).await;
+    assert!(
+        stdout.contains("DETACHED-READY") && stdout.contains("PRIMARY-DONE"),
+        "setsid probe did not reach both lifecycle points:\n{stdout}"
+    );
+    for (pid, before) in observed {
+        if let Ok(after) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            assert_ne!(after, before, "job process {pid} survived terminal status");
+        }
+    }
+    assert!(!cgroup.exists(), "job cgroup leaked: {}", cgroup.display());
+}
+
+/// Continuous readiness on both output pipes must never delay the priority
+/// control tick that observes cancellation and invokes cgroup.kill.
+#[tokio::test]
+#[ignore]
+async fn output_flood_cannot_starve_cgroup_cancellation() {
+    if !preflight() {
+        return;
+    }
+    let app = spawn_app().await;
+    let code = r#"import os
+chunk = b'x' * 8192
+while True:
+    os.write(1, chunk)
+    os.write(2, chunk)
+"#;
+    let id = submit(
+        &app,
+        "python",
+        code,
+        serde_json::json!({ "wall_seconds": 30 }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let started = std::time::Instant::now();
+    let request = Request::builder()
+        .method("DELETE")
+        .uri(format!("/v1/jobs/{id}"))
+        .header(header::AUTHORIZATION, "Bearer test-key")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let (status, _) = expect_status(&app, &id, &["cancelled"]).await;
+    assert_eq!(status, "cancelled");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "output flood delayed cancellation for {:?}",
+        started.elapsed()
+    );
+    let events = replay_events(&app, &id).await;
+    let retained_bytes: usize = event_values(&events)
+        .iter()
+        .filter(|event| event["kind"] == "stdout" || event["kind"] == "stderr")
+        .filter_map(|event| event["data"]["line"].as_str())
+        .map(str::len)
+        .sum();
+    assert!(
+        retained_bytes <= 2 * coop_types::MAX_OUTPUT_BYTES_PER_STREAM,
+        "persisted output exceeded independent stream caps: {retained_bytes}"
+    );
 }

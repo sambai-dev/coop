@@ -1,14 +1,18 @@
-import sys
+import os
 import time
 
-chunks = []
-deadline = time.time() + 20
-try:
-    while time.time() < deadline:
-        chunks.append(bytearray(16 * 1024 * 1024))
-except (MemoryError, OSError) as e:
-    print(f"allocation refused: {e}")
-    sys.exit(2)
+# Each process remains comfortably below the requested per-process address
+# space, while their faulted pages exceed the aggregate cgroup memory.max.
+# memory.oom.group must therefore kill the whole job, including namespace PID1,
+# before PID1 can send its normal final control frame.
+for _ in range(4):
+    if os.fork() == 0:
+        chunks = [bytearray(4 * 1024 * 1024) for _ in range(12)]
+        for chunk in chunks:
+            for offset in range(0, len(chunk), 4096):
+                chunk[offset] = 1
+        time.sleep(30)
+        os._exit(0)
 
-print("survived 20s without hitting the cap")
-sys.exit(1)
+time.sleep(30)
+raise RuntimeError("aggregate memory bomb survived the cgroup cap")

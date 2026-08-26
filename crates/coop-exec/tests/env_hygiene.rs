@@ -2,6 +2,7 @@ use coop_exec::{execute, ExecContext, SandboxMode, Sink, Stream};
 use coop_types::{Limits, OutcomeStatus};
 use serde_json::Value;
 use std::fs;
+#[cfg(not(windows))]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -26,10 +27,8 @@ impl Sink for Collect {
     fn truncated(&self, _stream: Stream) {}
 }
 
+#[cfg(not(windows))]
 fn is_usable_bash(p: &PathBuf) -> bool {
-    // WSL's C:\Windows\System32\bash.exe answers --version but fails on
-    // Windows paths (the job script is a Windows path). Probe with a real
-    // script file containing a Windows path so the WSL shim is rejected.
     let probe_dir = std::env::temp_dir().join(format!("coop-bash-probe-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&probe_dir);
     let probe_file = probe_dir.join("probe.sh");
@@ -46,32 +45,34 @@ fn is_usable_bash(p: &PathBuf) -> bool {
     ok
 }
 
+#[cfg(not(windows))]
 fn find_bash() -> PathBuf {
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {
-            #[cfg(windows)]
-            let candidate = dir.join("bash.exe");
-            #[cfg(not(windows))]
             let candidate = dir.join("bash");
             if candidate.is_file() && is_usable_bash(&candidate) {
                 return candidate;
             }
         }
     }
-    // Explicit Git-for-Windows location that is often not on PATH ordering
-    // but is the only usable bash on many Windows dev machines.
-    for fallback in [
-        "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
-        "C:\\Program Files\\Git\\bin\\bash.exe",
-        "/bin/bash",
-        "/usr/bin/bash",
-    ] {
+    for fallback in ["/bin/bash", "/usr/bin/bash"] {
         let candidate = PathBuf::from(fallback);
         if candidate.is_file() && is_usable_bash(&candidate) {
             return candidate;
         }
     }
     panic!("env-hygiene test requires bash on PATH or /bin/bash");
+}
+
+#[cfg(windows)]
+fn bash_override() -> Option<String> {
+    // Exercise the same default native-Bash resolver used by production.
+    None
+}
+
+#[cfg(not(windows))]
+fn bash_override() -> Option<String> {
+    Some(find_bash().to_string_lossy().into_owned())
 }
 
 #[tokio::test]
@@ -100,8 +101,11 @@ async fn naive_mode_does_not_leak_host_env_to_jobs() {
         stdin: None,
         limits: Limits::default(),
         workdir: workdir.clone(),
-        interpreter_override: Some(find_bash().to_string_lossy().into_owned()),
+        interpreter_override: bash_override(),
+        rootfs: None,
+        helper_path: None,
         cancel: None,
+        start_gate: None,
         seccomp: false,
     };
 
