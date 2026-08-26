@@ -1,60 +1,282 @@
 name: ci
+
 on:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
 jobs:
-  checks:
-    runs-on: ubuntu-latest
+  delivery-static:
+    name: release surface
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate version, docs, pins, and packaging contracts
+        run: python3 scripts/check-release-surface.py
+      - name: Validate release shell support
+        run: bash -n scripts/prepare-test-rootfs.sh scripts/smoke-container.sh
+
+  rust-quality:
+    name: rust quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action
         with:
+          toolchain: 1.89.0
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace --all-targets
+
+  rust-platforms:
+    name: rust tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action
+        with:
+          toolchain: 1.89.0
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --locked --workspace --all-targets
+
+  sdks:
+    name: SDK contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - name: Install Python SDK and pinned development checks
+        run: >-
+          python -m pip install "./sdks/python[dev]"
+          build==1.3.0 twine==7.0.0
+      - name: Run Python SDK tests
+        run: python -m unittest discover -s sdks/python/tests -v
+      - name: Lint and format-check Python SDK
+        working-directory: sdks/python
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+      - name: Type-check Python SDK with Pyright
+        working-directory: sdks/python
+        run: python -m pyright
+      - name: Type-check Python SDK with Mypy
+        working-directory: sdks/python
+        run: python -m mypy --strict coop.py tests/typecheck_usage.py
+      - name: Build and verify Python wheel and source distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifacts=sdks/python/.verify-dist/artifacts
+          rm -rf "$artifacts"
+          python -m build --wheel --sdist --outdir "$artifacts" ./sdks/python
+          wheel=$(find "$artifacts" -maxdepth 1 -type f -name 'coop_sdk-*.whl')
+          sdist=$(find "$artifacts" -maxdepth 1 -type f -name 'coop_sdk-*.tar.gz')
+          test "$(printf '%s\n' "$wheel" | grep -c .)" -eq 1
+          test "$(printf '%s\n' "$sdist" | grep -c .)" -eq 1
+          python -m twine check "$wheel" "$sdist"
+          for kind in wheel sdist; do
+            artifact=$wheel
+            if [ "$kind" = sdist ]; then artifact=$sdist; fi
+            target="sdks/python/.verify-dist/${kind}-install"
+            rm -rf "$target"
+            python -m pip install --no-deps --target "$target" "$artifact"
+            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop; assert coop.__version__ == '0.2.0'; assert Path(coop.__file__).with_name('py.typed').is_file()"
+            PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v
+          done
+      - name: Install TypeScript SDK dependencies
+        working-directory: sdks/typescript
+        run: npm ci
+      - name: Test TypeScript SDK
+        working-directory: sdks/typescript
+        run: npm test
+      - name: Type-check TypeScript SDK
+        working-directory: sdks/typescript
+        run: npm run typecheck
+      - name: Set up Python compatibility floor
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.9"
+      - name: Verify Python 3.9 SDK and development tools
+        run: |
+          python -m pip install "./sdks/python[dev]"
+          python -m unittest discover -s sdks/python/tests -v
+          python -m mypy --strict sdks/python/coop.py sdks/python/tests/typecheck_usage.py
+      - name: Set up latest supported Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Verify Python 3.14 SDK
+        run: |
+          python -m pip install "./sdks/python[dev]"
+          python -m unittest discover -s sdks/python/tests -v
+
+  advisory-scan:
+    name: RustSec advisory scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action
+        with:
+          toolchain: 1.89.0
+      - name: Audit locked dependencies
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  container-build:
+    name: container and private rootfs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate Compose model
+        env:
+          COOP_API_KEYS: ci:ci-only-key-with-more-than-16-characters
+        run: docker compose config --quiet
+      - name: Build locked image
+        run: >-
+          docker build --pull
+          --build-arg VERSION=0.2.0
+          --build-arg "VCS_REF=${GITHUB_SHA}"
+          --tag coop:ci .
+      - name: Inspect private rootfs
+        run: |
+          docker run --rm --entrypoint /bin/sh coop:ci -ec '
+            test -x /usr/local/bin/coop
+            test -x /usr/local/bin/coop-sandbox-init
+            test -x /opt/coop/rootfs/usr/bin/python3
+            test -x /opt/coop/rootfs/usr/bin/node
+            test -x /opt/coop/rootfs/usr/bin/bash
+            test -d /opt/coop/rootfs/.pivot_old
+            test "$(stat -c %a /data)" = 700
+            test "$(stat -c %a /var/lib/coop/jobs)" = 700
+          '
+      - name: Smoke final image through the namespace backend
+        env:
+          COOP_SMOKE_ALLOW_PRIVILEGED: "true"
+        run: bash scripts/smoke-container.sh coop:ci
 
   hostile:
-    runs-on: ubuntu-latest
+    name: Linux containment (must run)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     container:
-      image: rust:1-slim
+      image: rust:1.89.0-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6
       options: --privileged --cgroupns=host
     env:
       CARGO_HOME: /usr/local/cargo
-      RUST_LOG: "info,coop_server=debug"
+      DEBIAN_SNAPSHOT: 20260826T000000Z
+      RUST_LOG: info,coop_server=debug
+      COOP_ROOTFS: /opt/coop/rootfs
+      COOP_SANDBOX_HELPER: /usr/local/bin/coop-sandbox-init
     steps:
-      - name: install tooling and runtimes used by the suite
+      - name: Install test runtimes and preflight tools
+        shell: bash
         run: |
+          set -euo pipefail
+          rm -f /etc/apt/sources.list.d/debian.sources
+          printf '%s\n' \
+            "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ bookworm main" \
+            "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ bookworm-updates main" \
+            "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ bookworm-security main" \
+            > /etc/apt/sources.list
           apt-get update -qq
-          apt-get install -y -qq git python3 nodejs ca-certificates
-          python3 --version && git --version
-      - uses: actions/checkout@v4
-      - name: show sandbox environment
+          apt-get install -y -qq --no-install-recommends git python3 nodejs bash ca-certificates util-linux
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build helper and private test rootfs
+        shell: bash
         run: |
-          id
-          echo "--- /proc/self/cgroup ---"
-          cat /proc/self/cgroup || true
-          echo "--- cgroup.controllers ---"
-          cat /sys/fs/cgroup/cgroup.controllers || true
-          echo "--- cgroup.subtree_control ---"
-          cat /sys/fs/cgroup/cgroup.subtree_control || true
-          echo "--- writable check (mkdir + knob write) ---"
-          mkdir -p /sys/fs/cgroup/coop-probe 2>/dev/null \
-            && { echo max > /sys/fs/cgroup/coop-probe/memory.max 2>/dev/null && echo "knob write: OK" || echo "knob write: DENIED"; \
-                 rmdir /sys/fs/cgroup/coop-probe; } \
-            || echo "mkdir in cgroupfs: DENIED"
-          mount | grep -i cgroup | head -5 || true
-      - uses: Swatinem/rust-cache@v2
-      - name: guard hostile test discovery >= 7
+          set -euo pipefail
+          cargo build --locked -p coop-exec --bin coop-sandbox-init
+          bash scripts/prepare-test-rootfs.sh target/debug/coop-sandbox-init
+      - name: Fail if containment prerequisites are unavailable
+        shell: bash
         run: |
-          n=$(cargo test -p coop-server --test hostile -- --list --ignored | grep -c ': test$')
-          echo "discovered ${n} hostile tests"
-          if [ "${n}" -lt 10 ]; then
-            echo "FAIL: expected >= 10 hostile tests, found ${n}"
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(id -u)" = 0
+          test -s /sys/fs/cgroup/cgroup.controllers
+          grep -qw memory /sys/fs/cgroup/cgroup.controllers
+          grep -qw pids /sys/fs/cgroup/cgroup.controllers
+          grep -qw cpu /sys/fs/cgroup/cgroup.controllers
+          actual_kernel=$(uname -r | cut -d- -f1)
+          test "$(printf '%s\n' 5.14 "$actual_kernel" | sort -V | head -n1)" = 5.14
+          probe="/sys/fs/cgroup/coop-ci-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir "$probe"
+          test -w "$probe/cgroup.kill"
+          echo 1 > "$probe/cgroup.kill"
+          echo max > "$probe/memory.max"
+          echo max > "$probe/pids.max"
+          echo "max 100000" > "$probe/cpu.max"
+          rmdir "$probe"
+          unshare --mount --pid --fork /bin/true
+      - name: Guard hostile test discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(cargo test --locked -p coop-server --test hostile -- --list --ignored | grep -c ': test$')
+          echo "discovered ${count} hostile tests"
+          test "$count" -eq 18
+      - name: Verify private devices under a restrictive service umask
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 0077
+          cargo test --locked -p coop-exec --test namespace_umask restrictive_umask_preserves_private_device_access -- --exact --ignored --nocapture
+      - name: Run hostile-job containment suite without skips
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p coop-server --test hostile -- --ignored --nocapture 2>&1 | tee hostile.log
+          if grep -q 'SKIP:' hostile.log; then
+            echo 'containment suite skipped a prerequisite'
             exit 1
           fi
-      - name: run hostile-job containment suite
-        run: cargo test -p coop-server --test hostile -- --ignored --nocapture

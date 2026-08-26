@@ -1,47 +1,417 @@
 name: release
+
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
 
 jobs:
+  preflight:
+    name: release preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require configured repository release governance
+        env:
+          RELEASE_GOVERNANCE: ${{ vars.COOP_RELEASE_GOVERNANCE }}
+        shell: bash
+        run: |
+          if [ "$RELEASE_GOVERNANCE" != enabled ]; then
+            echo "Configure the protected release environment/tag rules described in docs/releasing.md, then set COOP_RELEASE_GOVERNANCE=enabled" >&2
+            exit 1
+          fi
+      - name: Verify tag equals workspace version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)
+          tag=${GITHUB_REF_NAME#v}
+          test -n "$version"
+          test "$tag" = "$version"
+          grep -q "^## ${version}" CHANGELOG.md
+          if grep -Eqi "^## ${version}.*unreleased" CHANGELOG.md; then
+            echo "CHANGELOG.md still marks ${version} as unreleased" >&2
+            exit 1
+          fi
+          if grep -Fqi "this checkout is the v0.2 release candidate" README.md; then
+            echo "README.md still identifies ${version} as a release candidate" >&2
+            exit 1
+          fi
+          if grep -Fqi "until a checksummed, attested v0.2.0 release is published" README.md; then
+            echo "README.md still says ${version} is unpublished" >&2
+            exit 1
+          fi
+          if grep -Fqi "latest \`main\` (\`0.2.0\` release candidate)" SECURITY.md; then
+            echo "SECURITY.md still identifies ${version} as a release candidate" >&2
+            exit 1
+          fi
+          if grep -Fqi "| tagged \`0.2.x\` releases | Not published yet |" SECURITY.md; then
+            echo "SECURITY.md still says ${version} is unpublished" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - name: Validate release surface
+        run: python3 scripts/check-release-surface.py
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action
+        with:
+          toolchain: 1.89.0
+          components: rustfmt, clippy
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace --all-targets
+      - name: Audit locked dependencies
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  sdk-gate:
+    name: SDK release gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: preflight
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - name: Install Python SDK and pinned development checks
+        run: >-
+          python -m pip install "./sdks/python[dev]"
+          build==1.3.0 twine==7.0.0
+      - name: Run Python SDK tests
+        run: python -m unittest discover -s sdks/python/tests -v
+      - name: Lint and format-check Python SDK
+        working-directory: sdks/python
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+      - name: Type-check Python SDK with Pyright
+        working-directory: sdks/python
+        run: python -m pyright
+      - name: Type-check Python SDK with Mypy
+        working-directory: sdks/python
+        run: python -m mypy --strict coop.py tests/typecheck_usage.py
+      - working-directory: sdks/typescript
+        run: npm ci
+      - working-directory: sdks/typescript
+        run: npm test
+      - working-directory: sdks/typescript
+        run: npm run typecheck
+      - name: Build and verify Python wheel and source distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf sdk-dist
+          python -m build --wheel --sdist --outdir sdk-dist ./sdks/python
+          wheel=$(find sdk-dist -maxdepth 1 -type f -name 'coop_sdk-*.whl')
+          sdist=$(find sdk-dist -maxdepth 1 -type f -name 'coop_sdk-*.tar.gz')
+          test "$(printf '%s\n' "$wheel" | grep -c .)" -eq 1
+          test "$(printf '%s\n' "$sdist" | grep -c .)" -eq 1
+          python -m twine check "$wheel" "$sdist"
+          for kind in wheel sdist; do
+            artifact=$wheel
+            if [ "$kind" = sdist ]; then artifact=$sdist; fi
+            target="sdks/python/.verify-dist/${kind}-install"
+            rm -rf "$target"
+            python -m pip install --no-deps --target "$target" "$artifact"
+            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop; assert coop.__version__ == '0.2.0'; assert Path(coop.__file__).with_name('py.typed').is_file()"
+            PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v
+          done
+      - name: Build npm package tarball
+        working-directory: sdks/typescript
+        run: npm pack --pack-destination ../../sdk-dist
+      - name: Set up Python compatibility floor
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.9"
+      - name: Verify Python 3.9 SDK and development tools
+        run: |
+          python -m pip install "./sdks/python[dev]"
+          python -m unittest discover -s sdks/python/tests -v
+          python -m mypy --strict sdks/python/coop.py sdks/python/tests/typecheck_usage.py
+      - name: Set up latest supported Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Verify Python 3.14 SDK
+        run: |
+          python -m pip install "./sdks/python[dev]"
+          python -m unittest discover -s sdks/python/tests -v
+      - name: Upload SDK packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coop-sdks
+          path: sdk-dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  container-gate:
+    name: container release gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: preflight
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build locked image
+        run: >-
+          docker build --pull
+          --build-arg "VERSION=${{ needs.preflight.outputs.version }}"
+          --build-arg "VCS_REF=${GITHUB_SHA}"
+          --tag coop:release-candidate .
+      - name: Inspect private rootfs
+        run: |
+          docker run --rm --entrypoint /bin/sh coop:release-candidate -ec '
+            test -x /usr/local/bin/coop
+            test -x /usr/local/bin/coop-sandbox-init
+            test -x /opt/coop/rootfs/usr/bin/python3
+            test -x /opt/coop/rootfs/usr/bin/node
+            test -x /opt/coop/rootfs/usr/bin/bash
+          '
+      - name: Smoke final image through the namespace backend
+        env:
+          COOP_SMOKE_ALLOW_PRIVILEGED: "true"
+        run: bash scripts/smoke-container.sh coop:release-candidate
+
+  hostile:
+    name: containment release gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: preflight
+    container:
+      image: rust:1.89.0-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6
+      options: --privileged --cgroupns=host
+    env:
+      CARGO_HOME: /usr/local/cargo
+      DEBIAN_SNAPSHOT: 20260826T000000Z
+      RUST_LOG: info,coop_server=debug
+      COOP_ROOTFS: /opt/coop/rootfs
+      COOP_SANDBOX_HELPER: /usr/local/bin/coop-sandbox-init
+    steps:
+      - name: Install test runtimes and preflight tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f /etc/apt/sources.list.d/debian.sources
+          printf '%s\n' \
+            "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ bookworm main" \
+            "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ bookworm-updates main" \
+            "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ bookworm-security main" \
+            > /etc/apt/sources.list
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git python3 nodejs bash ca-certificates util-linux
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build helper and private test rootfs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked -p coop-exec --bin coop-sandbox-init
+          bash scripts/prepare-test-rootfs.sh target/debug/coop-sandbox-init
+      - name: Fail if containment prerequisites are unavailable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(id -u)" = 0
+          test -s /sys/fs/cgroup/cgroup.controllers
+          grep -qw memory /sys/fs/cgroup/cgroup.controllers
+          grep -qw pids /sys/fs/cgroup/cgroup.controllers
+          grep -qw cpu /sys/fs/cgroup/cgroup.controllers
+          actual_kernel=$(uname -r | cut -d- -f1)
+          test "$(printf '%s\n' 5.14 "$actual_kernel" | sort -V | head -n1)" = 5.14
+          probe="/sys/fs/cgroup/coop-release-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir "$probe"
+          test -w "$probe/cgroup.kill"
+          echo 1 > "$probe/cgroup.kill"
+          echo max > "$probe/memory.max"
+          echo max > "$probe/pids.max"
+          echo "max 100000" > "$probe/cpu.max"
+          rmdir "$probe"
+          unshare --mount --pid --fork /bin/true
+      - name: Guard hostile test discovery and run without skips
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(cargo test --locked -p coop-server --test hostile -- --list --ignored | grep -c ': test$')
+          echo "discovered ${count} hostile tests"
+          test "$count" -eq 18
+          (
+            umask 0077
+            cargo test --locked -p coop-exec --test namespace_umask restrictive_umask_preserves_private_device_access -- --exact --ignored --nocapture
+          )
+          cargo test --locked -p coop-server --test hostile -- --ignored --nocapture 2>&1 | tee hostile.log
+          if grep -q 'SKIP:' hostile.log; then
+            echo 'containment suite skipped a prerequisite'
+            exit 1
+          fi
+
   build:
+    name: build ${{ matrix.target }}
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-24.04
+            binary: coop
+            archive: tar.gz
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
+            binary: coop
+            archive: tar.gz
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            os: windows-2025
+            binary: coop.exe
+            archive: zip
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action
         with:
+          toolchain: 1.89.0
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      - name: install musl tools
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --release -p coop-server --target ${{ matrix.target }}
-      - name: package (unix)
-        if: runner.os != 'Windows'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Build locked release binary
+        run: cargo build --locked --release -p coop-server -p coop-exec --bins --target ${{ matrix.target }}
+      - name: Validate release target
+        shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../coop-${{ matrix.target }}.tar.gz coop
-      - name: package (windows)
+          set -euo pipefail
+          target='${{ matrix.target }}'
+          host=$(rustc -vV | awk '/^host:/ { print $2 }')
+          if [ "$target" = x86_64-unknown-linux-musl ] || [ "$target" = "$host" ]; then
+            cargo test --locked --workspace --all-targets --target "$target"
+          else
+            # Any future cross-built target is type-checked here; its native
+            # host behavior must also remain gated by the normal CI matrix.
+            cargo check --locked --workspace --all-targets --target "$target"
+          fi
+      - name: Package Unix artifact
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="coop-${{ matrix.target }}"
+          mkdir "$dir"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$dir/"
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            cp "target/${{ matrix.target }}/release/coop-sandbox-init" "$dir/"
+          fi
+          cp README.md LICENSE SECURITY.md AUDIT.md CHANGELOG.md "$dir/"
+          cp -R docs deploy sdks "$dir/"
+          tar -czf "${dir}.tar.gz" "$dir"
+      - name: Package Windows artifact
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path "target/${{ matrix.target }}/release/coop.exe" -DestinationPath "coop-${{ matrix.target }}.zip"
-      # Pinned to a full commit SHA (= v2.6.2): mutable tags are a supply-chain
-      # risk for a job holding `contents: write`.
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        run: |
+          $dir = "coop-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item -LiteralPath "target/${{ matrix.target }}/release/${{ matrix.binary }}" -Destination $dir
+          Copy-Item -LiteralPath README.md, LICENSE, SECURITY.md, AUDIT.md, CHANGELOG.md -Destination $dir
+          Copy-Item -LiteralPath docs, deploy, sdks -Destination $dir -Recurse
+          Compress-Archive -Path $dir -DestinationPath "${dir}.zip"
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          files: |
-            coop-*.tar.gz
-            coop-*.zip
+          name: coop-${{ matrix.target }}
+          path: coop-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish release atomically
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [preflight, sdk-gate, container-gate, hostile, build]
+    environment:
+      name: release
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/coop-${{ needs.preflight.outputs.version }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+      - name: Generate SHA-256 checksums
+        working-directory: dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="${RUNNER_TEMP}/coop-SHA256SUMS-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' \
+            | sort -z \
+            | xargs -0 sha256sum -- \
+            > "$manifest"
+          mv -- "$manifest" SHA256SUMS
+      - name: Attest release artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Stage the complete artifact set in a draft release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          draft: true
+      - name: Publish the fully staged release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest --verify-tag

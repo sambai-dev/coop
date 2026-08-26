@@ -2,6 +2,15 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 pub const MAX_OUTPUT_LINES: usize = 10_000;
+/// Maximum payload bytes retained and emitted for each output stream.
+/// Executors continue draining fixed-size chunks after this boundary so a
+/// noisy child cannot block on a full pipe or allocate unbounded host memory.
+pub const MAX_OUTPUT_BYTES_PER_STREAM: usize = 1024 * 1024;
+/// Maximum bytes retained for a single logical output record. Longer records
+/// are split deterministically and marked truncated by the executor.
+pub const MAX_OUTPUT_RECORD_BYTES: usize = 16 * 1024;
+pub const MAX_CODE_BYTES: usize = 1024 * 1024;
+pub const MAX_STDIN_BYTES: usize = 1024 * 1024;
 
 pub const SUPPORTED_LANGUAGES: [&str; 3] = ["python", "node", "bash"];
 
@@ -12,7 +21,7 @@ pub const PIDS_MAX: u32 = 1024;
 pub const FILE_MAX_MB: u32 = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Limits {
     pub wall_seconds: u32,
     pub cpu_seconds: u32,
@@ -43,12 +52,84 @@ impl Limits {
             mem_mb: self.mem_mb.clamp(16, MEM_MAX_MB),
             max_pids: self.max_pids.clamp(8, PIDS_MAX),
             max_file_mb: self.max_file_mb.clamp(1, FILE_MAX_MB),
-            allow_network: self.allow_network && false,
+            allow_network: false,
         }
     }
 }
 
+/// Backend-specific limits that were actually effective for an execution.
+///
+/// A `None` control is deliberately different from the requested value: it
+/// means that the selected executor did not enforce that control (or that the
+/// executor never reached its ready boundary). `allow_network` is observed
+/// runtime posture rather than a resource limit and is `None` until a
+/// workload becomes ready.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveLimits {
+    pub wall_seconds: Option<u32>,
+    pub cpu_seconds: Option<u32>,
+    pub mem_mb: Option<u32>,
+    pub max_pids: Option<u32>,
+    pub max_file_mb: Option<u32>,
+    pub allow_network: Option<bool>,
+}
+
+impl EffectiveLimits {
+    pub fn from_enforcement(
+        limits: &Limits,
+        enforcement: &LimitEnforcement,
+        allow_network: Option<bool>,
+    ) -> Self {
+        Self {
+            wall_seconds: enforcement.wall_seconds.then_some(limits.wall_seconds),
+            cpu_seconds: enforcement.cpu_seconds.then_some(limits.cpu_seconds),
+            mem_mb: enforcement.mem_mb.then_some(limits.mem_mb),
+            max_pids: enforcement.max_pids.then_some(limits.max_pids),
+            max_file_mb: enforcement.max_file_mb.then_some(limits.max_file_mb),
+            allow_network,
+        }
+    }
+}
+
+/// Whether each requested resource control was installed for the workload.
+/// The containing API member is nullable when execution evidence is unknown;
+/// once present, every boolean is an explicit observed answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LimitEnforcement {
+    pub wall_seconds: bool,
+    pub cpu_seconds: bool,
+    pub mem_mb: bool,
+    pub max_pids: bool,
+    pub max_file_mb: bool,
+}
+
+impl LimitEnforcement {
+    pub const NONE: Self = Self {
+        wall_seconds: false,
+        cpu_seconds: false,
+        mem_mb: false,
+        max_pids: false,
+        max_file_mb: false,
+    };
+
+    pub const DEVELOPMENT_SUBPROCESS: Self = Self {
+        wall_seconds: true,
+        ..Self::NONE
+    };
+
+    pub const NAMESPACE_SANDBOX: Self = Self {
+        wall_seconds: true,
+        cpu_seconds: true,
+        mem_mb: true,
+        max_pids: true,
+        max_file_mb: true,
+    };
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JobSpec {
     pub language: String,
     pub code: String,
@@ -58,7 +139,18 @@ pub struct JobSpec {
     pub limits: Limits,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// An execution spec whose controls describe effective, not merely requested,
+/// policy. Unsupported or unactivated controls remain explicit `null` values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveJobSpec {
+    pub language: String,
+    pub code: String,
+    pub stdin: Option<String>,
+    pub limits: EffectiveLimits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Queued,

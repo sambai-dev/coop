@@ -11,27 +11,58 @@ import urllib.request
 lock = threading.Lock()
 
 
-def make_request(base, key, method, path, payload=None):
+def make_request(base, key, method, path, payload=None, timeout=75, retries=5):
     data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(
-        base + path,
-        data=data,
-        method=method,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read().decode() or "null")
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(
+            base.rstrip("/") + path,
+            data=data,
+            method=method,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "User-Agent": "coop-bench/0.2",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode() or "null")
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or attempt == retries:
+                body = exc.read().decode(errors="replace")
+                raise RuntimeError(f"{method} {path}: HTTP {exc.code}: {body}") from exc
+            retry_after = exc.headers.get("Retry-After")
+            try:
+                delay = max(0.25, float(retry_after)) if retry_after else 0.0
+            except ValueError:
+                delay = 0.0
+            if not delay:
+                delay = min(8.0, 0.5 * (2**attempt))
+            time.sleep(delay)
+
+    raise AssertionError("unreachable")
 
 
-def run_job(base, key, code):
+def run_job(base, key, code, wait_seconds):
     t0 = time.perf_counter()
     resp = make_request(base, key, "POST", "/v1/jobs", {"language": "python", "code": code})
     job_id = resp["job_id"]
-    while True:
-        view = make_request(base, key, "GET", f"/v1/jobs/{job_id}")
-        if view["status"] in ("succeeded", "failed", "timed_out", "oom_killed", "error"):
-            break
-        time.sleep(0.02)
+    # One long-poll replaces the old 20 ms status loop. Apart from producing
+    # misleading server load, that loop exhausted the default tenant rate
+    # limit in seconds. A 202 means the explicit wait budget expired.
+    view = make_request(
+        base,
+        key,
+        "GET",
+        f"/v1/jobs/{job_id}/result?wait_seconds={wait_seconds}",
+        timeout=wait_seconds + 15,
+    )
+    terminal = {"succeeded", "failed", "timed_out", "oom_killed", "cancelled", "error"}
+    if view.get("status") not in terminal:
+        raise RuntimeError(
+            f"job {job_id} remained {view.get('status')!r} after a {wait_seconds}s result wait; "
+            "increase --wait-seconds or reduce concurrency"
+        )
     return time.perf_counter() - t0, view["status"]
 
 
@@ -48,20 +79,29 @@ def main():
     parser.add_argument("--key", default="coop-dev-key")
     parser.add_argument("--jobs", type=int, default=50)
     parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--wait-seconds", type=int, default=60)
     args = parser.parse_args()
+
+    if args.jobs < 1 or args.concurrency < 1:
+        parser.error("--jobs and --concurrency must be positive")
+    if not 1 <= args.wait_seconds <= 300:
+        parser.error("--wait-seconds must be between 1 and 300")
 
     code = "print('bench')\n"
 
     print(f"warmup: 2 jobs")
     for _ in range(2):
-        run_job(args.url, args.key, code)
+        run_job(args.url, args.key, code, args.wait_seconds)
 
     print(f"running {args.jobs} jobs at concurrency {args.concurrency}...")
     latencies = []
     statuses = {}
     wall_start = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-        futures = [pool.submit(run_job, args.url, args.key, code) for _ in range(args.jobs)]
+        futures = [
+            pool.submit(run_job, args.url, args.key, code, args.wait_seconds)
+            for _ in range(args.jobs)
+        ]
         for fut in concurrent.futures.as_completed(futures):
             latency, status = fut.result()
             with lock:

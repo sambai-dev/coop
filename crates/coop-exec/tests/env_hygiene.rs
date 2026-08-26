@@ -2,6 +2,7 @@ use coop_exec::{execute, ExecContext, SandboxMode, Sink, Stream};
 use coop_types::{Limits, OutcomeStatus};
 use serde_json::Value;
 use std::fs;
+#[cfg(not(windows))]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -26,25 +27,52 @@ impl Sink for Collect {
     fn truncated(&self, _stream: Stream) {}
 }
 
+#[cfg(not(windows))]
+fn is_usable_bash(p: &PathBuf) -> bool {
+    let probe_dir = std::env::temp_dir().join(format!("coop-bash-probe-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&probe_dir);
+    let probe_file = probe_dir.join("probe.sh");
+    if std::fs::write(&probe_file, "echo probe-ok\n").is_err() {
+        return false;
+    }
+    let ok = std::process::Command::new(p)
+        .arg(&probe_file)
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("probe-ok"))
+        .unwrap_or(false);
+    let _ = std::fs::remove_file(&probe_file);
+    let _ = std::fs::remove_dir(&probe_dir);
+    ok
+}
+
+#[cfg(not(windows))]
 fn find_bash() -> PathBuf {
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {
-            #[cfg(windows)]
-            let candidate = dir.join("bash.exe");
-            #[cfg(not(windows))]
             let candidate = dir.join("bash");
-            if candidate.is_file() {
+            if candidate.is_file() && is_usable_bash(&candidate) {
                 return candidate;
             }
         }
     }
     for fallback in ["/bin/bash", "/usr/bin/bash"] {
         let candidate = PathBuf::from(fallback);
-        if candidate.is_file() {
+        if candidate.is_file() && is_usable_bash(&candidate) {
             return candidate;
         }
     }
     panic!("env-hygiene test requires bash on PATH or /bin/bash");
+}
+
+#[cfg(windows)]
+fn bash_override() -> Option<String> {
+    // Exercise the same default native-Bash resolver used by production.
+    None
+}
+
+#[cfg(not(windows))]
+fn bash_override() -> Option<String> {
+    Some(find_bash().to_string_lossy().into_owned())
 }
 
 #[tokio::test]
@@ -73,8 +101,11 @@ async fn naive_mode_does_not_leak_host_env_to_jobs() {
         stdin: None,
         limits: Limits::default(),
         workdir: workdir.clone(),
-        interpreter_override: Some(find_bash().to_string_lossy().into_owned()),
+        interpreter_override: bash_override(),
+        rootfs: None,
+        helper_path: None,
         cancel: None,
+        start_gate: None,
         seccomp: false,
     };
 

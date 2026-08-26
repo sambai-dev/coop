@@ -2,9 +2,10 @@
 name = "coop-types"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared types for Coop, a self-hostable code sandbox for AI agents"
+description = "Shared API and evidence types for the Coop execution gateway"
 readme = "../../README.md"
 
 [dependencies]

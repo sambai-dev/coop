@@ -2,9 +2,10 @@
 name = "coop-server"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Coop: a self-hostable sandbox that safely executes untrusted code for AI agents"
+description = "Coop: a self-hosted, audit-first execution gateway for AI agents"
 readme = "../../README.md"
 default-run = "coop"
 
@@ -17,6 +18,8 @@ coop-types = { workspace = true }
 coop-store = { workspace = true }
 coop-exec = { workspace = true }
 axum = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 tokio = { workspace = true }
