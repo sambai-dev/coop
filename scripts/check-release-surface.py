@@ -200,6 +200,8 @@ def check_pins_and_packaging() -> int:
         "coop-sandbox-init /usr/local/bin/coop-sandbox-init",
         "COOP_ROOTFS=/opt/coop/rootfs",
         "COOP_SANDBOX_HELPER=/usr/local/bin/coop-sandbox-init",
+        "install -d -o root -g root -m 0700 /data /var/lib/coop/jobs /opt/coop",
+        "install -d -o root -g root -m 0755 /opt/coop/rootfs",
         'test "$(dpkg --print-architecture)" = amd64',
     ]:
         require(required in dockerfile, f"Docker helper/rootfs contract missing: {required}")
@@ -237,6 +239,20 @@ def check_pins_and_packaging() -> int:
             'echo 1 > "$probe/cgroup.kill"' in workflow_source,
             f"{workflow} hostile gate does not write-probe cgroup.kill",
         )
+        for image_mode_contract in [
+            'test "$(stat -c %a /opt/coop)" = 700',
+            'test "$(stat -c %U:%G /opt/coop)" = root:root',
+            'test "$(stat -c %a /opt/coop/rootfs)" = 755',
+            'test "$(stat -c %U:%G /opt/coop/rootfs)" = root:root',
+            'test "$(stat -c %a /data)" = 700',
+            'test "$(stat -c %U:%G /data)" = root:root',
+            'test "$(stat -c %a /var/lib/coop/jobs)" = 700',
+            'test "$(stat -c %U:%G /var/lib/coop/jobs)" = root:root',
+        ]:
+            require(
+                image_mode_contract in workflow_source,
+                f"{workflow} does not validate final image mode: {image_mode_contract}",
+            )
         require(
             "cargo test --locked -p coop-exec --test namespace_umask "
             "restrictive_umask_preserves_private_device_access -- --exact --ignored --nocapture"

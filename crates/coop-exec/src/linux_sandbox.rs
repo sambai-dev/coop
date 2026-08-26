@@ -2011,7 +2011,11 @@ fn workload_exec(plan: &SandboxPlan, exec_read: StdUnixStream, exec_write: StdUn
     }
 
     let Err(error) = execve(&program, &argv, &env_refs);
-    fail(STAGE_EXEC, io::Error::other(error));
+    fail(STAGE_EXEC, errno_as_io_error(error));
+}
+
+fn errno_as_io_error(error: nix::errno::Errno) -> io::Error {
+    error.into()
 }
 
 fn apply_limits(limits: &Limits) -> io::Result<()> {
@@ -2496,6 +2500,12 @@ mod tests {
     fn rootfs_rejects_host_root() {
         let work = std::env::temp_dir();
         assert!(validate_rootfs(Path::new("/"), &work).is_err());
+    }
+
+    #[test]
+    fn interpreter_errno_conversion_preserves_the_kernel_error() {
+        let error = errno_as_io_error(nix::errno::Errno::EACCES);
+        assert_eq!(error.raw_os_error(), Some(libc::EACCES));
     }
 
     #[test]

@@ -192,8 +192,14 @@ jobs:
             test -x /opt/coop/rootfs/usr/bin/node
             test -x /opt/coop/rootfs/usr/bin/bash
             test -d /opt/coop/rootfs/.pivot_old
+            test "$(stat -c %a /opt/coop)" = 700
+            test "$(stat -c %U:%G /opt/coop)" = root:root
+            test "$(stat -c %a /opt/coop/rootfs)" = 755
+            test "$(stat -c %U:%G /opt/coop/rootfs)" = root:root
             test "$(stat -c %a /data)" = 700
+            test "$(stat -c %U:%G /data)" = root:root
             test "$(stat -c %a /var/lib/coop/jobs)" = 700
+            test "$(stat -c %U:%G /var/lib/coop/jobs)" = root:root
           '
       - name: Smoke final image through the namespace backend
         env:
