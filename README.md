@@ -14,7 +14,7 @@ Coop is deliberately narrower than a persistent cloud development environment. I
 
 > **Security boundary:** v0.2 never uses the host `/` as a job root. The in-tree Linux x86_64 backend requires a dedicated private rootfs, namespaces, cgroup v2, rlimits, privilege dropping, and an x86_64 seccomp policy. It is still a shared-kernel boundary and belongs on a dedicated VM. macOS, Windows, and other Linux architectures can run only the plain subprocess backend, which is for same-trust development. Read [the security boundary](docs/security-boundary.md) before accepting untrusted jobs.
 
-> **Current release:** v0.2.0. Release assets include checksums, an SPDX SBOM, and build provenance. v0.1.x is unsupported for hostile or multi-tenant execution.
+> **Current release:** [v0.2.0](https://github.com/sambai-dev/coop/releases/tag/v0.2.0). Release assets include checksums, an SPDX SBOM, and build provenance. v0.1.x is unsupported for hostile or multi-tenant execution.
 
 ## Why Coop
 
