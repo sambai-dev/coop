@@ -6,9 +6,9 @@ A source checkout does not authorize a tag or publication. The release workflow 
 
 Configure these controls in GitHub before setting the repository variable `COOP_RELEASE_GOVERNANCE=enabled`:
 
-1. Protect `main` with a ruleset that requires pull-request review, blocks force pushes/deletion, and requires every v0.2 CI job, including the container and hostile-containment gates.
+1. Protect `main` with a ruleset that requires changes through a pull request, blocks force pushes/deletion, and requires every v0.2 CI job, including the container and hostile-containment gates. Require an approving review when the repository has a second trusted maintainer; a solo maintainer must still use a PR and may bypass only through that PR after all required checks pass.
 2. Protect `v*` tags with a ruleset that restricts tag creation, update, and deletion to designated release maintainers or automation. Do not permit a tag to be moved after publication.
-3. Create a `release` environment restricted to `v*` tags. Add independent required reviewers, prevent self-review where the plan supports it, and restrict who can approve deployments.
+3. Create a `release` environment restricted to `v*` tags and require explicit reviewer approval. Use an independent trusted reviewer and prevent self-review whenever a second trusted maintainer is available. A solo-maintainer repository may temporarily designate its owner, must record the explicit approval, and should switch to independent approval as soon as another maintainer is established.
 4. Enable private vulnerability reporting and verify the contact in [SECURITY.md](../SECURITY.md).
 5. Enable GitHub immutable releases so a published tag or asset cannot be silently replaced. The workflow's draft-staging step remains editable until publication; immutability applies to the published release.
 6. Review Actions access so only required, SHA-pinned actions are allowed. Keep the default workflow token read-only; only the final publish job receives contents, attestation, and OIDC write permissions.
