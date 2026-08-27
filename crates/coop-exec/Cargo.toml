@@ -20,7 +20,7 @@ sha2 = { workspace = true }
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.29", features = ["sched", "mount", "signal", "process", "user", "resource", "fs"] }
+nix = { version = "0.31", features = ["sched", "mount", "signal", "process", "user", "resource", "fs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
