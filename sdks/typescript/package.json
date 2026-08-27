@@ -45,6 +45,6 @@
   "bugs": "https://github.com/sambai-dev/coop/issues",
   "homepage": "https://github.com/sambai-dev/coop#readme",
   "devDependencies": {
-    "typescript": "^5.7.2"
+    "typescript": "^7.0.2"
   }
 }
