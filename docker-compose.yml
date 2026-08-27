@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        VERSION: "0.2.0"
+        VERSION: "0.3.0"
     restart: unless-stopped
     stop_grace_period: 45s
     ports:

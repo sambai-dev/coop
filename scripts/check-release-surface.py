@@ -45,7 +45,7 @@ def toml_string(relative: str, section: str, key: str) -> str:
 
 def check_versions() -> str:
     version = toml_string("Cargo.toml", "workspace.package", "version")
-    require(version == "0.2.0", f"unexpected workspace release version: {version}")
+    require(version == "0.3.0", f"unexpected workspace release version: {version}")
 
     toolchain = toml_string("rust-toolchain.toml", "toolchain", "channel")
     rust_version = toml_string("Cargo.toml", "workspace.package", "rust-version")
@@ -122,23 +122,26 @@ def check_versions() -> str:
         'grep -Eqi "^## ${version}.*unreleased" CHANGELOG.md' in release_workflow,
         "release workflow does not reject an unfinalized changelog",
     )
-    for marker in [
-        "this checkout is the v0.2 release candidate",
-        "until a checksummed, attested v0.2.0 release is published",
-    ]:
-        require(
-            f'grep -Fqi "{marker}" README.md' in release_workflow,
-            f"release workflow does not reject stale README release marker: {marker}",
-        )
-    for marker in [
-        "latest `main` (`0.2.0` release candidate)",
-        "| tagged `0.2.x` releases | Not published yet |",
-    ]:
-        escaped_marker = marker.replace("`", r"\`")
-        require(
-            f'grep -Fqi "{escaped_marker}" SECURITY.md' in release_workflow,
-            f"release workflow does not reject stale SECURITY release marker: {marker}",
-        )
+    require(
+        "[v${version}](https://github.com/sambai-dev/coop/releases/tag/v${version})"
+        in release_workflow,
+        "release workflow does not require the matching README release link",
+    )
+    require(
+        'series="${version%.*}.x"' in release_workflow
+        and "| tagged \\`${series}\\` releases | Supported |" in release_workflow,
+        "release workflow does not require the matching supported-version line",
+    )
+    require(
+        f"[v{version}](https://github.com/sambai-dev/coop/releases/tag/v{version})"
+        in read("README.md"),
+        "README current-release link differs from the workspace version",
+    )
+    series = version.rsplit(".", 1)[0] + ".x"
+    require(
+        f"| tagged `{series}` releases | Supported |" in read("SECURITY.md"),
+        "SECURITY supported-version line differs from the workspace version",
+    )
     return version
 
 
@@ -146,6 +149,7 @@ def check_markdown_links() -> int:
     markdown_files = [
         *(ROOT / name for name in ["README.md", "SECURITY.md", "AUDIT.md", "CHANGELOG.md"]),
         *(ROOT / "docs").glob("*.md"),
+        *(ROOT / "integrations").glob("**/*.md"),
         ROOT / "sdks" / "python" / "README.md",
         ROOT / "sdks" / "typescript" / "README.md",
     ]
@@ -270,6 +274,8 @@ def check_pins_and_packaging() -> int:
             "python -m twine check",
             "python -m pip install --no-deps --target",
             'PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v',
+            "import coop, coop_mcp",
+            "coop_mcp.py",
             "-name 'coop_sdk-*.whl'",
             "-name 'coop_sdk-*.tar.gz'",
         ]:
@@ -304,16 +310,37 @@ def check_pins_and_packaging() -> int:
         "release workflow publishes an unsupported Linux architecture",
     )
     require("coop-sandbox-init" in release, "Linux release artifact omits the sandbox helper")
+    python_manifest = read("sdks/python/pyproject.toml")
+    for required in [
+        'coop-mcp = "coop_mcp:main"',
+        '"coop_mcp.py" = "coop_mcp.py"',
+    ]:
+        require(required in python_manifest, f"Python MCP packaging contract missing: {required}")
+    bootstrap = read("scripts/bootstrap-production.sh")
+    for required in [
+        "COOP_PRODUCTION_VM_ACKNOWLEDGED",
+        'test "$(uname -m)" = x86_64',
+        "scripts/verify-production.py",
+        "target.write_text",
+        "target.chmod(0o600)",
+    ]:
+        require(required in bootstrap, f"production bootstrap contract missing: {required}")
     container_smoke = read("scripts/smoke-container.sh")
     for required in [
-        "smoke_job python",
-        "smoke_job node",
-        "smoke_job bash",
-        'receipt["receipt_sha256"]',
-        'receipt["networking"] == "disabled"',
-        'policy["networking"] == "disabled"',
+        "scripts/verify-production.py",
+        "COOP_VERIFY_LANGUAGES=python,node,bash",
     ]:
         require(required in container_smoke, f"container smoke contract missing: {required}")
+    production_verifier = read("scripts/verify-production.py")
+    for required in [
+        "verify_canary",
+        "verify_receipt",
+        'receipt.get("receipt_sha256")',
+        'document.get("networking") == "disabled"',
+        'policy.get("network_allowed") is False',
+        'hashlib.sha256(canonical.encode("utf-8")).hexdigest() == recorded',
+    ]:
+        require(required in production_verifier, f"production verifier contract missing: {required}")
     for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"]:
         require(
             "bash scripts/smoke-container.sh" in read(workflow),
@@ -323,7 +350,10 @@ def check_pins_and_packaging() -> int:
             'COOP_SMOKE_ALLOW_PRIVILEGED: "true"' in read(workflow),
             f"{workflow} does not explicitly acknowledge the privileged image smoke",
         )
-    require("docs deploy sdks" in release, "release archives omit docs, deploy templates, or SDKs")
+    require(
+        "docs deploy sdks integrations" in release,
+        "release archives omit docs, deploy templates, SDKs, or integrations",
+    )
     require("path: sdk-dist/*" in release, "release workflow does not upload every SDK distribution")
     require("npm pack --pack-destination" in release, "release workflow omits the npm tarball")
     normalized_release = " ".join(release.split())
@@ -356,7 +386,7 @@ def check_documented_boundary() -> None:
         "README.md": ["Linux x86_64-only", "other Linux architectures"],
         "SECURITY.md": ["Linux x86_64", "non-x86_64 Linux"],
         "docs/deployment.md": ["x86_64 Linux host", "Non-x86_64 Linux"],
-        "docs/security-boundary.md": ["Linux x86_64 in v0.2", "other Linux architectures"],
+        "docs/security-boundary.md": ["Linux x86_64", "other Linux architectures"],
         "docs/troubleshooting.md": ["x86_64 Linux 5.14+", "non-x86_64 Linux"],
     }
     for relative, claims in required_claims.items():
@@ -364,7 +394,7 @@ def check_documented_boundary() -> None:
         for claim in claims:
             require(
                 claim in document,
-                f"{relative} omits the v0.2 architecture boundary: {claim}",
+                f"{relative} omits the current architecture boundary: {claim}",
             )
     service = read("deploy/coop.service")
     require(

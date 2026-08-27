@@ -547,7 +547,7 @@ export class Coop {
             Accept: "application/json",
             Authorization: `Bearer ${this.apiKey}`,
             ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-            "X-Coop-Client": "typescript/0.2.0",
+            "X-Coop-Client": "typescript/0.3.0",
           },
           ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         });

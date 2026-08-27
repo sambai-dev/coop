@@ -1,8 +1,8 @@
 # Coop Python SDK
 
-A typed synchronous client with no required dependencies. Copy `coop.py` into
-your project or install the package. Install the optional stream extra for a
-native WebSocket; otherwise `stream()` transparently uses cursor replay.
+A typed synchronous client and stdio MCP adapter with no required dependencies.
+Install the optional stream extra for a native WebSocket; otherwise `stream()`
+transparently uses cursor replay.
 
 Install from a source checkout (available now):
 
@@ -17,10 +17,24 @@ The PyPI package is not published yet. After it is published, install it with:
 python -m pip install "coop-sdk[stream]"
 ```
 
-The exact v0.2.0 GitHub release wheel is
-`coop_sdk-0.2.0-py3-none-any.whl`; follow the
+The exact v0.3.0 GitHub release wheel is
+`coop_sdk-0.3.0-py3-none-any.whl`; follow the
 [checksum, attestation, and installation commands](../../docs/sdks.md) rather
 than using a moving release URL.
+
+Installation also provides the `coop-mcp` command. It exposes run, result,
+evidence, and cancellation tools to MCP hosts while keeping the Coop URL and
+key outside model-visible arguments:
+
+```bash
+export COOP_BASE_URL=http://127.0.0.1:7300
+export COOP_API_KEY=coop-dev-key
+coop-mcp
+```
+
+Normally an MCP host launches the command. Use the [Hermes, OpenClaw, and
+generic host templates](../../integrations/README.md), and set
+`COOP_MCP_REQUIRE_ISOLATION=true` in production.
 
 ```python
 from coop import Coop, Limits

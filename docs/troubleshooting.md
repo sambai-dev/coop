@@ -5,7 +5,7 @@
 Read the first error line; startup checks are intentionally fail closed.
 
 - `COOP_API_KEYS`: use `tenant:key`, a nonblank tenant, and a random key of at least the enforced minimum length.
-- namespace unavailable: confirm x86_64 Linux 5.14+, effective UID 0, unified cgroup v2, `cgroup.kill`, recursive `mount_setattr`, and a writable delegated cgroup subtree. v0.2 does not support non-root delegation; macOS, Windows, and non-x86_64 Linux are unsupported for containment.
+- namespace unavailable: confirm x86_64 Linux 5.14+, effective UID 0, unified cgroup v2, `cgroup.kill`, recursive `mount_setattr`, and a writable delegated cgroup subtree. The current backend does not support non-root delegation; macOS, Windows, and non-x86_64 Linux are unsupported for containment.
 - helper rejected: install `coop-sandbox-init` from the exact same build as `coop`, set `COOP_SANDBOX_HELPER`, and keep it root-owned/non-writable by jobs.
 - rootfs rejected: set `COOP_ROOTFS` to a dedicated absolute directory; never `/`, the jobs root, or a symlink.
 - jobs root rejected: choose a dedicated absolute child such as `/var/lib/coop/jobs`, not `/tmp`, `/var`, a home root, or a symlinked path.
@@ -37,7 +37,7 @@ Truncation protects server memory and storage. Read the receipt's observed byte 
 
 ## Jobs cannot access the network
 
-This is expected in the supported Linux x86_64 namespace backend. `allow_network: true` is not supported in v0.2. Move required fetching into a trusted adapter, validate the data, and pass bounded input to the job. If status reports `networking: "host"`, the server is using the unisolated development subprocess backend; it has host egress and must not run untrusted code.
+This is expected in the supported Linux x86_64 namespace backend. `allow_network: true` is not supported. Move required fetching into a trusted adapter, validate the data, and pass bounded input to the job. If status reports `networking: "host"`, the server is using the unisolated development subprocess backend; it has host egress and must not run untrusted code.
 
 ## SQLite is busy or disk is full
 

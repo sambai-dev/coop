@@ -842,7 +842,7 @@ pub async fn submit(
         return api_error(
             StatusCode::BAD_REQUEST,
             "network_opt_in_unsupported",
-            "limits.allow_network is not an opt-in in v0.2: namespace mode denies egress, while unsafe subprocess mode retains host networking regardless of this flag",
+            "limits.allow_network is not an opt-in: namespace mode denies egress, while unsafe subprocess mode retains host networking regardless of this flag",
             false,
         );
     }

@@ -1,0 +1,23 @@
+# Merge this block into ~/.hermes/config.yaml. Put the real values in
+# ~/.hermes/.env as COOP_BASE_URL and COOP_API_KEY; do not commit them here.
+mcp_servers:
+  coop:
+    command: "coop-mcp"
+    args: []
+    env:
+      COOP_BASE_URL: "${COOP_BASE_URL}"
+      COOP_API_KEY: "${COOP_API_KEY}"
+      COOP_MCP_REQUIRE_ISOLATION: "${COOP_MCP_REQUIRE_ISOLATION}"
+      COOP_MCP_ALLOWED_LANGUAGES: "${COOP_MCP_ALLOWED_LANGUAGES}"
+    enabled: true
+    timeout: 330
+    connect_timeout: 30
+    supports_parallel_tool_calls: false
+    tools:
+      include:
+        - coop_run_code
+        - coop_job_result
+        - coop_job_events
+        - coop_cancel_job
+      resources: false
+      prompts: false

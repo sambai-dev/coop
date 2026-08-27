@@ -21,7 +21,7 @@ def make_request(base, key, method, path, payload=None, timeout=75, retries=5):
             headers={
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
-                "User-Agent": "coop-bench/0.2",
+                "User-Agent": "coop-bench/0.3",
             },
         )
         try:

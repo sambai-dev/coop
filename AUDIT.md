@@ -4,7 +4,7 @@
 
 **Scope:** Rust workspace, execution boundary, API tenancy, scheduler, SQLite store, dashboard, SDKs, Docker/Compose, CI/release automation, and public documentation
 
-**Status:** v0.2 release-candidate hardening; not an external certification
+**Status:** historical v0.2 release hardening record; not an external certification. v0.3 adds integration and setup surfaces without changing this execution boundary.
 
 This file records the security properties reviewed for v0.2 and the evidence expected before release. It deliberately replaces v0.1 claims that overstated host-filesystem isolation, PID-namespace behavior, event-log immutability, and hostile-test coverage.
 

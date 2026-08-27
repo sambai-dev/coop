@@ -30,12 +30,12 @@ RUN install -d -m 0755 /.pivot_old /proc /dev /work \
 
 FROM runtime-base AS runtime
 
-# v0.2's namespace bootstrap and seccomp policy are x86_64-only. Refuse to
+# The namespace bootstrap and seccomp policy are x86_64-only. Refuse to
 # produce a production image whose platform cannot provide the documented
 # containment boundary.
 RUN test "$(dpkg --print-architecture)" = amd64
 
-ARG VERSION=0.2.0
+ARG VERSION=0.3.0
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="Coop" \
       org.opencontainers.image.description="Audit-first execution gateway for AI agents" \

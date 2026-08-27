@@ -27,7 +27,11 @@ jobs:
       - name: Validate version, docs, pins, and packaging contracts
         run: python3 scripts/check-release-surface.py
       - name: Validate release shell support
-        run: bash -n scripts/prepare-test-rootfs.sh scripts/smoke-container.sh
+        run: >-
+          bash -n scripts/prepare-test-rootfs.sh scripts/smoke-container.sh
+          scripts/bootstrap-production.sh
+      - name: Validate production verifier syntax
+        run: python3 -m py_compile scripts/verify-production.py
 
   rust-quality:
     name: rust quality
@@ -99,7 +103,7 @@ jobs:
         run: python -m pyright
       - name: Type-check Python SDK with Mypy
         working-directory: sdks/python
-        run: python -m mypy --strict coop.py tests/typecheck_usage.py
+        run: python -m mypy --strict coop.py coop_mcp.py tests/typecheck_usage.py
       - name: Build and verify Python wheel and source distribution
         shell: bash
         run: |
@@ -118,7 +122,7 @@ jobs:
             target="sdks/python/.verify-dist/${kind}-install"
             rm -rf "$target"
             python -m pip install --no-deps --target "$target" "$artifact"
-            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop; assert coop.__version__ == '0.2.0'; assert Path(coop.__file__).with_name('py.typed').is_file()"
+            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp; assert coop.__version__ == '0.3.0'; assert coop_mcp.__version__ == coop.__version__; assert Path(coop.__file__).with_name('py.typed').is_file()"
             PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v
           done
       - name: Install TypeScript SDK dependencies
@@ -138,7 +142,7 @@ jobs:
         run: |
           python -m pip install "./sdks/python[dev]"
           python -m unittest discover -s sdks/python/tests -v
-          python -m mypy --strict sdks/python/coop.py sdks/python/tests/typecheck_usage.py
+          python -m mypy --strict sdks/python/coop.py sdks/python/coop_mcp.py sdks/python/tests/typecheck_usage.py
       - name: Set up latest supported Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

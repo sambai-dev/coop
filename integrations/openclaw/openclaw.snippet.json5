@@ -1,0 +1,39 @@
+// Merge this block into ~/.openclaw/openclaw.json. Keep the real values in
+// the Gateway process environment; do not commit credentials into config.
+{
+  mcp: {
+    servers: {
+      coop: {
+        command: "coop-mcp",
+        args: [],
+        env: {
+          COOP_BASE_URL: "${COOP_BASE_URL}",
+          COOP_API_KEY: "${COOP_API_KEY}",
+          COOP_MCP_REQUIRE_ISOLATION: "${COOP_MCP_REQUIRE_ISOLATION}",
+          COOP_MCP_ALLOWED_LANGUAGES: "${COOP_MCP_ALLOWED_LANGUAGES}",
+        },
+        requestTimeoutMs: 330000,
+        connectionTimeoutMs: 30000,
+        supportsParallelToolCalls: false,
+        toolFilter: {
+          include: [
+            "coop_run_code",
+            "coop_job_result",
+            "coop_job_events",
+            "coop_cancel_job",
+          ],
+        },
+      },
+    },
+  },
+
+  // Required when the target agent is sandboxed. Merge this with an existing
+  // sandbox tool policy rather than replacing a narrower allowlist.
+  tools: {
+    sandbox: {
+      tools: {
+        alsoAllow: ["bundle-mcp"],
+      },
+    },
+  },
+}
