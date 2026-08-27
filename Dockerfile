@@ -1,5 +1,5 @@
 # Keep this version in sync with rust-toolchain.toml and CI.
-FROM rust:1.89.0-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6 AS build
+FROM rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS build
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
