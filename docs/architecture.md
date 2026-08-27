@@ -1,6 +1,6 @@
 # Architecture
 
-Coop is an execution gateway, scheduler, executor, and evidence store in one Rust process. It is optimized for short, stateless agent jobs on one node. SQLite is the persistence boundary; horizontal scheduling and persistent workspaces are outside the v0.2 contract.
+Coop is an execution gateway, scheduler, executor, and evidence store in one Rust process. It is optimized for short, stateless agent jobs on one node. SQLite is the persistence boundary; horizontal scheduling and persistent workspaces are outside the current contract.
 
 ```text
 agent / SDK / dashboard
@@ -67,13 +67,13 @@ Output is bounded by both record and byte policies. The executor records truncat
 
 Each API key maps to one tenant. Tenant ownership is checked on job detail, result, cancel, event history, and stream access. Foreign job IDs should be indistinguishable from missing IDs.
 
-The server process, SQLite file, private rootfs, and host kernel remain trusted. Submitted source, stdin, interpreter behavior, and descendants are untrusted. A namespace job must not receive the server's database or outer host root as part of its filesystem. The in-tree containment backend is supported only on Linux x86_64 in v0.2; other platforms use the unisolated development executor.
+The server process, SQLite file, private rootfs, and host kernel remain trusted. Submitted source, stdin, interpreter behavior, and descendants are untrusted. A namespace job must not receive the server's database or outer host root as part of its filesystem. The in-tree containment backend is supported only on Linux x86_64; other platforms use the unisolated development executor.
 
 See [security-boundary.md](security-boundary.md) for the complete trust-tier statement.
 
 ## Scale characteristics
 
-v0.2 is a single-node design:
+v0.3 remains a single-node design:
 
 - a bounded in-memory admission queue
 - a configured worker pool
@@ -83,7 +83,7 @@ v0.2 is a single-node design:
 
 Running multiple Coop servers against the same SQLite file is unsupported. A multi-node design requires a durable queue, distributed admission control, a network database, and an external stream bus.
 
-## Non-goals in v0.2
+## Non-goals in v0.3
 
 - persistent or resumable sandboxes
 - file upload/download or artifact stores

@@ -2,6 +2,27 @@
 
 All notable changes are documented here. Coop follows semantic versioning while pre-1.0; minor versions can contain API and deployment changes.
 
+## 0.3.0 — 2026-08-27
+
+### Agent integration
+
+- Add a dependency-free `coop-mcp` stdio server to the Python SDK package.
+- Expose narrow run, result, cursor-bounded evidence, and cancellation tools with MCP structured content and safety annotations.
+- Keep the Coop URL, tenant key, language allowlist, wait ceiling, code-size ceiling, and required isolation posture outside model-visible arguments.
+- Return a durable job ID when an adapter wait expires instead of retrying an ambiguous submission.
+- Add copy-ready Hermes, OpenClaw, and generic MCP configuration with guidance for denying bypass execution tools.
+
+### Setup and positioning
+
+- Rewrite onboarding around the model → harness → Coop execution boundary, including explicit use/don't-use cases and the relationship to persistent harness sandboxes.
+- Add a guarded dedicated-VM Compose bootstrap that creates credentials without overwriting existing secrets.
+- Extract one authenticated production verifier shared by operator bootstrap and container CI; it checks configured posture and receipt evidence for Python, Node.js, and Bash canaries.
+
+### Compatibility
+
+- The HTTP API and v0.2 database schema remain compatible.
+- The Linux x86_64 shared-kernel security boundary is unchanged; v0.3 does not add a VM or external hardened-runtime backend.
+
 ## 0.2.0 — 2026-08-26
 
 ### Security boundary

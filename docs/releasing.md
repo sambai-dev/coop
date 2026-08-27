@@ -6,7 +6,7 @@ A source checkout does not authorize a tag or publication. The release workflow 
 
 Configure these controls in GitHub before setting the repository variable `COOP_RELEASE_GOVERNANCE=enabled`:
 
-1. Protect `main` with a ruleset that requires changes through a pull request, blocks force pushes/deletion, and requires every v0.2 CI job, including the container and hostile-containment gates. Require an approving review when the repository has a second trusted maintainer; a solo maintainer must still use a PR and may bypass only through that PR after all required checks pass.
+1. Protect `main` with a ruleset that requires changes through a pull request, blocks force pushes/deletion, and requires every CI job, including the container and hostile-containment gates. Require an approving review when the repository has a second trusted maintainer; a solo maintainer must still use a PR and may bypass only through that PR after all required checks pass.
 2. Protect `v*` tags with a ruleset that restricts tag creation, update, and deletion to designated release maintainers or automation. Do not permit a tag to be moved after publication.
 3. Create a `release` environment restricted to `v*` tags and require explicit reviewer approval. Use an independent trusted reviewer and prevent self-review whenever a second trusted maintainer is available. A solo-maintainer repository may temporarily designate its owner, must record the explicit approval, and should switch to independent approval as soon as another maintainer is established.
 4. Enable private vulnerability reporting and verify the contact in [SECURITY.md](../SECURITY.md).
@@ -22,7 +22,7 @@ The repository variable is an acknowledgement, not proof. Recheck the settings a
 3. Review dependency, base-image, Debian-snapshot, rootfs, toolchain, and GitHub Action changes. Re-verify every external action SHA against its upstream release.
 4. Run `python scripts/check-release-surface.py` and the verification commands in [README.md](../README.md).
 5. Replace `unreleased` in the matching [CHANGELOG.md](../CHANGELOG.md) heading with the UTC release date. The tag workflow rejects an unfinalized heading.
-6. Replace the release-candidate and “until published” wording in [README.md](../README.md), then update the supported-version table in [SECURITY.md](../SECURITY.md) from source-only RC status to the tagged `0.2.x` line. The tag workflow rejects these stale README and SECURITY markers.
+6. Make the [README](../README.md) current-release link match `vVERSION` and mark the matching `MAJOR.MINOR.x` line as supported in [SECURITY.md](../SECURITY.md). The tag workflow checks both dynamically.
 7. Confirm the workspace, lockfile, SDK, Docker, Compose, changelog, and tag versions all match exactly.
 8. Re-read [AUDIT.md](../AUDIT.md), the [security boundary](security-boundary.md), and residual risks. Stop if the code enforces a weaker posture than the documents.
 9. Obtain the release approval required by the protected environment, then create and push an immutable `vVERSION` tag from the reviewed commit according to the project's signing policy.

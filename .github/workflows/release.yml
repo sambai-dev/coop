@@ -50,22 +50,9 @@ jobs:
             echo "CHANGELOG.md still marks ${version} as unreleased" >&2
             exit 1
           fi
-          if grep -Fqi "this checkout is the v0.2 release candidate" README.md; then
-            echo "README.md still identifies ${version} as a release candidate" >&2
-            exit 1
-          fi
-          if grep -Fqi "until a checksummed, attested v0.2.0 release is published" README.md; then
-            echo "README.md still says ${version} is unpublished" >&2
-            exit 1
-          fi
-          if grep -Fqi "latest \`main\` (\`0.2.0\` release candidate)" SECURITY.md; then
-            echo "SECURITY.md still identifies ${version} as a release candidate" >&2
-            exit 1
-          fi
-          if grep -Fqi "| tagged \`0.2.x\` releases | Not published yet |" SECURITY.md; then
-            echo "SECURITY.md still says ${version} is unpublished" >&2
-            exit 1
-          fi
+          grep -Fq "[v${version}](https://github.com/sambai-dev/coop/releases/tag/v${version})" README.md
+          series="${version%.*}.x"
+          grep -Fq "| tagged \`${series}\` releases | Supported |" SECURITY.md
           echo "version=${version}" >> "$GITHUB_OUTPUT"
       - name: Validate release surface
         run: python3 scripts/check-release-surface.py
@@ -118,7 +105,7 @@ jobs:
         run: python -m pyright
       - name: Type-check Python SDK with Mypy
         working-directory: sdks/python
-        run: python -m mypy --strict coop.py tests/typecheck_usage.py
+        run: python -m mypy --strict coop.py coop_mcp.py tests/typecheck_usage.py
       - working-directory: sdks/typescript
         run: npm ci
       - working-directory: sdks/typescript
@@ -142,7 +129,7 @@ jobs:
             target="sdks/python/.verify-dist/${kind}-install"
             rm -rf "$target"
             python -m pip install --no-deps --target "$target" "$artifact"
-            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop; assert coop.__version__ == '0.2.0'; assert Path(coop.__file__).with_name('py.typed').is_file()"
+            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp; assert coop.__version__ == '0.3.0'; assert coop_mcp.__version__ == coop.__version__; assert Path(coop.__file__).with_name('py.typed').is_file()"
             PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v
           done
       - name: Build npm package tarball
@@ -156,7 +143,7 @@ jobs:
         run: |
           python -m pip install "./sdks/python[dev]"
           python -m unittest discover -s sdks/python/tests -v
-          python -m mypy --strict sdks/python/coop.py sdks/python/tests/typecheck_usage.py
+          python -m mypy --strict sdks/python/coop.py sdks/python/coop_mcp.py sdks/python/tests/typecheck_usage.py
       - name: Set up latest supported Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -347,7 +334,7 @@ jobs:
             cp "target/${{ matrix.target }}/release/coop-sandbox-init" "$dir/"
           fi
           cp README.md LICENSE SECURITY.md AUDIT.md CHANGELOG.md "$dir/"
-          cp -R docs deploy sdks "$dir/"
+          cp -R docs deploy sdks integrations "$dir/"
           tar -czf "${dir}.tar.gz" "$dir"
       - name: Package Windows artifact
         if: runner.os == 'Windows'
@@ -357,7 +344,7 @@ jobs:
           New-Item -ItemType Directory -Path $dir | Out-Null
           Copy-Item -LiteralPath "target/${{ matrix.target }}/release/${{ matrix.binary }}" -Destination $dir
           Copy-Item -LiteralPath README.md, LICENSE, SECURITY.md, AUDIT.md, CHANGELOG.md -Destination $dir
-          Copy-Item -LiteralPath docs, deploy, sdks -Destination $dir -Recurse
+          Copy-Item -LiteralPath docs, deploy, sdks, integrations -Destination $dir -Recurse
           Compress-Archive -Path $dir -DestinationPath "${dir}.zip"
       - name: Upload packaged artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

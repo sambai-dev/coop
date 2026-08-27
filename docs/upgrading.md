@@ -42,3 +42,17 @@ v0.2 tightens the security contract and should be treated as a security-sensitiv
 Do not reuse a v0.1 container/root filesystem and simply change the binary. Build the v0.2 image or construct and validate a private rootfs first.
 
 The v0.1 release made containment and audit claims that v0.2 deliberately narrows. Do not expose a v0.1 server to hostile tenants.
+
+## From v0.2.x to v0.3.0
+
+v0.3 keeps the v0.2 HTTP API, database schema, and Linux x86_64 execution
+boundary. Stop the old service, back up SQLite and deployment configuration,
+install the matching v0.3 `coop` and `coop-sandbox-init`, rebuild the private
+rootfs/image from the v0.3 source, and run `scripts/verify-production.py`
+before restoring traffic.
+
+The Python wheel now installs `coop-mcp`; existing SDK imports remain
+compatible. Agent operators should give each harness a separate tenant key,
+set `COOP_MCP_REQUIRE_ISOLATION=true`, restrict its language allowlist, and
+remove alternate execution tools when Coop must be mandatory rather than an
+optional tool.

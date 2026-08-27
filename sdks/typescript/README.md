@@ -1,6 +1,6 @@
 # Coop TypeScript SDK
 
-The typed v0.2 client runs in modern browsers and Node.js 18+. It uses the
+The typed v0.3 client runs in modern browsers and Node.js 18+. It uses the
 platform `fetch`, supports `AbortSignal` and per-request deadlines, and has no
 runtime dependencies.
 
@@ -18,7 +18,7 @@ npm ci
 npm run build
 npm pack
 # Then, from your application:
-npm install /path/to/coop/sdks/typescript/coop-sdk-0.2.0.tgz
+npm install /path/to/coop/sdks/typescript/coop-sdk-0.3.0.tgz
 ```
 
 The npm package is not published yet. After it is published, install it with:
@@ -27,8 +27,8 @@ The npm package is not published yet. After it is published, install it with:
 npm install coop-sdk
 ```
 
-The exact v0.2.0 GitHub release package is
-`coop-sdk-0.2.0.tgz`; follow the
+The exact v0.3.0 GitHub release package is
+`coop-sdk-0.3.0.tgz`; follow the
 [checksum, attestation, and installation commands](../../docs/sdks.md) rather
 than using a moving release URL.
 

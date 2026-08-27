@@ -4,13 +4,13 @@ Coop runs code supplied by API clients. That makes containment configuration par
 
 ## Trust tiers
 
-| Tier | Intended use | Boundary | v0.2 posture |
+| Tier | Intended use | Boundary | Current posture |
 |---|---|---|---|
-| External hardened runtime | Determined hostile multi-tenant code | gVisor/OCI, Kata, or microVM per workload | Recommended direction; not bundled or integrated in v0.2 |
+| External hardened runtime | Determined hostile multi-tenant code | gVisor/OCI, Kata, or microVM per workload | Recommended direction; not bundled or integrated |
 | Linux x86_64 namespace backend | Untrusted or accidentally dangerous agent code on a dedicated x86_64 VM | Private rootfs, Linux namespaces, cgroup v2, rlimits, x86_64 seccomp policy, privilege drop | In tree; shared-kernel defense in depth |
 | Plain subprocess | Local development and same-trust code only | Process group and wall-time supervision | Unisolated; never a sandbox |
 
-The namespace backend is not equivalent to a VM. A kernel vulnerability, side channel, interpreter vulnerability, or privileged-container escape can cross it. It is supported only on Linux x86_64 in v0.2. macOS, Windows, and other Linux architectures use the plain development subprocess backend and provide no containment. That backend supervises cancellation, bounded output, and wall time, but does not enforce the requested CPU, memory, process-count, or file-size controls. Those controls remain null/false in its effective policy and receipts. For code controlled by mutually hostile tenants, use a per-workload hardened runtime or VM boundary once an integration is available.
+The namespace backend is not equivalent to a VM. A kernel vulnerability, side channel, interpreter vulnerability, or privileged-container escape can cross it. It is supported only on Linux x86_64. macOS, Windows, and other Linux architectures use the plain development subprocess backend and provide no containment. That backend supervises cancellation, bounded output, and wall time, but does not enforce the requested CPU, memory, process-count, or file-size controls. Those controls remain null/false in its effective policy and receipts. For code controlled by mutually hostile tenants, use a per-workload hardened runtime or VM boundary once an integration is available.
 
 ## Namespace-backend invariants
 
@@ -25,7 +25,7 @@ A production namespace job is expected to fail closed unless all of these are tr
 7. `/proc`, temporary storage, stdin, and source staging are job-private.
 8. cgroup memory, process, CPU, and cleanup controls are installed before execution.
 9. supplementary groups are cleared and uid/gid dropping is checked.
-10. `no_new_privs` and the v0.2 x86_64 seccomp policy are applied.
+10. `no_new_privs` and the x86_64 seccomp policy are applied.
 11. normal completion, timeout, cancellation, and bootstrap-error paths kill the cgroup, wait for it to empty, and record the outcome. A panic or forced worker abort still issues a synchronous cgroup kill, but its wait/remove cleanup is best-effort and may need operator reconciliation.
 12. stdout and stderr cannot allocate or queue unbounded data in the server.
 
@@ -41,7 +41,7 @@ Do not put secrets, the Coop database, host sockets, cloud credentials, SSH mate
 
 ## Network model
 
-The supported Linux x86_64 namespace backend denies job network access. A submitted `allow_network: true` is rejected; it is not an egress grant in v0.2. The unisolated development subprocess backend cannot enforce this boundary and retains the service account's host networking, reported as `networking: "host"`. The server itself may also reach the network, so firewall its egress and metadata-service access at the VM boundary.
+The supported Linux x86_64 namespace backend denies job network access. A submitted `allow_network: true` is rejected; it is not an egress grant. The unisolated development subprocess backend cannot enforce this boundary and retains the service account's host networking, reported as `networking: "host"`. The server itself may also reach the network, so firewall its egress and metadata-service access at the VM boundary.
 
 A future egress feature should be a host-side policy proxy with explicit destination, DNS-rebinding, method, and credential-injection rules—not a general network namespace interface.
 

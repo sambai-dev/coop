@@ -1,12 +1,12 @@
 # Deployment
 
-Coop has two supported operating postures in v0.2: an explicitly unisolated local-development process and the Linux x86_64 namespace backend on a dedicated x86_64 VM. A hardened external runtime is the intended production-grade evolution, but gVisor/OCI is not bundled in this release.
+Coop v0.3 has two supported operating postures: an explicitly unisolated local-development process and the Linux x86_64 namespace backend on a dedicated x86_64 VM. A hardened external runtime is the intended production-grade evolution, but gVisor/OCI is not bundled in this release.
 
 ## Prerequisites for the namespace backend
 
-- an x86_64 Linux host; v0.2's namespace bootstrap and seccomp policy do not support other architectures
+- an x86_64 Linux host; the namespace bootstrap and seccomp policy do not support other architectures
 - Linux 5.14 or newer with a unified, writable cgroup v2 hierarchy (`cgroup.kill` and recursive `mount_setattr` are required)
-- effective UID 0; v0.2 does not support a non-root delegated namespace backend
+- effective UID 0; the current backend does not support non-root delegation
 - a dedicated VM with no unrelated workloads
 - a trusted private rootfs containing the configured interpreters
 - a dedicated SQLite path outside that rootfs; the database must be a regular,
@@ -17,22 +17,20 @@ Validate the exact deployment by running the hostile suite. “The process start
 
 ## Compose on a dedicated VM
 
-On an x86_64 Linux Docker host, the repository image constructs `/opt/coop/rootfs` separately from the outer container filesystem. Its base images are digest-pinned and both the outer runtime and job rootfs install interpreters from the same dated Debian snapshot. Compose sets `COOP_ROOTFS` and fails if no API key is provided. The Dockerfile refuses to produce a production image on another architecture. The supported v0.2 container contract runs Coop directly as container PID 1 and grants the container's cgroup delegation to that single service; do not add Docker's `init: true` or unrelated co-processes. This is a deployment contract, not a claim that the runtime can reliably identify and reject every extra process already placed in the delegated cgroup. Sandbox workloads still use Coop's dedicated PID-namespace init/reaper.
+On an x86_64 Linux Docker host, the repository image constructs `/opt/coop/rootfs` separately from the outer container filesystem. Its base images are digest-pinned and both the outer runtime and job rootfs install interpreters from the same dated Debian snapshot. Compose sets `COOP_ROOTFS` and fails if no API key is provided. The Dockerfile refuses to produce a production image on another architecture. The supported container contract runs Coop directly as container PID 1 and grants the container's cgroup delegation to that single service; do not add Docker's `init: true` or unrelated co-processes. This is a deployment contract, not a claim that the runtime can reliably identify and reject every extra process already placed in the delegated cgroup. Sandbox workloads still use Coop's dedicated PID-namespace init/reaper.
+
+Use the guarded bootstrap. It refuses non-Linux/non-x86_64 hosts, requires an
+explicit dedicated-VM acknowledgement, creates `.env` with mode `0600` without
+overwriting it, builds with pulled bases, waits for readiness, verifies
+authenticated posture, and runs one receipt-checked canary in each runtime:
 
 ```bash
-if [ -e .env ]; then
-  echo ".env already exists; refusing to overwrite a secrets file" >&2
-else
-  install -m 0600 .env.example .env
-  key="$(openssl rand -hex 32)"
-  sed -i "s/^COOP_API_KEYS=.*/COOP_API_KEYS=agent-a:${key}/" .env
-  docker compose build --pull
-  docker compose up -d --wait
-  docker compose ps
-fi
+COOP_PRODUCTION_VM_ACKNOWLEDGED=true scripts/bootstrap-production.sh
 ```
 
-The guard is deliberate: `.env` contains bearer credentials, so the quick start creates it with mode `0600` and never overwrites an existing secrets file. If `.env` already exists, review it, run the two Compose commands separately, and set `key` to its `agent-a:` key value before running the status command below.
+The guard is deliberate: `.env` contains bearer credentials. If it already
+exists, the script requires a non-empty `agent-a:key` entry and leaves the file
+unchanged. Review the script and Compose file before running them on your VM.
 
 Confirm posture with an authenticated request:
 
@@ -41,6 +39,17 @@ curl --fail-with-body \
   -H "Authorization: Bearer $key" \
   http://127.0.0.1:7300/v1/status
 ```
+
+To repeat the full posture and canary gate without rebuilding, extract the key
+into `COOP_CLIENT_KEY` through your secret manager and run:
+
+```bash
+COOP_CLIENT_KEY="$key" python3 scripts/verify-production.py
+```
+
+The verifier permits plain HTTP only on loopback. Set `COOP_VERIFY_BASE_URL` to
+an HTTPS endpoint for remote ingress and `COOP_VERIFY_LANGUAGES` to a
+comma-separated subset when the deployment intentionally disables a runtime.
 
 Before admitting jobs, require `execution.backend` to be `namespaces+cgroups-v2+private-rootfs`, `isolated`, `private_rootfs`, `dedicated_bootstrap`, and `seccomp` to be true, `execution.networking` to be `disabled`, every `execution.limit_enforcement` flag to be true, `storage_ready` to be true, and `scheduler.shutting_down` to be false. Then run one canary in each enabled language and require its terminal receipt to report `bootstrap_ready: true`, `isolated: true`, `private_rootfs: true`, `dedicated_bootstrap: true`, `seccomp: true`, disabled networking, and all five limit-enforcement flags. Startup status describes configured capability; the receipt proves the per-job ready boundary was observed.
 
@@ -113,12 +122,12 @@ On PowerShell, set `$env:COOP_SANDBOX = "off"` and `$env:COOP_JOBS_ROOT = Join-P
 
 ## Prebuilt archives
 
-Before using a moving `releases/latest` URL, verify that it resolves to v0.2.0 or newer; v0.1.x is unsupported for hostile execution. Release archives are named by Rust target and include documentation, deploy templates, and SDK source. The Linux archive also includes the matching helper.
+Before using a moving `releases/latest` URL, verify that it resolves to v0.3.0 or newer. Older release lines are unsupported for new deployments. Release archives are named by Rust target and include documentation, deploy templates, integration templates, and SDK source. The Linux archive also includes the matching helper.
 
 The following commands require a current [GitHub CLI](https://cli.github.com/) with artifact-attestation support; authenticate it according to your organization's policy before downloading. For Linux x86_64:
 
 ```bash
-version=0.2.0
+version=0.3.0
 asset=coop-x86_64-unknown-linux-musl.tar.gz
 gh release download "v${version}" --repo sambai-dev/coop \
   --pattern "$asset" --pattern SHA256SUMS
@@ -137,7 +146,7 @@ This installs binaries only. Build the private rootfs, configuration, service, a
 For an Apple-silicon macOS development installation:
 
 ```bash
-version=0.2.0
+version=0.3.0
 asset=coop-aarch64-apple-darwin.tar.gz
 gh release download "v${version}" --repo sambai-dev/coop \
   --pattern "$asset" --pattern SHA256SUMS
@@ -153,7 +162,7 @@ install -m 0755 coop-aarch64-apple-darwin/coop "$HOME/.local/bin/coop"
 For an x86_64 Windows development installation in PowerShell:
 
 ```powershell
-$version = "0.2.0"
+$version = "0.3.0"
 $asset = "coop-x86_64-pc-windows-msvc.zip"
 gh release download "v$version" --repo sambai-dev/coop `
     --pattern $asset --pattern SHA256SUMS
@@ -170,7 +179,7 @@ Copy-Item "coop-x86_64-pc-windows-msvc\coop.exe" "$HOME\bin\coop.exe"
 
 Add the chosen user-local binary directory to `PATH`. The checksum file and SPDX JSON SBOM are release assets. Verification proves which GitHub workflow produced the artifact; it does not turn the shared-kernel execution backend into a stronger boundary.
 
-The Apple-silicon macOS and x86_64 Windows archives run the local-development subprocess backend only. Non-x86_64 Linux source builds have the same limitation in v0.2. They are useful for trusted-code integration work, not production containment. A production x86_64 Linux binary installation still needs the private rootfs, cgroup/systemd setup, keys, TLS ingress, and hostile-suite validation described above.
+The Apple-silicon macOS and x86_64 Windows archives run the local-development subprocess backend only. Non-x86_64 Linux source builds have the same limitation. They are useful for trusted-code integration work, not production containment. A production x86_64 Linux binary installation still needs the private rootfs, cgroup/systemd setup, keys, TLS ingress, and hostile-suite validation described above.
 
 ## TLS proxy requirements
 
@@ -184,4 +193,4 @@ The Apple-silicon macOS and x86_64 Windows archives run the local-development su
 
 ## gVisor and other external runtimes
 
-Do not assume that merely running the whole Coop container under gVisor creates per-job tenant separation inside that container. A future backend must create a distinct OCI workload per job, provide a clean rootfs, wire cancellation and resource policy, and report runtime provenance into the receipt. Until that integration exists, the v0.2 status endpoint will not claim a gVisor boundary.
+Do not assume that merely running the whole Coop container under gVisor creates per-job tenant separation inside that container. A future backend must create a distinct OCI workload per job, provide a clean rootfs, wire cancellation and resource policy, and report runtime provenance into the receipt. Until that integration exists, the status endpoint will not claim a gVisor boundary.

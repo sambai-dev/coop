@@ -20,7 +20,8 @@ We aim to acknowledge a complete report within 72 hours. Timelines for validatio
 | Version | Security support |
 |---|---|
 | latest `main` | Active development; may include unreleased changes |
-| tagged `0.2.x` releases | Supported |
+| tagged `0.3.x` releases | Supported |
+| tagged `0.2.x` releases | Unsupported; upgrade to 0.3.x |
 | `0.1.x` | Unsupported; do not expose to hostile tenants |
 | older versions | Unsupported |
 
@@ -28,14 +29,14 @@ We aim to acknowledge a complete report within 72 hours. Timelines for validatio
 
 ## Boundary summary
 
-Coop v0.2 has two materially different execution modes:
+Coop v0.3 has two materially different execution modes:
 
 - `namespaces`: a shared-kernel Linux x86_64 defense-in-depth backend requiring a private rootfs, cgroup v2, rlimits, the x86_64 seccomp policy, checked privilege drop, and isolated namespaces. Run it only on a dedicated x86_64 VM.
 - `off`: a plain subprocess for same-trust development. It is not a sandbox,
   submitted code has the service account's authority, and only wall time (not
   requested CPU, memory, process-count, or file-size limits) is enforced.
 
-Namespace containment is unsupported on macOS, Windows, and non-x86_64 Linux in v0.2; those platforms can use only the unisolated development subprocess backend. Coop does not bundle gVisor, Kata, Firecracker, or another VM boundary. The supplied privileged Compose service has host-equivalent container authority and is appropriate only inside a dedicated x86_64 Linux VM. For the exact assumptions and invariants, read [docs/security-boundary.md](docs/security-boundary.md).
+Namespace containment is unsupported on macOS, Windows, and non-x86_64 Linux; those platforms can use only the unisolated development subprocess backend. Coop does not bundle gVisor, Kata, Firecracker, or another VM boundary. The supplied privileged Compose service has host-equivalent container authority and is appropriate only inside a dedicated x86_64 Linux VM. For the exact assumptions and invariants, read [docs/security-boundary.md](docs/security-boundary.md).
 
 ## Security invariants
 
