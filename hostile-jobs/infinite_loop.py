@@ -1,7 +1,6 @@
 import time
 
-n = 0
+# Exercise the wall-clock supervisor without racing the separate CPU-budget
+# gate or depending on a hot interpreter loop remaining healthy.
 while True:
-    n += 1
-    if n % 10_000_000 == 0:
-        time.sleep(0)
+    time.sleep(60)

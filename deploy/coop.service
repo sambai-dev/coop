@@ -1,0 +1,45 @@
+[Unit]
+Description=Coop execution gateway
+Documentation=https://github.com/sambai-dev/coop/tree/main/docs
+After=network-online.target
+Wants=network-online.target
+ConditionPathIsDirectory=/opt/coop/rootfs
+ConditionFileIsExecutable=/usr/local/bin/coop-sandbox-init
+ConditionArchitecture=x86-64
+
+[Service]
+Type=simple
+# The Linux x86_64 namespace backend currently needs privileged namespace,
+# mount, uid/gid, and cgroup operations. Keep it on a dedicated x86_64 VM.
+User=root
+Group=root
+EnvironmentFile=/etc/coop/coop.env
+ExecStart=/usr/local/bin/coop
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+KillMode=mixed
+Delegate=yes
+UMask=0077
+StateDirectory=coop
+StateDirectoryMode=0700
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+# The helper creates a minimal private /dev for every job and therefore needs
+# CAP_MKNOD. Do not enable systemd PrivateDevices without re-running the full
+# hostile suite; systemd may remove that capability.
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectControlGroups=no
+RestrictNamespaces=user mnt pid net ipc uts
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_SYS_CHROOT CAP_MKNOD CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL
+ReadWritePaths=/var/lib/coop /sys/fs/cgroup
+ReadOnlyPaths=/opt/coop/rootfs /usr/local/bin/coop /usr/local/bin/coop-sandbox-init
+
+[Install]
+WantedBy=multi-user.target

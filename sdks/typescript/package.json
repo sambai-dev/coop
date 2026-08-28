@@ -1,0 +1,50 @@
+{
+  "name": "coop-sdk",
+  "version": "0.3.0",
+  "description": "Typed browser and Node.js client for the Coop execution gateway",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/coop.js",
+  "types": "./dist/coop.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/coop.d.ts",
+      "import": "./dist/coop.js",
+      "default": "./dist/coop.js"
+    }
+  },
+  "files": [
+    "dist",
+    "coop.ts",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.typecheck.json",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "agents",
+    "sandbox",
+    "code-execution",
+    "audit"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sambai-dev/coop.git",
+    "directory": "sdks/typescript"
+  },
+  "bugs": "https://github.com/sambai-dev/coop/issues",
+  "homepage": "https://github.com/sambai-dev/coop#readme",
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}

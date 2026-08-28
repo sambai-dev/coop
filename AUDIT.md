@@ -1,59 +1,89 @@
-# Coop Security Audit — v0.1.0
+# Coop v0.2 security review record
 
-- **Scope**: full workspace (`coop-types`, `coop-store`, `coop-exec`, `coop-server`), CI/CD workflows, Docker packaging, SDKs, documentation claims
-- **Method**: manual adversarial code review of every request path and the sandbox implementation; RustSec advisory scan via `cargo-audit` against `Cargo.lock`; secrets scan over tracked content; automated verification via the hostile-jobs containment suite in a privileged Linux container; README/config/route claim-by-claim diffing against source
-- **Result**: 4 findings fixed before release, 6 accepted with documented mitigations. Supply chain clean.
+**Review date:** 2026-08-26
 
-## Findings
+**Scope:** Rust workspace, execution boundary, API tenancy, scheduler, SQLite store, dashboard, SDKs, Docker/Compose, CI/release automation, and public documentation
 
-| ID | Severity | Component | Summary | Status |
-|---|---|---|---|---|
-| F-001 | HIGH | API | Cross-tenant job reads (IDOR): any valid key could fetch any tenant's job view, replay, or stream by id | **FIXED** |
-| F-002 | HIGH | Sandbox | cgroup attach failure was silently ignored — job would run without memory/cpu/pids caps while namespaces still applied | **FIXED** (fail-closed: child exits 126) |
-| F-003 | MEDIUM | Server | Per-job broadcast channels were never freed after job completion → unbounded memory growth over uptime | **FIXED** |
-| F-004 | LOW | Sandbox | Memory cap inconsistency: `RLIMIT_AS`/tmpfs sized to min(mem, 2 GiB) while `memory.max` allowed up to 4 GiB | **FIXED** (single consistent value) |
-| F-005 | MEDIUM | Sandbox | No seccomp filter — syscall surface is that of the interpreter binary | Accepted; roadmap item |
-| F-006 | MEDIUM | Sandbox | All jobs share UID `nobody`: `RLIMIT_NPROC` pools across concurrent jobs on one host | Accepted; per-tenant UIDs on roadmap; PID namespaces prevent cross-job process visibility |
-| F-007 | DEPLOY | Ops | Namespace/cgroup backend requires root (or delegated caps); Docker path uses `--privileged` = host-equivalent trust | Documented; dedicated-VM guidance in README |
-| F-008 | LOW | API | Browser WebSocket auth supports `?key=` → keys can appear in access logs/proxies | Documented; header auth preferred for non-browser clients |
-| F-009 | LOW | Storage | Event log grows without retention policy | Documented TODO; SQLite single-file makes archival trivial |
-| F-010 | INFO | Sandbox | `fork()` from multithreaded runtime: child performs only syscalls + small writes before `execve`, standard sandboxer pattern, residual UB risk acknowledged | Documented |
+**Status:** historical v0.2 release hardening record; not an external certification. v0.3 adds integration and setup surfaces without changing this execution boundary.
 
-## Supply chain
+This file records the security properties reviewed for v0.2 and the evidence expected before release. It deliberately replaces v0.1 claims that overstated host-filesystem isolation, PID-namespace behavior, event-log immutability, and hostile-test coverage.
 
-```
-cargo-audit v0.22.2
-advisory database: 1,225 advisories
-dependencies scanned: 185
-vulnerabilities:   0
-unmaintained:      0
-unsound:           0
-yanked:            0
-exit code: 0
-```
+## Review outcome
 
-## Secrets & hygiene
+The v0.2 design is an audit-first single-node execution gateway with a shared-kernel Linux x86_64 backend. The release boundary is narrower than “safely execute arbitrary hostile code anywhere”:
 
-- Pattern scan over all tracked content (GitHub/AWS/Slack/OpenAI tokens, PEM blocks): **no matches**
-- Only credential material in repo is the documented dev default `COOP_API_KEYS="local:coop-dev-key"` (README instructs rotation)
-- 41 tracked files; no artifacts, databases, or binaries committed (`.gitignore` covers `/target`, `*.db*`, `/data`)
-- LF enforcement via `.gitattributes` (shell scripts safe cross-platform)
+- namespace execution requires a private rootfs and never falls back to host `/`;
+- PID-namespace setup includes a namespace PID 1/reaper rather than executing in the parent namespace;
+- terminal cleanup targets the whole cgroup, not only the original process group;
+- privilege drop, mount setup, cgroup controls, and seccomp are fail-closed in production;
+- output has byte and record caps so a single unterminated line cannot allocate without bound;
+- blank-tenant/weak-key production configurations and dangerous job-root paths are rejected;
+- requested policy remains separate from executor-observed effective controls;
+  development execution reports only wall-time enforcement, while namespace
+  posture is activated only by the helper's workload-ready frame;
+- effective policy, output digests, lifecycle, event-chain head, and receipt digest are persisted as execution evidence.
 
-## Claims vs reality
+These changes materially improve the previous release, but they do not turn Linux namespaces or a privileged container into a VM boundary.
 
-| README claim | Verified by |
+## Residual risks and accepted constraints
+
+| ID | Area | Constraint | Required operator response |
+|---|---|---|---|
+| R-001 | Shared kernel | Namespace jobs share the VM kernel and interpreter attack surface | Dedicated VM; patch promptly; use a hardened external runtime for hostile multi-tenancy when integrated |
+| R-002 | Container packaging | Compose uses `privileged: true` to manage namespaces/mounts/cgroups | Run only inside a dedicated VM; never on a mixed-trust Docker host |
+| R-003 | Trusted server/store | The Coop process and SQLite administrator can rewrite state and recompute hashes | Restrict access; export evidence to independently controlled immutable storage when required |
+| R-004 | Browser streaming | Browser WebSockets cannot send a bearer header; URL-key compatibility can leak in logs/history | Keep dashboard trusted/private; avoid query credentials where possible; rotate exposed keys |
+| R-005 | Single node | Queue, tenant admission, and live fan-out are process-local | One active server per database; no horizontal scaling claim |
+| R-006 | No egress broker | Namespace jobs have no supported network access; development subprocesses retain host egress | Fetch through trusted adapters and pass bounded input; never run untrusted code in subprocess mode |
+| R-007 | Rootfs supply chain | Interpreter packages inside the private rootfs are trusted inputs | Build from approved snapshots, record manifests/digests, scan and patch |
+| R-008 | Architecture support | The v0.2 namespace/seccomp backend supports Linux x86_64 only | Treat macOS, Windows, and non-x86_64 Linux as unisolated development platforms |
+| R-009 | Forced-abort cleanup | Lease drop synchronously requests `cgroup.kill`, waits up to two seconds for `populated 0`, and removes the leaf; a hard process/host kill can still interrupt that bounded cleanup | Keep shutdown grace above worker grace; alert on and reconcile populated or stale Coop cgroups before admission |
+
+## Receipt and event-chain semantics
+
+A v0.2 terminal receipt is intended to bind:
+
+- code and stdin hashes
+- requested limits and nullable backend-effective controls with per-control
+  enforcement metadata
+- executor-observed readiness, isolation, backend, seccomp, and network posture
+- accepted, started, and finished timestamps plus duration
+- outcome, exit code, and kill cause; violation events are covered by the bound event-chain head
+- raw drained stdout/stderr hashes, observed/retained byte counts, record counts, and truncation flags
+- event-chain head, event count, and completeness
+- a canonical receipt SHA-256
+
+The digest lets the server or an auditor with the canonical fields detect accidental or unauthorized modification relative to the stored hash. It is not signed and is not anchored outside the database. A privileged database operator can rewrite records and recompute the chain. Pre-ready failures explicitly record false/null posture and controls; restart-recovered or pre-v0.2 rows with no executor observation omit that evidence rather than receiving facts inferred from current configuration.
+
+## Verification matrix
+
+| Property | Required evidence |
 |---|---|
-| 11 `COOP_*` env vars table | grep against `config.rs` — exact match |
-| API endpoint table | grep against `routes.rs` router — exact match incl. `/openapi.json` |
-| Status set (`queued…error`) | `JobStatus` enum + serde snake_case mapping |
-| Hostile suite "7/7 pass in privileged CI" | CI run logs: `test result: ok. 7 passed` |
-| Benchmark numbers | produced by committed `scripts/bench.py` against a local release build |
+| Formatting and type safety | `cargo fmt --all --check`; clippy with warnings denied |
+| Rust behavior | locked workspace tests on Linux, macOS, and Windows |
+| Containment | ignored hostile suite on x86_64 Linux with root + writable cgroup v2; prerequisite gate must fail rather than skip |
+| API tenancy | cross-tenant list/detail/result/replay/stream/cancel tests |
+| Lifecycle atomicity | queued/running cancellation, crash recovery, event/state finalization tests |
+| Bounded output | huge unterminated record and sustained flood tests; timeout/cancel remains responsive |
+| Rootfs isolation | probes cannot read outer database, host mounts, sibling staging, or old root |
+| Descendant cleanup | `setsid`/background descendants leave cgroup `populated 0` |
+| SDK contracts | Python unit tests and TypeScript type/tests against v0.2 fixtures |
+| API contract | generated/static OpenAPI validation and examples |
+| Packaging | locked Docker build plus image/rootfs canary |
+| Dependencies | RustSec advisory scan of `Cargo.lock` |
+| Release integrity | tag/version check, checksums, SPDX SBOM, GitHub artifact attestation, one atomic publish job |
 
-## Regression tests added with fixes
+A skipped containment suite is not a passing result. Ordinary `cargo test` runs do not execute ignored hostile tests.
 
-- `cross_tenant_reads_are_rejected` — second tenant gets 404 on get/replay and cannot see the job in listings
-- fork-bomb probe rewritten to be *measurable*: asserts reported spawn count stays under the cap rather than assuming nonzero exit
+## Dependency review
 
-## Residual risk statement
+The local 2026-08-27 RustSec scan evaluated 185 locked Rust dependencies and reported no known vulnerabilities. That is a point-in-time advisory lookup, not a guarantee; release CI repeats the lockfile scan and dependency updates require normal review.
 
-Coop provides defense-in-depth for *accidentally dangerous* agent code (runaway loops, bombs, network calls, file scribbles) on a machine dedicated to it. It does **not** defend against kernel-level attackers or determined multi-tenant adversaries; treat each server as a security boundary of its own until the Firecracker/gVisor backends land.
+## Claims intentionally not made
+
+- VM-grade isolation or protection from kernel exploits
+- deterministic re-execution
+- cryptographic signing, remote attestation, or WORM audit storage
+- arbitrary network egress with credential safety
+- persistent workspaces or multi-node scheduling
+- production support for macOS, Windows, or non-x86_64 Linux subprocess execution of untrusted code

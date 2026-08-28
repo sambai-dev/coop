@@ -1,18 +1,45 @@
 services:
   coop:
-    build: .
-    # Required by the namespace/cgroup sandbox backend (see README "Deployment").
-    privileged: true
+    build:
+      context: .
+      args:
+        VERSION: "0.3.0"
+    restart: unless-stopped
+    stop_grace_period: 45s
     ports:
-      # Localhost-only by default. To expose coop beyond this machine, put a
-      # TLS-terminating front proxy in front — do not rebind 0.0.0.0 directly
-      # (see README "Deployment").
+      # Coop serves plain HTTP. Keep this loopback-only and terminate TLS in a
+      # reverse proxy if remote clients need access.
       - "127.0.0.1:7300:7300"
     environment:
-      # No key ships in this file: compose fails fast if COOP_API_KEYS is unset,
-      # and the container (COOP_ENV=production) refuses to boot without it.
-      COOP_API_KEYS: "${COOP_API_KEYS:?set COOP_API_KEYS first, e.g. export COOP_API_KEYS=tenant:$(openssl rand -hex 16)}"
-      COOP_SANDBOX: auto
-      RUST_LOG: info,coop=debug
+      COOP_ENV: production
+      COOP_API_KEYS: "${COOP_API_KEYS:?copy .env.example to .env and replace the key}"
+      COOP_SANDBOX: ns
+      COOP_ROOTFS: /opt/coop/rootfs
+      COOP_SANDBOX_HELPER: /usr/local/bin/coop-sandbox-init
+      COOP_SECCOMP: auto
+      COOP_WORKERS: "${COOP_WORKERS:-4}"
+      COOP_TENANT_CONCURRENCY: "${COOP_TENANT_CONCURRENCY:-2}"
+      COOP_RATE_PER_MIN: "${COOP_RATE_PER_MIN:-120}"
+      COOP_RETENTION_HOURS: "${COOP_RETENTION_HOURS:-168}"
+      COOP_SWEEP_INTERVAL_SECS: "${COOP_SWEEP_INTERVAL_SECS:-3600}"
+      RUST_LOG: "${RUST_LOG:-info,coop_server=info}"
     volumes:
-      - ./data:/data
+      - coop-data:/data
+    # The in-tree x86_64 Linux namespace backend needs host-level namespace and
+    # cgroup privileges. This is NOT a safe public-cloud container boundary.
+    # Run this profile only on a dedicated x86_64 VM; see the boundary docs.
+    privileged: true
+    cgroup: host
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7300/readyz', timeout=2).read()"
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  coop-data:

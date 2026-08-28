@@ -14,31 +14,40 @@ Good contribution areas include:
 - SDK ergonomics and examples
 - observability and replay tooling
 - documentation for real deployment environments
-- narrowly scoped roadmap items from the README
+- narrowly scoped items from the README's project direction
 
 ## Local development
 
-Install a current stable Rust toolchain, then run:
+Install Rust with `rustup`; the repository's `rust-toolchain.toml` selects the
+supported toolchain. Then run the same workspace checks as CI:
 
 ```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo fmt --all --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --all-targets
 ```
 
-On macOS or Windows, Coop uses the development subprocess backend. Start the server explicitly in that mode with:
+On macOS or Windows, Coop uses the development subprocess backend. Start the
+server explicitly in that mode. For macOS or another POSIX shell:
 
 ```bash
 COOP_SANDBOX=off COOP_API_KEYS="local:dev-key" cargo run -p coop-server
 ```
 
-The real containment suite requires Linux, cgroup v2, namespaces, and elevated privileges:
+For PowerShell:
 
-```bash
-sudo cargo test -p coop-server --test hostile -- --ignored --nocapture
+```powershell
+$env:COOP_SANDBOX = "off"
+$env:COOP_API_KEYS = "local:dev-key"
+cargo run -p coop-server
 ```
 
-Do not run the hostile-job suite on a workstation that contains important unsaved work. A dedicated Linux VM is the preferred environment.
+The real containment suite requires a supported Linux x86_64 kernel, cgroup v2,
+namespaces, the matching sandbox helper, a trusted private rootfs, and elevated
+privileges. Follow the complete setup and command in the
+[README](README.md#verification). Do not run the hostile-job suite on a workstation
+that contains important unsaved work. A dedicated Linux VM is the preferred
+environment.
 
 ## Pull requests
 

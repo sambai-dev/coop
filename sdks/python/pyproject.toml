@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "coop-sdk"
+version = "0.3.0"
+description = "Typed, dependency-free Python client for the Coop execution gateway"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Coop contributors" }]
+keywords = ["agents", "sandbox", "code-execution", "audit"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.scripts]
+coop-mcp = "coop_mcp:main"
+
+[project.optional-dependencies]
+dev = [
+  "mypy==1.19.1; python_version < '3.10'",
+  "mypy==2.3.1; python_version >= '3.10'",
+  "pyright==1.1.411",
+  "ruff==0.16.4",
+]
+stream = ["websocket-client>=1.6,<2"]
+
+[project.urls]
+Homepage = "https://github.com/sambai-dev/coop"
+Repository = "https://github.com/sambai-dev/coop"
+Issues = "https://github.com/sambai-dev/coop/issues"
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[tool.hatch.build.targets.wheel.force-include]
+"coop.py" = "coop/__init__.py"
+"coop_mcp.py" = "coop_mcp.py"
+"py.typed" = "coop/py.typed"
+
+[tool.hatch.build.targets.sdist]
+include = ["coop.py", "coop_mcp.py", "py.typed", "LICENSE", "README.md", "pyproject.toml", "tests"]
+
+[tool.pyright]
+pythonVersion = "3.9"
+typeCheckingMode = "strict"
+include = ["coop.py", "coop_mcp.py", "tests/typecheck_usage.py"]
+
+[tool.ruff]
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

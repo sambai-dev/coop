@@ -3,214 +3,1090 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Coop — agent sandbox</title>
+<meta name="color-scheme" content="dark">
+<title>Coop · Execution workbench</title>
 <style>
   :root {
-    --bg: #0b0f14; --panel: #121821; --panel2: #0e141c; --border: #1f2733;
-    --text: #dbe4ee; --dim: #7d8b9e; --accent: #7ee787; --red: #ff7b72;
-    --amber: #e3b341; --blue: #79c0ff; --purple: #d2a8ff;
+    color-scheme: dark;
+    --canvas: #090c10;
+    --workbench: #0d1117;
+    --surface: #121821;
+    --surface-raised: #171e28;
+    --surface-inset: #080b0f;
+    --border: #28313d;
+    --border-strong: #3a4655;
+    --text: #e3e9f0;
+    --text-muted: #94a0af;
+    --text-faint: #758294;
+    --kernel: #64a8ff;
+    --kernel-strong: #8fc1ff;
+    --healthy: #72d69a;
+    --warning: #e8b65c;
+    --danger: #ff7d78;
+    --cancelled: #a7b0bc;
+    --focus: #9dccff;
+    --line-height: 22px;
+    --radius: 8px;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display: flex; align-items: center; gap: 16px; padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--panel2); position: sticky; top: 0; z-index: 5; }
-  .logo { font-weight: 700; letter-spacing: .12em; font-size: 15px; }
-  .logo span { color: var(--accent); }
-  .chip { border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font-size: 11px; color: var(--dim); }
-  .chip b { color: var(--text); font-weight: 600; }
-  #key { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 6px 10px; width: 220px; outline: none; }
-  #key:focus { border-color: var(--accent); }
-  main { display: grid; grid-template-columns: minmax(340px, 480px) 1fr; gap: 16px; padding: 16px 22px; max-width: 1500px; margin: 0 auto; }
-  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
-  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); margin-bottom: 10px; font-weight: 600; }
-  label { display: block; font-size: 11px; color: var(--dim); margin: 8px 0 4px; }
-  select, input.num { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 6px 8px; outline: none; }
-  textarea { width: 100%; height: 170px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 10px; font: 12.5px/1.5 ui-monospace, Consolas, monospace; resize: vertical; outline: none; white-space: pre; }
-  textarea:focus, select:focus { border-color: var(--blue); }
-  .row { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
-  button.run { background: var(--accent); border: 0; color: #06230c; font-weight: 700; border-radius: 8px; padding: 8px 18px; cursor: pointer; margin-top: 12px; }
-  button.run:disabled { opacity: .5; cursor: default; }
-  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  th { text-align: left; color: var(--dim); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-  td { padding: 7px 8px; border-bottom: 1px solid var(--border); font-family: ui-monospace, Consolas, monospace; white-space: nowrap; }
-  tr.job { cursor: pointer; }
-  tr.job:hover { background: #16202c; }
-  tr.active { background: #17222f; outline: 1px solid var(--blue); }
-  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; }
-  .s-queued { background: #2a3340; color: #aab8c8; }
-  .s-running { background: rgba(227,179,65,.15); color: var(--amber); animation: pulse 1.2s infinite alternate; }
-  .s-succeeded { background: rgba(126,231,135,.14); color: var(--accent); }
-  .s-failed { background: rgba(255,123,114,.14); color: var(--red); }
-  .s-timed_out { background: rgba(255,123,114,.2); color: var(--red); }
-  .s-oom_killed { background: rgba(210,168,255,.15); color: var(--purple); }
-  .s-error { background: rgba(255,123,114,.25); color: var(--red); }
-  @keyframes pulse { from { opacity: .55; } to { opacity: 1; } }
-  #log { height: 420px; overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font: 12.5px/1.55 ui-monospace, Consolas, monospace; }
-  .line-out { color: var(--text); }
-  .line-err { color: var(--red); }
-  .line-ev { color: var(--blue); }
-  .line-violation { color: var(--amber); font-weight: 600; }
-  .meta { color: var(--dim); font-size: 12px; margin-top: 8px; }
-  .empty { color: var(--dim); padding: 24px; text-align: center; }
+
+  * { box-sizing: border-box; }
+  html { min-width: 320px; overflow-x: hidden; background: var(--canvas); }
+  body { min-width: 320px; min-height: 100vh; margin: 0; overflow-x: hidden; background: var(--canvas); color: var(--text); font-size: 13px; line-height: 1.45; }
+  button, input, select, textarea { font: inherit; }
+  button, input, select { min-height: 40px; }
+  button { color: inherit; }
+  code, pre, .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+  ::selection { background: #214872; color: #f4f8fc; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  [hidden] { display: none !important; }
+
+  .skip-link { position: fixed; top: 8px; left: 8px; z-index: 100; padding: 8px 12px; background: var(--text); color: var(--canvas); transform: translateY(-160%); }
+  .skip-link:focus { transform: translateY(0); }
+  .sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
+
+  .topbar { position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--workbench); }
+  .brand { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+  .brand-mark { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-inset); color: var(--kernel-strong); font: 700 12px/1 "SFMono-Regular", Consolas, monospace; letter-spacing: .08em; }
+  .brand-copy { display: grid; gap: 1px; }
+  .brand-name { font-size: 14px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .brand-kicker { color: var(--text-faint); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+  .topbar-divider { width: 1px; align-self: stretch; margin: 2px 0; background: var(--border); }
+  .topbar-spacer { flex: 1 1 auto; }
+  .topbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+
+  .boundary-chip, .connection-chip, .tenant-chip { display: inline-flex; align-items: center; gap: 7px; min-height: 32px; padding: 5px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-inset); color: var(--text-muted); white-space: nowrap; }
+  .boundary-chip strong, .tenant-chip strong { max-width: 180px; overflow: hidden; color: var(--text); font-weight: 600; text-overflow: ellipsis; }
+  .boundary-chip.is-warning { border-color: #6f552b; color: var(--warning); }
+  .boundary-chip.is-danger { border-color: #743c3d; color: var(--danger); }
+  .state-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
+  .state-dot.is-checking { background: var(--kernel); }
+  .state-dot.is-ready { background: var(--healthy); }
+  .state-dot.is-warning { background: var(--warning); }
+  .state-dot.is-error { background: var(--danger); }
+
+  .key-form { display: flex; align-items: center; gap: 6px; }
+  .key-input { width: clamp(150px, 19vw, 240px); border: 1px solid var(--border); border-radius: 6px; background: var(--surface-inset); color: var(--text); padding: 8px 10px; }
+  .key-input:hover { border-color: var(--border-strong); }
+  .remember-key { display: inline-flex; align-items: center; gap: 5px; min-height: 40px; color: var(--text-muted); font-size: 11px; cursor: pointer; }
+  .remember-key input { width: 15px; min-height: 15px; accent-color: var(--kernel); }
+
+  .button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-raised); color: var(--text); font-weight: 600; line-height: 1; cursor: pointer; }
+  .button:hover:not(:disabled) { border-color: #536173; background: #1b2430; }
+  .button:disabled { cursor: not-allowed; opacity: .52; }
+  .button-primary { border-color: #4c8ed9; background: #1d65aa; color: #f5f9ff; }
+  .button-primary:hover:not(:disabled) { border-color: #75b2f5; background: #2674bd; }
+  .button-danger { border-color: #703c3d; background: #2c1719; color: #ffaaa6; }
+  .button-danger:hover:not(:disabled) { border-color: #a95755; background: #3b1c1e; }
+  .button-quiet { border-color: transparent; background: transparent; color: var(--text-muted); }
+  .button-quiet:hover:not(:disabled) { border-color: var(--border); color: var(--text); }
+  .button-small { min-height: 32px; padding: 5px 9px; font-size: 12px; }
+  .icon { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+  .notice { display: flex; align-items: flex-start; gap: 9px; padding: 9px 16px; border-bottom: 1px solid #64502e; background: #211b12; color: #f0cb85; }
+  .notice.is-error { border-color: #6d3839; background: #251416; color: #ffaaa6; }
+  .notice-text { flex: 1; min-width: 0; }
+
+  .telemetry { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); max-width: 1600px; margin: 0 auto; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); border-left: 1px solid var(--border); background: var(--workbench); }
+  .telemetry-item { display: grid; grid-template-columns: auto 1fr; align-items: baseline; gap: 8px; min-width: 0; padding: 8px 14px; border-right: 1px solid var(--border); }
+  .telemetry-item:last-child { border-right: 0; }
+  .telemetry dt { color: var(--text-faint); font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+  .telemetry dd { min-width: 0; margin: 0; color: var(--text); font: 600 13px/1.2 "SFMono-Regular", Consolas, monospace; font-variant-numeric: tabular-nums; }
+  .telemetry .is-running { color: var(--warning); }
+  .telemetry .is-attention { color: var(--danger); }
+
+  .workbench { display: grid; grid-template-columns: minmax(300px, 360px) minmax(0, 1fr); gap: 12px; width: min(1600px, 100%); min-height: calc(100vh - 108px); margin: 0 auto; padding: 12px; }
+  .panel { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+  .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 52px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .eyebrow { color: var(--text-faint); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+  h1, h2, h3, p { margin-top: 0; }
+  h1 { margin-bottom: 0; font-size: 16px; line-height: 1.25; }
+  h2 { margin-bottom: 0; font-size: 14px; }
+  h3 { margin-bottom: 8px; font-size: 12px; letter-spacing: .03em; }
+
+  .explorer { display: flex; flex-direction: column; max-height: calc(100vh - 132px); overflow: hidden; }
+  .explorer-title { display: grid; gap: 2px; }
+  .explorer-meta { color: var(--text-faint); font-size: 11px; }
+  .filters { display: grid; grid-template-columns: minmax(0, 1fr) 118px; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--workbench); }
+  .field { display: grid; gap: 5px; min-width: 0; }
+  .field label, .field-label { color: var(--text-muted); font-size: 11px; font-weight: 600; }
+  .field input, .field select, .field textarea { width: 100%; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-inset); color: var(--text); padding: 8px 10px; }
+  .field textarea { min-height: 96px; resize: vertical; font: 12.5px/1.55 "SFMono-Regular", Consolas, monospace; tab-size: 2; }
+  .field input:hover, .field select:hover, .field textarea:hover { border-color: var(--border-strong); }
+  .search-field { position: relative; }
+  .search-field input { padding-left: 32px; }
+  .search-field .icon { position: absolute; top: 13px; left: 10px; color: var(--text-faint); pointer-events: none; }
+  .filter-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; grid-column: 1 / -1; }
+  .run-list { flex: 1 1 auto; min-height: 160px; margin: 0; padding: 6px; overflow: auto; list-style: none; }
+  .run-item { margin: 0 0 4px; }
+  .run-button { display: grid; width: 100%; min-height: 74px; gap: 8px; padding: 9px 10px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+  .run-button:hover { border-color: var(--border); background: var(--surface-raised); }
+  .run-button[aria-current="true"] { border-color: #3f6f9f; background: #142233; }
+  .run-primary, .run-secondary { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .run-id { overflow: hidden; color: var(--text); font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+  .run-time { margin-left: auto; color: var(--text-faint); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .run-language { color: var(--kernel-strong); font: 11px/1 "SFMono-Regular", Consolas, monospace; }
+  .run-duration { color: var(--text-muted); font: 11px/1 "SFMono-Regular", Consolas, monospace; font-variant-numeric: tabular-nums; }
+  .run-secondary .mini-spine { margin-left: auto; }
+  .list-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 6px 10px; border-top: 1px solid var(--border); color: var(--text-faint); font-size: 11px; }
+
+  .status-badge { display: inline-flex; align-items: center; gap: 5px; width: fit-content; min-height: 22px; padding: 3px 7px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-inset); color: var(--text-muted); font-size: 10px; font-weight: 700; line-height: 1; letter-spacing: .02em; text-transform: uppercase; white-space: nowrap; }
+  .status-badge::before { width: 6px; height: 6px; border-radius: 50%; background: currentColor; content: ""; }
+  .status-queued { color: var(--kernel-strong); }
+  .status-running { color: var(--warning); }
+  .status-succeeded { color: var(--healthy); }
+  .status-failed, .status-timed_out, .status-oom_killed, .status-error { color: var(--danger); }
+  .status-cancelled { color: var(--cancelled); }
+  .mini-spine { display: inline-flex; align-items: center; width: 46px; }
+  .mini-spine span { width: 7px; height: 7px; border: 1px solid var(--border-strong); border-radius: 50%; background: var(--surface-inset); }
+  .mini-spine i { flex: 1; height: 1px; background: var(--border-strong); }
+  .mini-spine .is-done { border-color: var(--kernel); background: var(--kernel); }
+  .mini-spine .is-terminal { border-color: currentColor; background: currentColor; }
+
+  .evidence { min-height: 620px; overflow: hidden; }
+  .blank-state { display: grid; min-height: 520px; place-items: center; padding: 32px; text-align: center; }
+  .blank-state-inner { max-width: 420px; }
+  .blank-glyph { display: grid; width: 64px; height: 64px; margin: 0 auto 20px; place-items: center; border: 1px solid var(--border-strong); border-radius: 50%; background: var(--surface-inset); color: var(--kernel); }
+  .blank-glyph .icon { width: 26px; height: 26px; }
+  .blank-state p { margin: 9px 0 18px; color: var(--text-muted); }
+
+  .run-hero { padding: 14px 16px 12px; border-bottom: 1px solid var(--border); background: var(--workbench); }
+  .run-hero-top { display: flex; align-items: flex-start; gap: 16px; }
+  .run-identity { display: grid; flex: 1; min-width: 0; gap: 6px; }
+  .run-title-row { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .run-title-row h1 { overflow: hidden; font: 700 15px/1.25 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+  .run-subtitle { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--text-muted); }
+  .run-actions { display: flex; align-items: center; gap: 6px; }
+  .stream-state { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 11px; }
+  .stream-state .state-dot { width: 6px; height: 6px; }
+
+  .execution-spine { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); max-width: 680px; margin: 16px 0 0; padding: 0; list-style: none; }
+  .spine-stage { position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 7px; color: var(--text-faint); }
+  .spine-stage:not(:last-child)::after { position: absolute; top: 8px; left: 18px; right: 0; height: 1px; background: var(--border-strong); content: ""; }
+  .spine-marker { position: relative; z-index: 1; width: 17px; height: 17px; border: 1px solid var(--border-strong); border-radius: 50%; background: var(--workbench); }
+  .spine-copy { position: relative; z-index: 2; display: grid; gap: 2px; padding-right: 12px; }
+  .spine-label { color: inherit; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .spine-time { overflow: hidden; font: 10px/1.3 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+  .spine-stage.is-done { color: var(--kernel-strong); }
+  .spine-stage.is-done .spine-marker { border-color: var(--kernel); background: var(--kernel); }
+  .spine-stage.is-active { color: var(--warning); }
+  .spine-stage.is-active .spine-marker { border: 4px solid var(--warning); }
+  .spine-stage.is-terminal-success { color: var(--healthy); }
+  .spine-stage.is-terminal-danger { color: var(--danger); }
+  .spine-stage.is-terminal-neutral { color: var(--cancelled); }
+  .spine-stage[class*="is-terminal"] .spine-marker { border-color: currentColor; background: currentColor; }
+
+  .tabbar { display: flex; align-items: flex-end; gap: 2px; min-height: 48px; padding: 7px 12px 0; border-bottom: 1px solid var(--border); background: var(--surface); overflow-x: auto; }
+  .tab { min-height: 40px; padding: 8px 11px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-muted); font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .tab:hover { color: var(--text); }
+  .tab[aria-selected="true"] { border-bottom-color: var(--kernel); color: var(--text); }
+  .tab-count { margin-left: 4px; color: var(--text-faint); font: 10px/1 "SFMono-Regular", Consolas, monospace; }
+  .tab-panel { min-width: 0; padding: 12px; }
+  .panel-toolbar { display: flex; align-items: center; gap: 8px; min-height: 40px; margin-bottom: 8px; }
+  .toolbar-spacer { flex: 1; }
+  .toolbar-meta { color: var(--text-faint); font-size: 11px; }
+  .follow-control { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; color: var(--text-muted); font-size: 11px; cursor: pointer; }
+  .follow-control input { width: 14px; min-height: 14px; accent-color: var(--kernel); }
+
+  .virtual-viewport { position: relative; height: min(53vh, 570px); min-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-inset); color: #cfd8e3; font: 12px/var(--line-height) "SFMono-Regular", Consolas, monospace; scrollbar-color: var(--border-strong) var(--surface-inset); }
+  .virtual-spacer { position: relative; min-width: 100%; }
+  .virtual-window { position: absolute; top: 0; left: 0; min-width: 100%; width: max-content; }
+  .log-line { display: grid; grid-template-columns: 68px 54px minmax(max-content, 1fr); height: var(--line-height); min-width: 100%; border-bottom: 1px solid #111820; white-space: pre; }
+  .log-line:hover { background: #101720; }
+  .log-seq { padding: 0 8px; color: var(--text-faint); text-align: right; user-select: none; }
+  .log-channel { padding: 0 7px; color: var(--text-faint); text-transform: uppercase; user-select: none; }
+  .log-content { padding: 0 10px; }
+  .log-stderr .log-channel, .log-stderr .log-content, .log-violation .log-channel, .log-violation .log-content { color: var(--danger); }
+  .log-system .log-channel, .log-system .log-content { color: var(--kernel-strong); }
+  .log-truncated .log-channel, .log-truncated .log-content { color: var(--warning); }
+  .log-empty { display: grid; min-height: 320px; place-items: center; padding: 20px; color: var(--text-faint); text-align: center; }
+
+  .result-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .metric { min-height: 76px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--workbench); }
+  .metric-label { color: var(--text-faint); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .metric-value { display: block; margin-top: 10px; overflow: hidden; color: var(--text); font: 700 15px/1.2 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+  .section-card { margin-top: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--workbench); }
+  .section-card:first-child { margin-top: 0; }
+  .section-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+  .section-card-header h3 { margin: 0; }
+  .json-block { max-height: 360px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-inset); color: #cbd6e2; font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+  .metadata { display: grid; grid-template-columns: minmax(110px, 160px) minmax(0, 1fr); margin: 0; }
+  .metadata dt, .metadata dd { min-width: 0; margin: 0; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  .metadata dt { color: var(--text-muted); font-size: 11px; }
+  .metadata dd { overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11.5px; }
+  .metadata dt:last-of-type, .metadata dd:last-of-type { border-bottom: 0; }
+  .integrity-note { margin: 10px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+  .empty-inline { padding: 28px 16px; color: var(--text-faint); text-align: center; }
+  .error-copy { color: var(--danger); }
+
+  dialog { width: min(760px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); margin: auto; padding: 0; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface); color: var(--text); }
+  dialog::backdrop { background: rgba(3, 5, 8, .78); }
+  .dialog-shell { display: flex; max-height: calc(100dvh - 24px); flex-direction: column; }
+  .dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--workbench); }
+  .dialog-header p { margin: 4px 0 0; color: var(--text-muted); font-size: 12px; }
+  .dialog-body { display: grid; gap: 14px; padding: 14px 16px; overflow: auto; }
+  .dialog-grid { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; }
+  .code-field textarea { min-height: 230px; }
+  .limits { margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: 6px; }
+  .limits legend { padding: 0 5px; color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+  .limit-grid { display: grid; grid-template-columns: repeat(5, minmax(88px, 1fr)); gap: 10px; }
+  .network-field { display: flex; align-items: flex-start; gap: 8px; min-height: 44px; margin-top: 12px; color: var(--text-muted); cursor: pointer; }
+  .network-field input { width: 16px; min-height: 16px; margin-top: 2px; accent-color: var(--kernel); }
+  .network-field strong { display: block; color: var(--text); font-size: 12px; }
+  .network-field small { display: block; margin-top: 2px; color: var(--text-faint); }
+  .dialog-error { min-height: 18px; color: var(--danger); font-size: 12px; }
+  .dialog-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--border); background: var(--workbench); }
+
+  .toast-region { position: fixed; right: 12px; bottom: 12px; left: max(12px, calc(100% - 372px)); z-index: 80; display: grid; gap: 8px; pointer-events: none; }
+  .toast { padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-raised); color: var(--text); }
+  .toast.is-error { border-color: #8b4848; color: #ffb1ad; }
+
+  @media (max-width: 980px) {
+    .brand-copy, .topbar-divider, .remember-key { display: none; }
+    .workbench { grid-template-columns: minmax(270px, 330px) minmax(0, 1fr); }
+    .limit-grid { grid-template-columns: repeat(3, minmax(88px, 1fr)); }
+  }
+
+  @media (max-width: 760px) {
+    button, input, select, .button-small, .remember-key, .tab, .follow-control { min-height: 44px; }
+    .topbar { position: relative; flex-wrap: wrap; }
+    .topbar-spacer { display: none; }
+    .topbar-actions { width: 100%; flex-wrap: wrap; justify-content: stretch; }
+    .key-form { flex: 1 1 100%; }
+    .key-input { flex: 1; width: auto; min-width: 0; }
+    .remember-key { display: inline-flex; }
+    .topbar-actions > .button-primary { flex: 1; }
+    .telemetry { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .telemetry-item:nth-child(2) { border-right: 0; }
+    .telemetry-item:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
+    .workbench { grid-template-columns: minmax(0, 1fr); min-height: auto; }
+    .explorer { max-height: 440px; }
+    .evidence { min-height: 600px; }
+    .run-hero-top { flex-direction: column; }
+    .run-actions { width: 100%; flex-wrap: wrap; }
+    .result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .dialog-grid { grid-template-columns: 1fr; }
+    .limit-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+
+  @media (max-width: 420px) {
+    .topbar { padding: 9px 10px; }
+    .boundary-chip { max-width: calc(100vw - 68px); }
+    .boundary-chip strong { max-width: 145px; }
+    .tenant-chip { display: none; }
+    .telemetry-item { grid-template-columns: 1fr; gap: 3px; padding: 8px 10px; }
+    .workbench { gap: 8px; padding: 8px; }
+    .filters { grid-template-columns: 1fr; }
+    .filter-row { grid-template-columns: 1fr 1fr; }
+    .run-hero { padding: 12px; }
+    .run-title-row { align-items: flex-start; flex-direction: column; }
+    .execution-spine { gap: 2px; }
+    .spine-stage { grid-template-columns: 15px minmax(0, 1fr); gap: 4px; }
+    .spine-stage:not(:last-child)::after { left: 15px; }
+    .spine-marker { width: 15px; height: 15px; }
+    .spine-copy { padding-right: 4px; }
+    .spine-time { font-size: 9px; }
+    .tab-panel { padding: 8px; }
+    .panel-toolbar { flex-wrap: wrap; }
+    .virtual-viewport { min-height: 360px; }
+    .metadata { grid-template-columns: 96px minmax(0, 1fr); }
+    dialog { width: 100vw; max-height: 100dvh; margin: auto 0 0; border-right: 0; border-bottom: 0; border-left: 0; border-radius: 9px 9px 0 0; }
+    .dialog-shell { max-height: 100dvh; }
+    .limit-grid { grid-template-columns: 1fr 1fr; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <div class="logo">CO<span>OP</span></div>
-  <span class="chip">sandbox <b id="sandbox">…</b></span>
-  <span class="chip">v<b id="version">…</b></span>
-  <div style="flex:1"></div>
-  <input id="key" type="password" placeholder="API key" autocomplete="off">
-  <span class="chip" id="conn"><b>●</b> idle</span>
+<a class="skip-link" href="#evidence">Skip to run evidence</a>
+
+<header class="topbar">
+  <div class="brand" aria-label="Coop execution workbench">
+    <div class="brand-mark" aria-hidden="true">CO</div>
+    <div class="brand-copy">
+      <span class="brand-name">Coop</span>
+      <span class="brand-kicker">execution workbench</span>
+    </div>
+  </div>
+  <div class="topbar-divider" aria-hidden="true"></div>
+  <div class="boundary-chip" id="boundaryChip" title="Server-reported execution boundary">
+    <span class="state-dot" id="boundaryDot" aria-hidden="true"></span>
+    <span>boundary</span>
+    <strong id="boundaryValue">unknown</strong>
+  </div>
+  <div class="tenant-chip" id="tenantChip" hidden><span>tenant</span><strong id="tenantValue"></strong></div>
+  <div class="topbar-spacer"></div>
+  <div class="topbar-actions">
+    <div class="connection-chip" id="apiChip" aria-live="polite">
+      <span class="state-dot" id="apiDot" aria-hidden="true"></span>
+      <span id="apiState">key required</span>
+    </div>
+    <form class="key-form" id="keyForm">
+      <label class="sr-only" for="apiKey">API key</label>
+      <input class="key-input mono" id="apiKey" type="password" placeholder="API key" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="button button-small" type="submit">Apply</button>
+    </form>
+    <label class="remember-key" title="Store the key in this browser's local storage">
+      <input id="rememberKey" type="checkbox"><span>remember</span>
+    </label>
+    <button class="button button-primary" id="openSubmit" type="button">
+      <svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>
+      New run
+    </button>
+  </div>
 </header>
-<main>
-  <section>
-    <div class="card">
-      <h2>New job</h2>
-      <div class="row">
-        <div><label>Language</label>
-          <select id="lang">
-            <option value="python">python</option>
-            <option value="node">node</option>
-            <option value="bash">bash</option>
+
+<div class="notice" id="globalNotice" role="status" hidden>
+  <svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 5v3.5M8 11h.01"/></svg>
+  <span class="notice-text" id="noticeText"></span>
+  <button class="button button-quiet button-small" id="dismissNotice" type="button">Dismiss</button>
+</div>
+
+<dl class="telemetry" aria-label="Loaded run telemetry">
+  <div class="telemetry-item"><dt>Loaded runs</dt><dd id="statLoaded">0</dd></div>
+  <div class="telemetry-item"><dt>Queued</dt><dd id="statQueued">0</dd></div>
+  <div class="telemetry-item"><dt>Running</dt><dd class="is-running" id="statRunning">0</dd></div>
+  <div class="telemetry-item"><dt>Needs attention</dt><dd class="is-attention" id="statAttention">0</dd></div>
+</dl>
+
+<main class="workbench">
+  <aside class="panel explorer" aria-labelledby="explorerTitle">
+    <div class="panel-heading">
+      <div class="explorer-title">
+        <span class="eyebrow">Run explorer</span>
+        <h2 id="explorerTitle">Execution ledger</h2>
+      </div>
+      <button class="button button-quiet button-small" id="refreshRuns" type="button" aria-label="Refresh runs" title="Refresh runs">
+        <svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><path d="M13 4v4H9M3.4 6a5 5 0 0 1 8.7-1.4L13 5.5M3 12V8h4M12.6 10a5 5 0 0 1-8.7 1.4L3 10.5"/></svg>
+      </button>
+    </div>
+    <div class="filters">
+      <div class="field search-field">
+        <label class="sr-only" for="runSearch">Search loaded runs</label>
+        <svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4"/><path d="m10 10 3 3"/></svg>
+        <input id="runSearch" type="search" placeholder="ID, language, status" autocomplete="off">
+      </div>
+      <div class="field">
+        <label class="sr-only" for="statusFilter">Filter by status</label>
+        <select id="statusFilter">
+          <option value="">All statuses</option>
+          <option value="queued">Queued</option>
+          <option value="running">Running</option>
+          <option value="succeeded">Succeeded</option>
+          <option value="failed">Failed</option>
+          <option value="timed_out">Timed out</option>
+          <option value="oom_killed">OOM killed</option>
+          <option value="cancelled">Cancelled</option>
+          <option value="error">Error</option>
+        </select>
+      </div>
+      <div class="filter-row">
+        <div class="field">
+          <label class="sr-only" for="languageFilter">Filter by language</label>
+          <select id="languageFilter">
+            <option value="">All languages</option>
+            <option value="python">Python</option>
+            <option value="node">Node</option>
+            <option value="bash">Bash</option>
           </select>
         </div>
-        <div><label>Wall s</label><input class="num" id="wall" type="number" value="15" min="1" max="300" style="width:70px"></div>
-        <div><label>Mem MB</label><input class="num" id="mem" type="number" value="256" min="16" max="4096" style="width:80px"></div>
+        <button class="button button-quiet" id="clearFilters" type="button">Clear filters</button>
       </div>
-      <label>Code</label>
-      <textarea id="code" spellcheck="false">import time
+    </div>
+    <ul class="run-list" id="runList" aria-label="Runs" aria-busy="false"></ul>
+    <div class="list-footer">
+      <span id="listSummary">Connect to load runs</span>
+      <button class="button button-quiet button-small" id="loadOlder" type="button" hidden>Load older</button>
+    </div>
+  </aside>
+
+  <section class="panel evidence" id="evidence" aria-label="Run evidence" tabindex="-1">
+    <div class="blank-state" id="blankState">
+      <div class="blank-state-inner">
+        <div class="blank-glyph">
+          <svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><path d="M3 3.5h10v9H3zM5.5 6.5 7 8 5.5 9.5M8.5 10h2"/></svg>
+        </div>
+        <span class="eyebrow">Evidence pane</span>
+        <h1 id="evidenceTitle">Select a run to inspect its boundary record</h1>
+        <p>Follow the execution spine, stream output, inspect raw events, and review the server result without leaving the ledger.</p>
+        <button class="button button-primary" id="blankNewRun" type="button">Create a run</button>
+      </div>
+    </div>
+
+    <div id="runEvidence" hidden>
+      <div class="run-hero">
+        <div class="run-hero-top">
+          <div class="run-identity">
+            <span class="eyebrow">Selected run</span>
+            <div class="run-title-row">
+              <h1 id="selectedId">—</h1>
+              <span class="status-badge" id="selectedStatus">unknown</span>
+            </div>
+            <div class="run-subtitle">
+              <span class="mono" id="selectedLanguage">—</span>
+              <span aria-hidden="true">·</span>
+              <span id="selectedCreated">—</span>
+              <span aria-hidden="true">·</span>
+              <span class="stream-state"><span class="state-dot" id="streamDot" aria-hidden="true"></span><span id="streamState">disconnected</span></span>
+            </div>
+          </div>
+          <div class="run-actions">
+            <button class="button button-small" id="copyId" type="button">
+              <svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><rect x="5" y="5" width="8" height="8" rx="1"/><path d="M3 10H2.5A1.5 1.5 0 0 1 1 8.5v-6A1.5 1.5 0 0 1 2.5 1h6A1.5 1.5 0 0 1 10 2.5V3"/></svg>
+              Copy ID
+            </button>
+            <button class="button button-danger button-small" id="cancelRun" type="button" hidden>Cancel run</button>
+          </div>
+        </div>
+        <ol class="execution-spine" aria-label="Execution lifecycle">
+          <li class="spine-stage" id="stageQueued"><span class="spine-marker" aria-hidden="true"></span><span class="spine-copy"><span class="spine-label">Queued</span><span class="spine-time" id="queuedTime">—</span></span></li>
+          <li class="spine-stage" id="stageRunning"><span class="spine-marker" aria-hidden="true"></span><span class="spine-copy"><span class="spine-label">Running</span><span class="spine-time" id="runningTime">waiting</span></span></li>
+          <li class="spine-stage" id="stageTerminal"><span class="spine-marker" aria-hidden="true"></span><span class="spine-copy"><span class="spine-label" id="terminalLabel">Terminal</span><span class="spine-time" id="terminalTime">waiting</span></span></li>
+        </ol>
+      </div>
+
+      <div class="tabbar" role="tablist" aria-label="Run evidence views">
+        <button class="tab" id="tabOutput" role="tab" aria-selected="true" aria-controls="panelOutput" tabindex="0" data-tab="output">Output <span class="tab-count" id="outputCount">0</span></button>
+        <button class="tab" id="tabEvents" role="tab" aria-selected="false" aria-controls="panelEvents" tabindex="-1" data-tab="events">Events <span class="tab-count" id="eventCount">0</span></button>
+        <button class="tab" id="tabResult" role="tab" aria-selected="false" aria-controls="panelResult" tabindex="-1" data-tab="result">Result</button>
+        <button class="tab" id="tabRecord" role="tab" aria-selected="false" aria-controls="panelRecord" tabindex="-1" data-tab="record">Record</button>
+      </div>
+
+      <div class="tab-panel" id="panelOutput" role="tabpanel" aria-labelledby="tabOutput" data-panel="output">
+        <div class="panel-toolbar">
+          <span class="toolbar-meta" id="outputSummary">No output received</span>
+          <span class="toolbar-spacer"></span>
+          <label class="follow-control"><input id="followTail" type="checkbox" checked>Follow tail</label>
+          <button class="button button-quiet button-small" id="copyOutput" type="button">Copy output</button>
+        </div>
+        <div class="virtual-viewport" id="outputViewport" role="log" aria-label="Run output" aria-live="off" tabindex="0">
+          <div class="virtual-spacer" id="outputSpacer"><div class="virtual-window" id="outputWindow"></div></div>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="panelEvents" role="tabpanel" aria-labelledby="tabEvents" data-panel="events" hidden>
+        <div class="panel-toolbar">
+          <span class="toolbar-meta">Ordered server event ledger</span>
+          <span class="toolbar-spacer"></span>
+          <button class="button button-quiet button-small" id="copyEvents" type="button">Copy JSON</button>
+        </div>
+        <div class="virtual-viewport" id="eventsViewport" aria-label="Ordered run events" tabindex="0">
+          <div class="virtual-spacer" id="eventsSpacer"><div class="virtual-window" id="eventsWindow"></div></div>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="panelResult" role="tabpanel" aria-labelledby="tabResult" data-panel="result" hidden></div>
+      <div class="tab-panel" id="panelRecord" role="tabpanel" aria-labelledby="tabRecord" data-panel="record" hidden></div>
+    </div>
+  </section>
+</main>
+
+<dialog id="submitDialog" aria-labelledby="submitTitle">
+  <form class="dialog-shell" id="jobForm">
+    <div class="dialog-header">
+      <div>
+        <span class="eyebrow">Policy-bound execution</span>
+        <h2 id="submitTitle">Create a run</h2>
+        <p>The server clamps every requested limit against its configured policy.</p>
+      </div>
+      <button class="button button-quiet button-small" id="closeSubmit" type="button" aria-label="Close new run dialog">Close</button>
+    </div>
+    <div class="dialog-body">
+      <div class="dialog-grid">
+        <div class="field">
+          <label for="jobLanguage">Language</label>
+          <select id="jobLanguage" name="language">
+            <option value="python">Python</option>
+            <option value="node">Node</option>
+            <option value="bash">Bash</option>
+          </select>
+        </div>
+        <div class="field code-field">
+          <label for="jobCode">Code</label>
+          <textarea id="jobCode" name="code" required spellcheck="false" autocapitalize="off">import time
 for i in range(3):
     print(f"tick {i}")
     time.sleep(0.4)
 print("done")</textarea>
-      <button class="run" id="run">Run job</button>
-      <div class="meta" id="submit-meta"></div>
+        </div>
+      </div>
+      <div class="field">
+        <label for="jobStdin">Standard input <span class="eyebrow">optional</span></label>
+        <textarea id="jobStdin" name="stdin" spellcheck="false" autocapitalize="off" placeholder="Text passed to the process on stdin"></textarea>
+      </div>
+      <fieldset class="limits">
+        <legend>Requested limits</legend>
+        <div class="limit-grid">
+          <div class="field"><label for="limitWall">Wall seconds</label><input id="limitWall" name="wall_seconds" type="number" min="1" max="300" step="1" value="15" required></div>
+          <div class="field"><label for="limitCpu">CPU seconds</label><input id="limitCpu" name="cpu_seconds" type="number" min="1" max="240" step="1" value="10" required></div>
+          <div class="field"><label for="limitMemory">Memory MB</label><input id="limitMemory" name="mem_mb" type="number" min="16" max="4096" step="1" value="256" required></div>
+          <div class="field"><label for="limitPids">Processes</label><input id="limitPids" name="max_pids" type="number" min="8" max="1024" step="1" value="128" required></div>
+          <div class="field"><label for="limitFile">File MB</label><input id="limitFile" name="max_file_mb" type="number" min="1" max="512" step="1" value="16" required></div>
+        </div>
+        <label class="network-field">
+          <input id="limitNetwork" name="allow_network" type="checkbox">
+          <span><strong>Request network access</strong><small>Off by default. The active server policy may still deny this request.</small></span>
+        </label>
+      </fieldset>
+      <div class="dialog-error" id="submitError" role="alert"></div>
     </div>
-    <div class="card" style="margin-top:16px">
-      <h2>Jobs</h2>
-      <table>
-        <thead><tr><th>id</th><th>lang</th><th>status</th><th>exit</th><th>ms</th></tr></thead>
-        <tbody id="jobs"><tr><td colspan="5" class="empty">no jobs yet</td></tr></tbody>
-      </table>
+    <div class="dialog-footer">
+      <button class="button" id="cancelSubmit" type="button">Cancel</button>
+      <button class="button button-primary" id="submitRun" type="submit">Queue run</button>
     </div>
-  </section>
-  <section class="card">
-    <h2>Output <span id="watching" style="color:var(--text);text-transform:none;letter-spacing:0"></span></h2>
-    <div id="log"><div class="empty">select a job to stream its output</div></div>
-  </section>
-</main>
+  </form>
+</dialog>
+
+<div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+<div class="sr-only" id="liveRegion" aria-live="polite" aria-atomic="true"></div>
+
 <script>
-const $ = (id) => document.getElementById(id);
-let ws = null, selected = null;
+(() => {
+  "use strict";
 
-const keyInput = $("key");
-keyInput.value = localStorage.getItem("coop_key") || "";
-keyInput.addEventListener("change", () => localStorage.setItem("coop_key", keyInput.value.trim()));
-
-function headers() { return { Authorization: "Bearer " + keyInput.value.trim(), "Content-Type": "application/json" }; }
-
-async function loadMeta() {
-  try {
-    const r = await fetch("/v1/status", { headers: { Authorization: "Bearer " + keyInput.value.trim() } });
-    if (!r.ok) return;
-    const j = await r.json();
-    $("sandbox").textContent = j.sandbox || "?";
-    $("version").textContent = j.version || "?";
-  } catch {}
-}
-
-function pill(status) { return `<span class="pill s-${status}">${status}</span>`; }
-
-function fmtMs(row) {
-  if (row.started_at_ms && row.finished_at_ms) return row.finished_at_ms - row.started_at_ms;
-  return row.status === "running" ? "…" : "";
-}
-
-async function refresh() {
-  try {
-    const r = await fetch("/v1/jobs?limit=50", { headers: headers() });
-    if (!r.ok) return;
-    const jobs = await r.json();
-    const tb = $("jobs");
-    if (!jobs.length) { tb.innerHTML = `<tr><td colspan="5" class="empty">no jobs yet</td></tr>`; return; }
-    tb.innerHTML = "";
-    for (const j of jobs) {
-      const tr = document.createElement("tr");
-      tr.className = "job" + (j.job_id === selected ? " active" : "");
-      tr.innerHTML = `<td>${j.job_id.slice(0, 8)}</td><td>${j.language}</td><td>${pill(j.status)}</td><td>${j.exit_code ?? ""}</td><td>${fmtMs(j)}</td>`;
-      tr.onclick = () => watch(j.job_id);
-      tb.appendChild(tr);
-    }
-  } catch {}
-}
-
-function line(kind, data) {
-  const div = document.createElement("div");
-  if (kind === "stdout") { div.className = "line-out"; div.textContent = data.line ?? ""; }
-  else if (kind === "stderr") { div.className = "line-err"; div.textContent = data.line ?? ""; }
-  else if (kind === "violation") { div.className = "line-violation"; div.textContent = `! limit violation: ${data.rule}`; }
-  else if (kind === "finished") { div.className = "line-ev"; div.textContent = `— finished: ${data.status} (exit ${data.exit_code ?? "-"}, ${data.duration_ms} ms)`; }
-  else { div.className = "line-ev"; div.textContent = `— ${kind}`; }
-  return div;
-}
-
-function watch(id) {
-  selected = id;
-  $("watching").textContent = "· " + id.slice(0, 8);
-  const log = $("log");
-  log.innerHTML = "";
-  if (ws) ws.close();
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/v1/jobs/${id}/stream?key=${encodeURIComponent(keyInput.value.trim())}`);
-  $("conn").innerHTML = "<b style='color:#79c0ff'>●</b> streaming";
-  ws.onmessage = (m) => {
-    try {
-      const ev = JSON.parse(m.data);
-      log.appendChild(line(ev.kind, ev.data || {}));
-      log.scrollTop = log.scrollHeight;
-      if (ev.kind === "finished") setTimeout(refresh, 150);
-    } catch {}
+  const $ = (id) => document.getElementById(id);
+  const terminalStatuses = new Set(["succeeded", "failed", "timed_out", "oom_killed", "cancelled", "error"]);
+  const attentionStatuses = new Set(["failed", "timed_out", "oom_killed", "error"]);
+  const samples = {
+    python: 'import time\nfor i in range(3):\n    print(f"tick {i}")\n    time.sleep(0.4)\nprint("done")',
+    node: 'for (let i = 0; i < 3; i++) {\n  console.log(`tick ${i}`);\n  await new Promise(resolve => setTimeout(resolve, 400));\n}\nconsole.log("done");',
+    bash: 'for i in 0 1 2; do\n  echo "tick $i"\n  sleep 0.4\ndone\necho "done"'
   };
-  ws.onclose = () => { $("conn").innerHTML = "<b style='color:#7d8b9e'>●</b> idle"; };
-  ws.onerror = () => {};
-}
 
-$("run").onclick = async () => {
-  const btn = $("run");
-  btn.disabled = true;
-  $("submit-meta").textContent = "";
-  try {
-    const r = await fetch("/v1/jobs", {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        language: $("lang").value,
-        code: $("code").value,
-        limits: {
-          wall_seconds: parseInt($("wall").value) || 15,
-          mem_mb: parseInt($("mem").value) || 256,
-        },
-      }),
-    });
-    const j = await r.json();
-    if (r.status === 201) {
-      $("submit-meta").textContent = "queued " + j.job_id.slice(0, 8);
-      watch(j.job_id);
-      refresh();
-    } else {
-      $("submit-meta").textContent = typeof j === "string" ? j : "error " + r.status;
-    }
-  } catch (e) {
-    $("submit-meta").textContent = String(e);
-  } finally {
-    btn.disabled = false;
+  const dom = {
+    apiKey: $("apiKey"), rememberKey: $("rememberKey"), keyForm: $("keyForm"), apiChip: $("apiChip"), apiDot: $("apiDot"), apiState: $("apiState"),
+    boundaryChip: $("boundaryChip"), boundaryDot: $("boundaryDot"), boundaryValue: $("boundaryValue"), tenantChip: $("tenantChip"), tenantValue: $("tenantValue"),
+    globalNotice: $("globalNotice"), noticeText: $("noticeText"), dismissNotice: $("dismissNotice"),
+    statLoaded: $("statLoaded"), statQueued: $("statQueued"), statRunning: $("statRunning"), statAttention: $("statAttention"),
+    runList: $("runList"), listSummary: $("listSummary"), loadOlder: $("loadOlder"), refreshRuns: $("refreshRuns"),
+    runSearch: $("runSearch"), statusFilter: $("statusFilter"), languageFilter: $("languageFilter"), clearFilters: $("clearFilters"),
+    evidence: $("evidence"), blankState: $("blankState"), runEvidence: $("runEvidence"), openSubmit: $("openSubmit"), blankNewRun: $("blankNewRun"),
+    selectedId: $("selectedId"), selectedStatus: $("selectedStatus"), selectedLanguage: $("selectedLanguage"), selectedCreated: $("selectedCreated"), copyId: $("copyId"), cancelRun: $("cancelRun"),
+    streamDot: $("streamDot"), streamState: $("streamState"), stageQueued: $("stageQueued"), stageRunning: $("stageRunning"), stageTerminal: $("stageTerminal"),
+    queuedTime: $("queuedTime"), runningTime: $("runningTime"), terminalTime: $("terminalTime"), terminalLabel: $("terminalLabel"),
+    outputCount: $("outputCount"), eventCount: $("eventCount"), outputSummary: $("outputSummary"), followTail: $("followTail"), copyOutput: $("copyOutput"), copyEvents: $("copyEvents"),
+    outputViewport: $("outputViewport"), outputSpacer: $("outputSpacer"), outputWindow: $("outputWindow"),
+    eventsViewport: $("eventsViewport"), eventsSpacer: $("eventsSpacer"), eventsWindow: $("eventsWindow"),
+    panelResult: $("panelResult"), panelRecord: $("panelRecord"),
+    submitDialog: $("submitDialog"), jobForm: $("jobForm"), closeSubmit: $("closeSubmit"), cancelSubmit: $("cancelSubmit"), submitRun: $("submitRun"), submitError: $("submitError"),
+    jobLanguage: $("jobLanguage"), jobCode: $("jobCode"), jobStdin: $("jobStdin"), limitWall: $("limitWall"), limitCpu: $("limitCpu"), limitMemory: $("limitMemory"), limitPids: $("limitPids"), limitFile: $("limitFile"), limitNetwork: $("limitNetwork"),
+    toastRegion: $("toastRegion"), liveRegion: $("liveRegion")
+  };
+
+  const state = {
+    activeKey: "", keyDirty: false, authGeneration: 0, listGeneration: 0, jobs: [], nextCursor: null, selectedId: null, selectionGeneration: 0,
+    detail: null, result: null, resultStatus: null, events: [], eventSeqs: new Set(), outputLines: [], stream: null, streamGeneration: 0,
+    streamReconnectTimer: null, streamRetries: 0, streamFinished: false, pollTimer: null, pollInFlight: false,
+    pollBackoff: 2000, pendingRefresh: false, controllers: new Set(), activeTab: "output", followTail: true, virtualFrame: null, cancelArmedUntil: 0,
+    selectionControllers: new Set(), evidenceReadTail: Promise.resolve(), statusMeta: null, capabilities: null, lastUpdatedAt: null, initialLoad: true, listError: null
+  };
+
+  class ApiError extends Error {
+    constructor(message, options) { super(message); this.name = "ApiError"; Object.assign(this, options || {}); }
   }
-};
 
-loadMeta();
-refresh();
-setInterval(refresh, 1500);
+  function storageGet(storage, key) { try { return storage.getItem(key); } catch (_) { return null; } }
+  function storageSet(storage, key, value) { try { if (value) storage.setItem(key, value); else storage.removeItem(key); } catch (_) {} }
+
+  function normalizeError(payload, response) {
+    const nested = payload && typeof payload === "object" ? payload.error : null;
+    let message = "Request failed", code = null, requestId = null, retryable = false;
+    if (nested && typeof nested === "object") { message = nested.message || message; code = nested.code || null; requestId = nested.request_id || null; retryable = Boolean(nested.retryable); }
+    else if (typeof nested === "string") message = nested;
+    else if (payload && typeof payload === "object") { message = payload.message || payload.detail || message; code = payload.code || null; requestId = payload.request_id || null; retryable = Boolean(payload.retryable); }
+    else if (typeof payload === "string" && payload.trim()) message = payload.trim();
+    const retryAfter = response.headers.get("retry-after");
+    const retryAfterMs = retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : null;
+    return new ApiError(message, { status: response.status, code, requestId, retryable, retryAfterMs });
+  }
+
+  async function parseResponse(response) {
+    if (response.status === 204) return null;
+    const text = await response.text();
+    if (!text) return null;
+    try { return JSON.parse(text); } catch (_) { return text; }
+  }
+
+  async function apiRequest(path, options, generation, selectionScoped) {
+    const requestGeneration = generation === undefined ? state.authGeneration : generation;
+    if (!state.activeKey || state.keyDirty) throw new ApiError("Apply an API key before making requests", { status: 401 });
+    const controller = new AbortController();
+    state.controllers.add(controller);
+    if (selectionScoped) state.selectionControllers.add(controller);
+    const headers = new Headers((options && options.headers) || {});
+    headers.set("Authorization", "Bearer " + state.activeKey);
+    if (options && options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    try {
+      const response = await fetch(path, Object.assign({}, options || {}, { headers, signal: controller.signal }));
+      const payload = await parseResponse(response);
+      if (requestGeneration !== state.authGeneration) throw new DOMException("Stale request", "AbortError");
+      if (!response.ok) throw normalizeError(payload, response);
+      return { data: payload, status: response.status, headers: response.headers };
+    } finally { state.controllers.delete(controller); state.selectionControllers.delete(controller); }
+  }
+
+  async function optionalRequest(path, options, generation) {
+    try { return await apiRequest(path, options, generation); }
+    catch (error) { if (error instanceof ApiError && (error.status === 404 || error.status === 405)) return null; throw error; }
+  }
+
+  function abortRequests() { for (const controller of state.controllers) controller.abort(); state.controllers.clear(); state.selectionControllers.clear(); }
+  function abortSelectionRequests() { for (const controller of state.selectionControllers) controller.abort(); state.selectionControllers.clear(); }
+  function selectionIsCurrent(id, selection, generation) { return id === state.selectedId && selection === state.selectionGeneration && generation === state.authGeneration; }
+  function evidenceRequest(id, selection, generation, path, options) {
+    const requestGeneration = generation === undefined ? state.authGeneration : generation;
+    const queued = state.evidenceReadTail.catch(() => {}).then(() => {
+      if (!selectionIsCurrent(id, selection, requestGeneration)) throw new DOMException("Stale selection", "AbortError");
+      return apiRequest(path, options || {}, requestGeneration, true);
+    });
+    state.evidenceReadTail = queued;
+    return queued.finally(() => { if (state.evidenceReadTail === queued) state.evidenceReadTail = Promise.resolve(); });
+  }
+  function setApiState(kind, label) { dom.apiDot.className = "state-dot" + (kind ? " is-" + kind : ""); dom.apiState.textContent = label; }
+  function setStreamState(kind, label) { dom.streamDot.className = "state-dot" + (kind ? " is-" + kind : ""); dom.streamState.textContent = label; }
+  function showNotice(message, tone) { dom.noticeText.textContent = message; dom.globalNotice.className = "notice" + (tone === "error" ? " is-error" : ""); dom.globalNotice.hidden = false; }
+  function hideNotice() { dom.globalNotice.hidden = true; }
+  function toast(message, tone) { const node = document.createElement("div"); node.className = "toast" + (tone === "error" ? " is-error" : ""); node.textContent = message; dom.toastRegion.appendChild(node); window.setTimeout(() => node.remove(), 4500); }
+  function announce(message) { dom.liveRegion.textContent = ""; window.setTimeout(() => { dom.liveRegion.textContent = message; }, 20); }
+  function describeError(error) { if (error && error.name === "AbortError") return "Request cancelled"; let message = error && error.message ? error.message : String(error); if (error && error.requestId) message += " · request " + error.requestId; return message; }
+  function isTerminal(status) { return terminalStatuses.has(status || ""); }
+  function shortId(id) { if (!id) return "—"; const compact = id.replace(/-/g, ""); return compact.length > 8 ? "…" + compact.slice(-8) : compact; }
+  function formatClock(ms) { if (!Number.isFinite(Number(ms))) return "—"; try { return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(Number(ms))); } catch (_) { return new Date(Number(ms)).toLocaleTimeString(); } }
+  function formatDateTime(ms) { if (!Number.isFinite(Number(ms))) return "—"; try { return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(new Date(Number(ms))); } catch (_) { return new Date(Number(ms)).toLocaleString(); } }
+  function durationMs(job) { if (!job || !job.started_at_ms) return null; const end = job.finished_at_ms || (job.status === "running" ? Date.now() : null); return end ? Math.max(0, Number(end) - Number(job.started_at_ms)) : null; }
+  function formatDuration(ms) { if (!Number.isFinite(Number(ms))) return "—"; const value = Number(ms); if (value < 1000) return Math.round(value) + " ms"; if (value < 60000) return (value / 1000).toFixed(value < 10000 ? 1 : 0) + " s"; return Math.floor(value / 60000) + "m " + Math.floor((value % 60000) / 1000) + "s"; }
+  function formatBytes(bytes) { if (!Number.isFinite(Number(bytes)) || Number(bytes) < 0) return "—"; const value = Number(bytes); if (value < 1024) return Math.round(value) + " B"; if (value < 1024 * 1024) return (value / 1024).toFixed(value < 10 * 1024 ? 1 : 0) + " KiB"; return (value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0) + " MiB"; }
+  function statusLabel(status) { return ({ timed_out: "timed out", oom_killed: "OOM killed" })[status] || (status || "unknown").replace(/_/g, " "); }
+  function applyStatusBadge(node, status) { node.className = "status-badge status-" + (status || "unknown"); node.textContent = statusLabel(status); }
+  function compactJson(value) { try { return JSON.stringify(value); } catch (_) { return String(value); } }
+  async function copyText(text, successMessage) { try { await navigator.clipboard.writeText(text); toast(successMessage || "Copied"); } catch (_) { toast("Clipboard access was denied", "error"); } }
+
+  function resetTenantData(reason) {
+    state.authGeneration += 1; state.listGeneration += 1; state.selectionGeneration += 1; abortRequests(); closeStream(); clearTimeout(state.pollTimer); state.pollTimer = null;
+    state.jobs = []; state.nextCursor = null; state.selectedId = null; state.detail = null; state.result = null; state.resultStatus = null;
+    state.events = []; state.eventSeqs = new Set(); state.outputLines = []; state.statusMeta = null; state.capabilities = null; state.lastUpdatedAt = null; state.initialLoad = true; state.listError = null; state.pendingRefresh = false;
+    dom.tenantChip.hidden = true; dom.boundaryValue.textContent = "unknown"; dom.boundaryChip.className = "boundary-chip"; dom.boundaryDot.className = "state-dot"; dom.boundaryChip.title = "Server-reported execution boundary";
+    renderStats(); renderRunList(); renderSelection(); if (reason) showNotice(reason, "warning");
+  }
+
+  function commitKey() {
+    const nextKey = dom.apiKey.value.trim(); resetTenantData(); state.activeKey = nextKey; state.keyDirty = false;
+    renderRunList();
+    storageSet(sessionStorage, "coop_api_key", nextKey);
+    if (dom.rememberKey.checked) { storageSet(localStorage, "coop_api_key", nextKey); storageSet(localStorage, "coop_key", ""); }
+    else { storageSet(localStorage, "coop_api_key", ""); storageSet(localStorage, "coop_key", ""); }
+    if (!nextKey) { setApiState("", "key required"); showNotice("Enter an API key to load this tenant's execution ledger.", "warning"); return; }
+    hideNotice(); bootstrap();
+  }
+
+  function sandboxLabel(meta) {
+    if (!meta) return "unknown";
+    const value = meta.sandbox || meta.boundary || meta.runtime || (meta.execution && (meta.execution.backend || meta.execution.mode));
+    if (typeof value === "string") return value;
+    if (value && typeof value === "object") return value.backend || value.mode || value.name || value.status || "reported";
+    return "unknown";
+  }
+
+  function renderStatusMeta(meta) {
+    const label = sandboxLabel(meta), lower = label.toLowerCase();
+    dom.boundaryValue.textContent = label + (meta && meta.version ? " · v" + meta.version : "");
+    dom.boundaryChip.className = "boundary-chip"; dom.boundaryDot.className = "state-dot is-ready";
+    const execution = meta && meta.execution && typeof meta.execution === "object" ? meta.execution : null;
+    if ((execution && execution.isolated === false) || ["off", "none", "naive", "disabled", "development"].some((word) => lower.includes(word))) {
+      dom.boundaryChip.classList.add("is-danger"); dom.boundaryDot.className = "state-dot is-error"; dom.boundaryChip.title = "Server reports that the execution boundary is disabled or development-only";
+    } else if (lower === "unknown" || lower.includes("namespace") || (execution && execution.private_rootfs === false)) {
+      dom.boundaryChip.classList.add("is-warning"); dom.boundaryDot.className = "state-dot is-warning"; dom.boundaryChip.title = "Server-reported execution boundary; review deployment trust requirements";
+    } else dom.boundaryChip.title = "Server-reported execution boundary";
+  }
+
+  function applyCapabilities(capabilities) {
+    if (!capabilities || typeof capabilities !== "object") return;
+    const languages = capabilities.languages || capabilities.supported_languages;
+    if (Array.isArray(languages)) {
+      const currentForm = dom.jobLanguage.value, currentFilter = dom.languageFilter.value;
+      dom.jobLanguage.replaceChildren(); dom.languageFilter.replaceChildren(new Option("All languages", ""));
+      const values = languages.map((language) => typeof language === "string" ? language : language && (language.id || language.name)).filter(Boolean);
+      for (const value of values) { dom.jobLanguage.appendChild(new Option(value, value)); dom.languageFilter.appendChild(new Option(value, value)); }
+      if (!values.length) {
+        const unavailable = new Option("No runtimes available", ""); unavailable.disabled = true; unavailable.selected = true; dom.jobLanguage.appendChild(unavailable);
+        dom.jobLanguage.disabled = true; dom.submitRun.disabled = true; dom.submitRun.textContent = "No runtimes available"; dom.submitError.textContent = "This server has no runnable language runtime configured.";
+      } else {
+        dom.jobLanguage.disabled = false; dom.submitRun.disabled = false; dom.submitRun.textContent = "Queue run"; if (dom.submitError.textContent === "This server has no runnable language runtime configured.") dom.submitError.textContent = "";
+        if (values.includes(currentForm)) dom.jobLanguage.value = currentForm;
+      }
+      if (values.includes(currentFilter)) dom.languageFilter.value = currentFilter;
+    }
+    const limits = capabilities.limits || capabilities.max_limits || capabilities.limit_ceiling;
+    if (limits && typeof limits === "object") {
+      const mappings = [[dom.limitWall, "wall_seconds", "wall_seconds_max"], [dom.limitCpu, "cpu_seconds", "cpu_seconds_max"], [dom.limitMemory, "mem_mb", "mem_mb_max"], [dom.limitPids, "max_pids", "pids_max"], [dom.limitFile, "max_file_mb", "file_mb_max"]];
+      for (const [input, key, maxKey] of mappings) { const raw = limits[maxKey] ?? limits[key]; const value = raw && typeof raw === "object" ? raw.max : raw; if (Number.isFinite(Number(value))) input.max = String(value); }
+    }
+  }
+
+  async function bootstrap() {
+    const generation = state.authGeneration; setApiState("checking", "checking"); dom.runList.setAttribute("aria-busy", "true");
+    try {
+      const [statusResponse, whoamiResponse, capabilitiesResponse] = await Promise.all([apiRequest("/v1/status", {}, generation), optionalRequest("/v1/whoami", {}, generation), optionalRequest("/v1/capabilities", {}, generation)]);
+      if (generation !== state.authGeneration) return;
+      state.statusMeta = statusResponse.data || {}; state.capabilities = capabilitiesResponse && capabilitiesResponse.data; renderStatusMeta(state.statusMeta); applyCapabilities(state.capabilities);
+      if (whoamiResponse && whoamiResponse.data && whoamiResponse.data.tenant) { dom.tenantValue.textContent = String(whoamiResponse.data.tenant); dom.tenantChip.hidden = false; }
+      await fetchJobs({ reset: true, generation }); if (generation !== state.authGeneration) return;
+      setApiState("ready", "connected"); hideNotice(); state.pollBackoff = 2000; schedulePoll();
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      const authFailure = error instanceof ApiError && (error.status === 401 || error.status === 403);
+      state.listError = authFailure ? "The applied API key was rejected" : "Could not load the execution ledger: " + describeError(error); renderRunList();
+      setApiState("error", authFailure ? "key rejected" : "unavailable"); showNotice(describeError(error), "error"); dom.runList.setAttribute("aria-busy", "false");
+      if (!authFailure) { state.pollBackoff = Math.min(Math.max(state.pollBackoff * 2, 4000), 30000); schedulePoll(state.pollBackoff); }
+    }
+  }
+
+  function jobsUrl(cursor) {
+    const params = new URLSearchParams({ limit: "100" });
+    if (cursor !== null && cursor !== undefined && cursor !== "") params.set("cursor", String(cursor));
+    if (dom.statusFilter.value) params.set("status", dom.statusFilter.value);
+    if (dom.languageFilter.value) params.set("language", dom.languageFilter.value);
+    return "/v1/jobs?" + params.toString();
+  }
+  function normalizeJobList(payload) { if (Array.isArray(payload)) return { items: payload, nextCursor: null }; if (payload && Array.isArray(payload.items)) return { items: payload.items, nextCursor: payload.next_cursor ?? null }; if (payload && Array.isArray(payload.jobs)) return { items: payload.jobs, nextCursor: payload.next_cursor ?? null }; return { items: [], nextCursor: null }; }
+  function mergeJobs(items, reset) {
+    if (reset) { const prior = new Map(state.jobs.map((job) => [job.job_id, job])); state.jobs = items.map((job) => Object.assign({}, prior.get(job.job_id) || {}, job)); }
+    else { const seen = new Set(state.jobs.map((job) => job.job_id)); for (const job of items) { const index = state.jobs.findIndex((current) => current.job_id === job.job_id); if (index >= 0) state.jobs[index] = Object.assign({}, state.jobs[index], job); else if (!seen.has(job.job_id)) { state.jobs.push(job); seen.add(job.job_id); } } }
+  }
+
+  async function fetchJobs(options) {
+    const reset = !options || options.reset !== false, generation = options && options.generation !== undefined ? options.generation : state.authGeneration, listGeneration = state.listGeneration, cursor = reset ? null : state.nextCursor;
+    dom.runList.setAttribute("aria-busy", "true");
+    try {
+      const response = await apiRequest(jobsUrl(cursor), {}, generation), normalized = normalizeJobList(response.data);
+      if (generation !== state.authGeneration || listGeneration !== state.listGeneration) return;
+      mergeJobs(normalized.items, reset); state.nextCursor = normalized.nextCursor; state.lastUpdatedAt = Date.now(); state.initialLoad = false; state.listError = null;
+      renderStats(); renderRunList(); reconcileSelection(); if (!state.selectedId && state.jobs.length) selectJob(state.jobs[0].job_id, false);
+    } finally {
+      if (generation === state.authGeneration) dom.runList.setAttribute("aria-busy", "false");
+    }
+  }
+
+  function visibleJobs() {
+    const search = dom.runSearch.value.trim().toLowerCase();
+    return state.jobs.filter((job) => { if (dom.statusFilter.value && job.status !== dom.statusFilter.value) return false; if (dom.languageFilter.value && job.language !== dom.languageFilter.value) return false; if (!search) return true; return [job.job_id, job.language, job.status].some((value) => String(value || "").toLowerCase().includes(search)); });
+  }
+  function renderStats() { dom.statLoaded.textContent = String(state.jobs.length); dom.statQueued.textContent = String(state.jobs.filter((job) => job.status === "queued").length); dom.statRunning.textContent = String(state.jobs.filter((job) => job.status === "running").length); dom.statAttention.textContent = String(state.jobs.filter((job) => attentionStatuses.has(job.status)).length); }
+
+  function makeMiniSpine(status) {
+    const spine = document.createElement("span"); spine.className = "mini-spine status-" + status; spine.setAttribute("aria-hidden", "true");
+    const queued = document.createElement("span"), firstLine = document.createElement("i"), running = document.createElement("span"), secondLine = document.createElement("i"), terminal = document.createElement("span");
+    queued.className = "is-done"; if (status !== "queued") running.className = "is-done"; if (isTerminal(status)) terminal.className = "is-terminal";
+    spine.append(queued, firstLine, running, secondLine, terminal); return spine;
+  }
+
+  function renderRunList() {
+    const jobs = visibleJobs(); dom.runList.replaceChildren();
+    for (const job of jobs) {
+      const item = document.createElement("li"), button = document.createElement("button"); item.className = "run-item"; button.type = "button"; button.className = "run-button"; button.setAttribute("aria-current", job.job_id === state.selectedId ? "true" : "false"); button.setAttribute("aria-label", "Run " + job.job_id + ", " + statusLabel(job.status) + ", " + (job.language || "unknown")); button.title = job.job_id;
+      const primary = document.createElement("span"); primary.className = "run-primary";
+      const id = document.createElement("span"); id.className = "run-id mono"; id.textContent = shortId(job.job_id);
+      const badge = document.createElement("span"); applyStatusBadge(badge, job.status);
+      const time = document.createElement("time"); time.className = "run-time"; time.dateTime = job.created_at_ms ? new Date(job.created_at_ms).toISOString() : ""; time.textContent = formatClock(job.created_at_ms); primary.append(id, badge, time);
+      const secondary = document.createElement("span"); secondary.className = "run-secondary";
+      const language = document.createElement("span"); language.className = "run-language"; language.textContent = job.language || "unknown";
+      const duration = document.createElement("span"); duration.className = "run-duration"; duration.textContent = formatDuration(durationMs(job)); secondary.append(language, duration, makeMiniSpine(job.status));
+      button.append(primary, secondary); button.addEventListener("click", () => selectJob(job.job_id, true)); item.appendChild(button); dom.runList.appendChild(item);
+    }
+    if (!jobs.length) { const item = document.createElement("li"); item.className = "empty-inline"; item.textContent = state.listError || (state.keyDirty ? "Apply the changed API key to load runs" : state.initialLoad ? (state.activeKey ? "Loading runs…" : "Apply an API key to load runs") : (state.jobs.length ? "No loaded runs match these filters" : "No runs in this ledger yet")); dom.runList.appendChild(item); }
+    dom.listSummary.textContent = jobs.length + " shown · " + state.jobs.length + " loaded" + (state.lastUpdatedAt ? " · " + formatClock(state.lastUpdatedAt) : "");
+    dom.loadOlder.hidden = state.nextCursor === null || state.nextCursor === undefined;
+  }
+
+  function reconcileSelection() {
+    if (!state.selectedId) return; const listed = state.jobs.find((job) => job.job_id === state.selectedId); if (!listed) return;
+    const previousStatus = state.detail && state.detail.status; state.detail = Object.assign({}, state.detail || {}, listed); renderSelection();
+    if (!isTerminal(previousStatus) && isTerminal(listed.status)) { state.streamFinished = true; closeStream(false); loadResult(state.selectedId, state.selectionGeneration, state.authGeneration); announce("Run " + shortId(listed.job_id) + " finished " + statusLabel(listed.status)); }
+  }
+
+  function renderSelection() {
+    const job = state.detail || state.jobs.find((item) => item.job_id === state.selectedId), hasSelection = Boolean(state.selectedId && job);
+    dom.blankState.hidden = hasSelection; dom.runEvidence.hidden = !hasSelection; if (!hasSelection) return;
+    dom.selectedId.textContent = job.job_id; dom.selectedId.title = job.job_id; applyStatusBadge(dom.selectedStatus, job.status); dom.selectedLanguage.textContent = job.language || "unknown"; dom.selectedCreated.textContent = "created " + formatDateTime(job.created_at_ms);
+    dom.cancelRun.hidden = isTerminal(job.status); if (!dom.cancelRun.hidden && Date.now() > state.cancelArmedUntil) { dom.cancelRun.disabled = false; dom.cancelRun.textContent = "Cancel run"; }
+    renderSpine(job); renderRecord(); renderResult(); renderRunList();
+  }
+
+  function renderSpine(job) {
+    const terminal = isTerminal(job.status); dom.stageQueued.className = "spine-stage is-done"; dom.stageRunning.className = "spine-stage"; dom.stageTerminal.className = "spine-stage";
+    dom.queuedTime.textContent = formatClock(job.created_at_ms); dom.runningTime.textContent = job.started_at_ms ? formatClock(job.started_at_ms) : "waiting"; dom.terminalTime.textContent = job.finished_at_ms ? formatClock(job.finished_at_ms) : "waiting"; dom.terminalLabel.textContent = terminal ? statusLabel(job.status) : "Terminal";
+    if (job.status === "queued") dom.stageQueued.className = "spine-stage is-active";
+    if (job.status === "running") dom.stageRunning.className = "spine-stage is-active"; else if (job.started_at_ms || terminal) dom.stageRunning.className = "spine-stage is-done";
+    if (terminal) { if (job.status === "succeeded") dom.stageTerminal.className = "spine-stage is-terminal-success"; else if (job.status === "cancelled") dom.stageTerminal.className = "spine-stage is-terminal-neutral"; else dom.stageTerminal.className = "spine-stage is-terminal-danger"; }
+  }
+
+  async function selectJob(id, moveFocus) {
+    if (!id) return; abortSelectionRequests(); state.selectionGeneration += 1; const selection = state.selectionGeneration; closeStream(); state.selectedId = id;
+    state.detail = state.jobs.find((job) => job.job_id === id) || { job_id: id, status: "unknown" }; state.result = null; state.resultStatus = null; state.events = []; state.eventSeqs = new Set(); state.outputLines = [];
+    state.streamRetries = 0; state.streamFinished = isTerminal(state.detail.status); state.followTail = true; dom.followTail.checked = true; setStreamState("checking", "loading ledger"); renderSelection(); renderFeeds();
+    if (moveFocus && window.matchMedia("(max-width: 760px)").matches) dom.evidence.focus({ preventScroll: false });
+    const generation = state.authGeneration;
+    await loadDetail(id, selection, generation);
+    if (!selectionIsCurrent(id, selection, generation)) return;
+    await loadResult(id, selection, generation);
+    if (!selectionIsCurrent(id, selection, generation)) return;
+    await loadReplayAndStream(id, selection, generation);
+  }
+
+  async function loadDetail(id, selection, generation) {
+    try { const response = await evidenceRequest(id, selection, generation, "/v1/jobs/" + encodeURIComponent(id)); if (!selectionIsCurrent(id, selection, generation)) return; state.detail = Object.assign({}, state.detail || {}, response.data || {}); renderSelection(); }
+    catch (error) { if (error && error.name === "AbortError") return; if (selection === state.selectionGeneration) showNotice("Could not load the selected run record: " + describeError(error), "error"); }
+  }
+
+  async function loadResult(id, selection, generation) {
+    try { const response = await evidenceRequest(id, selection, generation, "/v1/jobs/" + encodeURIComponent(id) + "/result?wait_seconds=0"); if (!selectionIsCurrent(id, selection, generation)) return; state.result = response.data; state.resultStatus = response.status; renderResult(); }
+    catch (error) { if (error && error.name === "AbortError") return; if (selection !== state.selectionGeneration) return; state.result = { _error: describeError(error) }; state.resultStatus = error.status || null; renderResult(); }
+  }
+
+  function normalizeReplay(payload) { if (Array.isArray(payload)) return { events: payload, nextCursor: null }; if (payload && Array.isArray(payload.events)) return { events: payload.events, nextCursor: payload.next_cursor ?? null }; return { events: [], nextCursor: null }; }
+  async function loadReplayAndStream(id, selection, generation) {
+    let after = 0, pages = 0;
+    try {
+      while (pages < 50 && selection === state.selectionGeneration && id === state.selectedId) {
+        const params = new URLSearchParams({ after: String(after), limit: "2000" }), response = await evidenceRequest(id, selection, generation, "/v1/jobs/" + encodeURIComponent(id) + "/replay?" + params.toString()), replay = normalizeReplay(response.data);
+        for (const event of replay.events) addEvent(event); pages += 1; if (replay.nextCursor === null || replay.nextCursor === undefined || replay.nextCursor === after) break; after = replay.nextCursor;
+      }
+      renderFeeds(); if (selection !== state.selectionGeneration || id !== state.selectedId) return;
+      if (isTerminal(state.detail && state.detail.status) || state.streamFinished) { setStreamState("ready", "ledger complete"); return; }
+      await openStream(id, selection, generation);
+    } catch (error) {
+      if (error && error.name === "AbortError") return; if (selection !== state.selectionGeneration || id !== state.selectedId) return;
+      setStreamState("error", "ledger unavailable"); showNotice("Could not load the run event ledger: " + describeError(error), "error"); scheduleStreamReconnect(id, selection, generation);
+    }
+  }
+
+  function addEvent(raw) {
+    const event = raw && raw.event ? raw.event : raw; if (!event || typeof event !== "object") return;
+    const seq = Number(event.seq), key = Number.isFinite(seq) ? "s:" + seq : "x:" + compactJson(event); if (state.eventSeqs.has(key)) return;
+    state.eventSeqs.add(key);
+    const previous = state.events[state.events.length - 1];
+    if (previous && Number(event.seq || 0) < Number(previous.seq || 0)) {
+      state.events.push(event); state.events.sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0)); state.outputLines = state.events.map(eventToOutputLine);
+    } else {
+      state.events.push(event); state.outputLines.push(eventToOutputLine(event));
+    }
+    if (event.kind === "finished") {
+      state.streamFinished = true; const data = event.data || {}; state.detail = Object.assign({}, state.detail || {}, { status: data.status || (state.detail && state.detail.status), exit_code: data.exit_code ?? (state.detail && state.detail.exit_code), finished_at_ms: event.ts_ms || (state.detail && state.detail.finished_at_ms) });
+      const listed = state.jobs.find((job) => job.job_id === state.selectedId); if (listed) Object.assign(listed, state.detail); renderSelection(); loadResult(state.selectedId, state.selectionGeneration, state.authGeneration); window.setTimeout(() => refreshNow(false), 250); announce("Run " + shortId(state.selectedId) + " finished " + statusLabel(data.status));
+    } else if (event.kind === "violation") announce("Sandbox limit violation recorded for run " + shortId(state.selectedId));
+    scheduleFeedRender(true);
+  }
+
+  function eventToOutputLine(event) {
+    const data = event.data || {}, kind = event.kind || "event"; let channel = kind, text = "", css = "log-system";
+    if (kind === "stdout" || kind === "stderr") { channel = kind === "stdout" ? "out" : "err"; text = data.line === undefined ? "" : String(data.line); css = kind === "stderr" ? "log-stderr" : ""; }
+    else if (kind === "started") { channel = "state"; text = "execution entered running state"; }
+    else if (kind === "finished") { channel = "state"; text = "finished " + statusLabel(data.status) + " · exit " + (data.exit_code ?? "—") + " · " + formatDuration(data.duration_ms); }
+    else if (kind === "violation") { channel = "limit"; text = String(data.rule || "policy violation") + (data.detail ? " · " + data.detail : ""); css = "log-violation"; }
+    else if (kind === "truncated") {
+      channel = "limit";
+      const ceilings = [];
+      if (data.max_bytes) ceilings.push(formatBytes(Number(data.max_bytes)));
+      if (data.max_lines) ceilings.push(Number(data.max_lines).toLocaleString() + " lines");
+      text = String(data.stream || "output") + " truncated" + (ceilings.length ? " at " + ceilings.join(" / ") : "");
+      css = "log-truncated";
+    }
+    else text = compactJson(data);
+    return { seq: event.seq, channel, text, css, ts_ms: event.ts_ms };
+  }
+
+  function streamUrlFromTicket(payload, id) {
+    const base = payload && payload.stream_url ? payload.stream_url : "/v1/jobs/" + encodeURIComponent(id) + "/stream", url = new URL(base, window.location.href);
+    url.protocol = url.protocol === "https:" ? "wss:" : url.protocol === "http:" ? "ws:" : url.protocol;
+    if (payload && payload.ticket && !url.searchParams.has("ticket")) url.searchParams.set("ticket", payload.ticket);
+    const lastSeq = state.events.reduce((max, event) => Math.max(max, Number(event.seq) || 0), 0); if (lastSeq) url.searchParams.set("after", String(lastSeq)); return url.toString();
+  }
+
+  async function openStream(id, selection, generation) {
+    const streamGeneration = ++state.streamGeneration; setStreamState("checking", "authorizing stream"); let streamUrl;
+    const ticketResponse = await apiRequest("/v1/jobs/" + encodeURIComponent(id) + "/stream-ticket", { method: "POST" }, generation, true); streamUrl = streamUrlFromTicket(ticketResponse.data || {}, id);
+    if (selection !== state.selectionGeneration || generation !== state.authGeneration || id !== state.selectedId || streamGeneration !== state.streamGeneration) return;
+    setStreamState("checking", "connecting"); const socket = new WebSocket(streamUrl); state.stream = socket;
+    socket.addEventListener("open", () => { if (!isCurrentStream(socket, id, selection, generation, streamGeneration)) return; state.streamRetries = 0; setStreamState("ready", "live"); });
+    socket.addEventListener("message", (message) => { if (!isCurrentStream(socket, id, selection, generation, streamGeneration) || message.data === "pong") return; try { addEvent(JSON.parse(message.data)); } catch (_) { setStreamState("warning", "unreadable frame"); } });
+    socket.addEventListener("error", () => { if (isCurrentStream(socket, id, selection, generation, streamGeneration)) setStreamState("error", "stream interrupted"); });
+    socket.addEventListener("close", () => { if (!isCurrentStream(socket, id, selection, generation, streamGeneration)) return; state.stream = null; if (state.streamFinished || isTerminal(state.detail && state.detail.status)) setStreamState("ready", "ledger complete"); else { setStreamState("warning", "reconnecting"); scheduleStreamReconnect(id, selection, generation); } });
+  }
+  function isCurrentStream(socket, id, selection, generation, streamGeneration) { return state.stream === socket && state.selectedId === id && state.selectionGeneration === selection && state.authGeneration === generation && state.streamGeneration === streamGeneration; }
+  function scheduleStreamReconnect(id, selection, generation) {
+    clearTimeout(state.streamReconnectTimer); if (state.streamFinished || isTerminal(state.detail && state.detail.status) || document.hidden) return;
+    const delay = Math.min(1000 * Math.pow(2, state.streamRetries++), 15000);
+    state.streamReconnectTimer = window.setTimeout(() => { if (state.selectedId === id && state.selectionGeneration === selection && state.authGeneration === generation) openStream(id, selection, generation).catch((error) => { if (error && error.name !== "AbortError") { setStreamState("error", "reconnect failed"); scheduleStreamReconnect(id, selection, generation); } }); }, delay);
+  }
+  function closeStream(invalidate) { if (invalidate !== false) state.streamGeneration += 1; clearTimeout(state.streamReconnectTimer); state.streamReconnectTimer = null; const socket = state.stream; state.stream = null; if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) socket.close(1000, "view changed"); }
+
+  function scheduleFeedRender(scrollToEnd) {
+    if (state.virtualFrame) return;
+    state.virtualFrame = requestAnimationFrame(() => { state.virtualFrame = null; renderFeeds(); if (scrollToEnd && state.followTail && state.activeTab === "output") { dom.outputViewport.scrollTop = Math.max(0, dom.outputViewport.scrollHeight - dom.outputViewport.clientHeight); renderVirtual(dom.outputViewport, dom.outputSpacer, dom.outputWindow, state.outputLines, renderOutputRow); } });
+  }
+  function renderFeeds() {
+    dom.outputCount.textContent = String(state.outputLines.length); dom.eventCount.textContent = String(state.events.length);
+    const stdoutCount = state.events.filter((event) => event.kind === "stdout").length, stderrCount = state.events.filter((event) => event.kind === "stderr").length;
+    dom.outputSummary.textContent = state.outputLines.length ? stdoutCount + " stdout · " + stderrCount + " stderr · " + state.outputLines.length + " ledger lines" : "No output received";
+    renderVirtual(dom.outputViewport, dom.outputSpacer, dom.outputWindow, state.outputLines, renderOutputRow); renderVirtual(dom.eventsViewport, dom.eventsSpacer, dom.eventsWindow, state.events, renderEventRow);
+  }
+  function renderVirtual(viewport, spacer, windowNode, items, renderer) {
+    const lineHeight = 22, viewportHeight = viewport.clientHeight || 360, overscan = 12, start = Math.max(0, Math.floor(viewport.scrollTop / lineHeight) - overscan), end = Math.min(items.length, Math.ceil((viewport.scrollTop + viewportHeight) / lineHeight) + overscan);
+    spacer.style.height = Math.max(items.length * lineHeight, viewportHeight) + "px"; windowNode.style.transform = "translateY(" + (start * lineHeight) + "px)"; const fragment = document.createDocumentFragment();
+    if (!items.length) { const empty = document.createElement("div"); empty.className = "log-empty"; empty.textContent = "The event ledger is empty."; fragment.appendChild(empty); }
+    else for (let index = start; index < end; index += 1) fragment.appendChild(renderer(items[index], index));
+    windowNode.replaceChildren(fragment);
+  }
+  function renderOutputRow(item) {
+    const row = document.createElement("div"); row.className = "log-line " + (item.css || "");
+    const seq = document.createElement("span"); seq.className = "log-seq"; seq.textContent = item.seq === undefined ? "" : String(item.seq);
+    const channel = document.createElement("span"); channel.className = "log-channel"; channel.textContent = item.channel;
+    const content = document.createElement("span"); content.className = "log-content"; content.textContent = item.text; row.append(seq, channel, content); return row;
+  }
+  function renderEventRow(event) {
+    const hash = event.event_hash ? "  hash:" + String(event.event_hash).slice(-12) : "";
+    return renderOutputRow({ seq: event.seq, channel: event.kind || "event", text: formatClock(event.ts_ms) + hash + "  " + compactJson(event.data || {}), css: event.kind === "violation" ? "log-violation" : event.kind === "truncated" ? "log-truncated" : "log-system" });
+  }
+
+  function metadataRow(list, label, value) { if (value === undefined || value === null || value === "") return; const dt = document.createElement("dt"); dt.textContent = label; const dd = document.createElement("dd"); dd.textContent = String(value); list.append(dt, dd); }
+  function sectionWithJson(title, value) {
+    const section = document.createElement("section"); section.className = "section-card"; const header = document.createElement("div"); header.className = "section-card-header";
+    const heading = document.createElement("h3"); heading.textContent = title; const copy = document.createElement("button"); copy.type = "button"; copy.className = "button button-quiet button-small"; copy.textContent = "Copy JSON"; copy.addEventListener("click", () => copyText(JSON.stringify(value, null, 2), title + " copied"));
+    header.append(heading, copy); const pre = document.createElement("pre"); pre.className = "json-block"; pre.textContent = JSON.stringify(value, null, 2); section.append(header, pre); return section;
+  }
+  function firstObject(source, keys) { for (const key of keys) if (source && source[key] && typeof source[key] === "object") return source[key]; return null; }
+
+  function receiptEvidenceSection(job, receipt) {
+    const chain = receipt && receipt.event_chain && typeof receipt.event_chain === "object" ? receipt.event_chain : null;
+    if (!job.receipt_sha256 && !chain) return null;
+    const section = document.createElement("section"); section.className = "section-card";
+    const header = document.createElement("div"); header.className = "section-card-header"; const heading = document.createElement("h3"); heading.textContent = "Receipt integrity metadata"; header.appendChild(heading);
+    if (job.receipt_sha256) { const copy = document.createElement("button"); copy.type = "button"; copy.className = "button button-quiet button-small"; copy.textContent = "Copy digest"; copy.addEventListener("click", () => copyText(job.receipt_sha256, "Receipt digest copied")); header.appendChild(copy); }
+    const list = document.createElement("dl"); list.className = "metadata";
+    metadataRow(list, "Canonical receipt SHA-256", job.receipt_sha256);
+    if (chain) {
+      metadataRow(list, "Chain version", chain.version);
+      metadataRow(list, "Chain completeness", typeof chain.complete === "boolean" ? (chain.complete ? "complete" : "incomplete") : null);
+      metadataRow(list, "Reported verification status", chain.status ?? (typeof chain.valid === "boolean" ? (chain.valid ? "valid" : "invalid") : null));
+      metadataRow(list, "Chain head", chain.head);
+      metadataRow(list, "Event rows", chain.events);
+      metadataRow(list, "Hashed v1 event rows", chain.verified_events);
+      metadataRow(list, "Legacy unhashed rows", chain.legacy_events);
+    }
+    const note = document.createElement("p"); note.className = "integrity-note"; note.textContent = "Server-recorded hash metadata only. This dashboard does not recompute event links or provide a signature; independently verify the receipt and retained event ledger before treating them as attested.";
+    section.append(header, list, note); return section;
+  }
+
+  function renderRecord() {
+    dom.panelRecord.replaceChildren(); const job = state.detail;
+    if (!job) { const empty = document.createElement("p"); empty.className = "empty-inline"; empty.textContent = "Select a run to inspect its record."; dom.panelRecord.appendChild(empty); return; }
+    const base = document.createElement("section"); base.className = "section-card"; const header = document.createElement("div"); header.className = "section-card-header"; const heading = document.createElement("h3"); heading.textContent = "Run record"; header.appendChild(heading);
+    const list = document.createElement("dl"); list.className = "metadata";
+    metadataRow(list, "Job ID", job.job_id); metadataRow(list, "Tenant", job.tenant); metadataRow(list, "Language", job.language); metadataRow(list, "Status", statusLabel(job.status)); metadataRow(list, "Created", formatDateTime(job.created_at_ms)); metadataRow(list, "Started", job.started_at_ms ? formatDateTime(job.started_at_ms) : null); metadataRow(list, "Finished", job.finished_at_ms ? formatDateTime(job.finished_at_ms) : null); metadataRow(list, "Exit code", job.exit_code === null || job.exit_code === undefined ? null : job.exit_code); metadataRow(list, "Duration", formatDuration(durationMs(job))); metadataRow(list, "Request ID", job.request_id || job.correlation_id); metadataRow(list, "Canonical receipt SHA-256", job.receipt_sha256);
+    base.append(header, list); dom.panelRecord.appendChild(base);
+    const requested = firstObject(job, ["requested_spec", "requested", "job_spec", "spec"]), effective = firstObject(job, ["effective_spec", "effective", "effective_limits"]), policy = firstObject(job, ["execution_policy", "policy"]), receipt = firstObject(job, ["receipt", "evidence_receipt", "provenance"]), receiptEvidence = receiptEvidenceSection(job, receipt);
+    if (requested) dom.panelRecord.appendChild(sectionWithJson("Requested spec", requested));
+    if (effective) dom.panelRecord.appendChild(sectionWithJson("Effective spec", effective));
+    if (policy) dom.panelRecord.appendChild(sectionWithJson("Execution policy", policy));
+    if (receiptEvidence) dom.panelRecord.appendChild(receiptEvidence);
+    if (receipt) dom.panelRecord.appendChild(sectionWithJson("Execution receipt", receipt));
+  }
+
+  function resultMetric(label, value) { const metric = document.createElement("div"); metric.className = "metric"; const name = document.createElement("span"); name.className = "metric-label"; name.textContent = label; const data = document.createElement("strong"); data.className = "metric-value"; data.textContent = value; metric.append(name, data); return metric; }
+  function renderResult() {
+    dom.panelResult.replaceChildren();
+    if (!state.result) { const empty = document.createElement("p"); empty.className = "empty-inline"; empty.textContent = state.detail && isTerminal(state.detail.status) ? "Loading the terminal result…" : "The server result will update as this run reaches a terminal state."; dom.panelResult.appendChild(empty); return; }
+    if (state.result._error) { const error = document.createElement("p"); error.className = "empty-inline error-copy"; error.textContent = state.result._error; dom.panelResult.appendChild(error); return; }
+    const result = state.result, grid = document.createElement("div"); grid.className = "result-grid"; grid.append(resultMetric("Status", statusLabel(result.status)), resultMetric("Exit code", result.exit_code === null || result.exit_code === undefined ? "—" : String(result.exit_code)), resultMetric("Duration", formatDuration(result.duration_ms)), resultMetric("Truncated", result.truncated ? "yes" : "no")); dom.panelResult.appendChild(grid);
+    const summary = document.createElement("section"); summary.className = "section-card"; const header = document.createElement("div"); header.className = "section-card-header"; const heading = document.createElement("h3"); heading.textContent = state.resultStatus === 202 ? "Partial server result" : "Terminal server result";
+    const copy = document.createElement("button"); copy.type = "button"; copy.className = "button button-quiet button-small"; copy.textContent = "Copy JSON"; copy.addEventListener("click", () => copyText(JSON.stringify(result, null, 2), "Result JSON copied")); header.append(heading, copy);
+    const list = document.createElement("dl"); list.className = "metadata"; metadataRow(list, "Stdout bytes", typeof result.stdout === "string" ? new Blob([result.stdout]).size : null); metadataRow(list, "Stderr bytes", typeof result.stderr === "string" ? new Blob([result.stderr]).size : null); metadataRow(list, "Violations", Array.isArray(result.violations) ? result.violations.length : null); summary.append(header, list); dom.panelResult.appendChild(summary);
+    if (Array.isArray(result.violations) && result.violations.length) dom.panelResult.appendChild(sectionWithJson("Limit violations", result.violations));
+  }
+
+  function activateTab(name, focus) {
+    state.activeTab = name; const tabs = Array.from(document.querySelectorAll("[role=tab][data-tab]"));
+    for (const tab of tabs) { const active = tab.dataset.tab === name; tab.setAttribute("aria-selected", active ? "true" : "false"); tab.tabIndex = active ? 0 : -1; if (active && focus) tab.focus(); }
+    for (const panel of document.querySelectorAll("[data-panel]")) panel.hidden = panel.dataset.panel !== name;
+    if (name === "output" || name === "events") scheduleFeedRender(false);
+  }
+
+  async function cancelSelected() {
+    const id = state.selectedId; if (!id || !state.detail || isTerminal(state.detail.status)) return; const now = Date.now();
+    if (state.cancelArmedUntil < now) { state.cancelArmedUntil = now + 5000; dom.cancelRun.textContent = "Confirm cancel"; announce("Press Confirm cancel to stop this run"); window.setTimeout(() => { if (Date.now() >= state.cancelArmedUntil && state.selectedId === id && !isTerminal(state.detail && state.detail.status)) { dom.cancelRun.textContent = "Cancel run"; state.cancelArmedUntil = 0; } }, 5100); return; }
+    state.cancelArmedUntil = 0; dom.cancelRun.disabled = true; dom.cancelRun.textContent = "Cancel requested";
+    try { await apiRequest("/v1/jobs/" + encodeURIComponent(id), { method: "DELETE" }); toast("Cancellation requested for " + shortId(id)); announce("Cancellation requested"); await refreshNow(false); }
+    catch (error) { toast(describeError(error), "error"); dom.cancelRun.disabled = false; dom.cancelRun.textContent = "Cancel run"; }
+  }
+
+  async function refreshNow(showErrors) {
+    if (!state.activeKey || state.keyDirty) return;
+    if (state.pollInFlight) { state.pendingRefresh = state.pendingRefresh || Boolean(showErrors); return; }
+    state.pollInFlight = true; dom.refreshRuns.disabled = true;
+    try { await fetchJobs({ reset: true }); setApiState("ready", "connected"); state.pollBackoff = 2000; }
+    catch (error) { if (error && error.name !== "AbortError") { setApiState("warning", "degraded"); state.pollBackoff = Math.min(Math.max(state.pollBackoff * 2, 4000), error.retryAfterMs || 30000); if (state.initialLoad) { state.listError = "Could not load the execution ledger: " + describeError(error); renderRunList(); } if (showErrors) toast(describeError(error), "error"); } }
+    finally {
+      state.pollInFlight = false; dom.refreshRuns.disabled = false;
+      const runPending = state.pendingRefresh; state.pendingRefresh = false;
+      if (runPending) window.setTimeout(() => refreshNow(true).finally(schedulePoll), 0);
+    }
+  }
+  function schedulePoll(delay) {
+    clearTimeout(state.pollTimer); if (!state.activeKey || state.keyDirty) return; const hasActive = state.jobs.some((job) => job.status === "queued" || job.status === "running"), base = hasActive ? 2000 : 8000, nextDelay = delay || (document.hidden ? 30000 : Math.max(base, state.pollBackoff));
+    state.pollTimer = window.setTimeout(async () => { await refreshNow(false); schedulePoll(); }, nextDelay);
+  }
+  function resetListForFilter() { state.listGeneration += 1; state.jobs = []; state.nextCursor = null; state.initialLoad = true; renderStats(); renderRunList(); refreshNow(true).finally(schedulePoll); }
+
+  function openSubmitDialog() { dom.submitError.textContent = ""; if (!state.activeKey || state.keyDirty) { toast("Apply an API key before creating a run", "error"); dom.apiKey.focus(); return; } if (dom.jobLanguage.disabled) { toast("This server has no runnable language runtime configured", "error"); return; } dom.submitDialog.showModal(); window.setTimeout(() => dom.jobLanguage.focus(), 0); }
+  function numberFrom(input) { const value = Number(input.value); return Number.isFinite(value) ? Math.trunc(value) : null; }
+  async function submitJob(event) {
+    event.preventDefault(); dom.submitError.textContent = ""; if (!dom.jobForm.reportValidity()) return;
+    const payload = { language: dom.jobLanguage.value, code: dom.jobCode.value, limits: { wall_seconds: numberFrom(dom.limitWall), cpu_seconds: numberFrom(dom.limitCpu), mem_mb: numberFrom(dom.limitMemory), max_pids: numberFrom(dom.limitPids), max_file_mb: numberFrom(dom.limitFile), allow_network: dom.limitNetwork.checked } };
+    if (dom.jobStdin.value) payload.stdin = dom.jobStdin.value; dom.submitRun.disabled = true; dom.submitRun.textContent = "Queueing…";
+    try {
+      const response = await apiRequest("/v1/jobs", { method: "POST", body: JSON.stringify(payload) }), job = response.data || {}; if (!job.job_id) throw new ApiError("The server accepted the run without returning a job ID", { status: response.status });
+      dom.submitDialog.close(); toast("Queued run " + shortId(job.job_id)); await refreshNow(false);
+      if (!state.jobs.some((item) => item.job_id === job.job_id)) { state.jobs.unshift({ job_id: job.job_id, language: payload.language, status: job.status || "queued", created_at_ms: Date.now(), started_at_ms: null, finished_at_ms: null, exit_code: null }); renderStats(); renderRunList(); }
+      selectJob(job.job_id, true);
+    } catch (error) { dom.submitError.textContent = describeError(error); }
+    finally { const unavailable = dom.jobLanguage.disabled; dom.submitRun.disabled = unavailable; dom.submitRun.textContent = unavailable ? "No runtimes available" : "Queue run"; }
+  }
+
+  dom.keyForm.addEventListener("submit", (event) => { event.preventDefault(); commitKey(); });
+  dom.apiKey.addEventListener("input", () => { const differs = dom.apiKey.value.trim() !== state.activeKey; if (differs && !state.keyDirty) { state.keyDirty = true; resetTenantData("Credentials changed. Apply the key to load the new tenant; prior tenant data has been cleared."); state.keyDirty = true; setApiState("warning", "apply key"); } });
+  dom.rememberKey.addEventListener("change", () => { if (!dom.rememberKey.checked) storageSet(localStorage, "coop_api_key", ""); });
+  dom.dismissNotice.addEventListener("click", hideNotice); dom.openSubmit.addEventListener("click", openSubmitDialog); dom.blankNewRun.addEventListener("click", openSubmitDialog); dom.closeSubmit.addEventListener("click", () => dom.submitDialog.close()); dom.cancelSubmit.addEventListener("click", () => dom.submitDialog.close()); dom.jobForm.addEventListener("submit", submitJob);
+  dom.jobLanguage.addEventListener("change", (event) => { const previous = Object.entries(samples).find((entry) => entry[1] === dom.jobCode.value); if (!dom.jobCode.value.trim() || previous) dom.jobCode.value = samples[event.target.value] || ""; });
+  dom.jobCode.addEventListener("keydown", (event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); dom.jobForm.requestSubmit(); } });
+  dom.refreshRuns.addEventListener("click", () => refreshNow(true).finally(schedulePoll));
+  dom.loadOlder.addEventListener("click", async () => { dom.loadOlder.disabled = true; try { await fetchJobs({ reset: false }); } catch (error) { toast(describeError(error), "error"); } finally { dom.loadOlder.disabled = false; } });
+  dom.runSearch.addEventListener("input", renderRunList); dom.statusFilter.addEventListener("change", resetListForFilter); dom.languageFilter.addEventListener("change", resetListForFilter);
+  dom.clearFilters.addEventListener("click", () => { const hadServerFilters = Boolean(dom.statusFilter.value || dom.languageFilter.value); dom.runSearch.value = ""; dom.statusFilter.value = ""; dom.languageFilter.value = ""; if (hadServerFilters) resetListForFilter(); else renderRunList(); });
+  dom.copyId.addEventListener("click", () => copyText(state.selectedId || "", "Full job ID copied")); dom.cancelRun.addEventListener("click", cancelSelected);
+  dom.copyOutput.addEventListener("click", () => copyText(state.outputLines.map((line) => line.text).join("\n"), "Output copied")); dom.copyEvents.addEventListener("click", () => copyText(JSON.stringify(state.events, null, 2), "Event ledger copied"));
+  dom.followTail.addEventListener("change", () => { state.followTail = dom.followTail.checked; if (state.followTail) { dom.outputViewport.scrollTop = dom.outputViewport.scrollHeight; scheduleFeedRender(false); } });
+  dom.outputViewport.addEventListener("scroll", () => { const distance = dom.outputViewport.scrollHeight - dom.outputViewport.scrollTop - dom.outputViewport.clientHeight; if (distance > 88 && state.followTail) { state.followTail = false; dom.followTail.checked = false; } scheduleFeedRender(false); }, { passive: true });
+  dom.eventsViewport.addEventListener("scroll", () => scheduleFeedRender(false), { passive: true });
+
+  const tabs = Array.from(document.querySelectorAll("[role=tab][data-tab]"));
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => activateTab(tab.dataset.tab, false));
+    tab.addEventListener("keydown", (event) => { const index = tabs.indexOf(tab); let target = null; if (event.key === "ArrowRight") target = tabs[(index + 1) % tabs.length]; if (event.key === "ArrowLeft") target = tabs[(index - 1 + tabs.length) % tabs.length]; if (event.key === "Home") target = tabs[0]; if (event.key === "End") target = tabs[tabs.length - 1]; if (target) { event.preventDefault(); activateTab(target.dataset.tab, true); } });
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { schedulePoll(30000); closeStream(); }
+    else { refreshNow(false).finally(schedulePoll); if (state.selectedId && !state.streamFinished && !isTerminal(state.detail && state.detail.status)) openStream(state.selectedId, state.selectionGeneration, state.authGeneration).catch(() => scheduleStreamReconnect(state.selectedId, state.selectionGeneration, state.authGeneration)); }
+  });
+  window.addEventListener("resize", () => scheduleFeedRender(false));
+
+  const remembered = storageGet(localStorage, "coop_api_key") || storageGet(localStorage, "coop_key"), sessionKey = storageGet(sessionStorage, "coop_api_key"), initialKey = sessionKey || remembered || "";
+  dom.apiKey.value = initialKey; dom.rememberKey.checked = Boolean(remembered); renderStats(); renderRunList(); renderSelection(); renderFeeds();
+  if (initialKey) commitKey(); else { setApiState("", "key required"); showNotice("Enter an API key to load this tenant's execution ledger.", "warning"); }
+})();
 </script>
 </body>
 </html>

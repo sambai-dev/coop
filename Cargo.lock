@@ -150,18 +150,22 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "coop-exec"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "coop-types",
+ "libc",
  "nix",
+ "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
+ "windows-sys",
 ]
 
 [[package]]
 name = "coop-server"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "coop-exec",
@@ -169,6 +173,8 @@ dependencies = [
  "coop-types",
  "dashmap",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "serde",
  "serde_json",
  "sha2",
@@ -183,16 +189,18 @@ dependencies = [
 
 [[package]]
 name = "coop-store"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
+ "futures-util",
  "serde_json",
+ "sha2",
  "sqlx",
  "tracing",
 ]
 
 [[package]]
 name = "coop-types"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1434,14 +1442,15 @@ dependencies = [
 
 [[package]]
 name = "tower-http"
-version = "0.6.11"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
+checksum = "b11f75e912b0c2be01b63d8cf8057b8c3f97cf34abb3d431a3a4c8675498e233"
 dependencies = [
  "bitflags",
  "bytes",
  "http",
  "http-body",
+ "percent-encoding",
  "pin-project-lite",
  "tower-layer",
  "tower-service",
@@ -1594,9 +1603,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.24.1"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",

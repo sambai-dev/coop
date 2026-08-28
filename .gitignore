@@ -1,9 +1,14 @@
 /target
+/target-*/
 *.db
 *.db-shm
 *.db-wal
 /data
+/.coop-dev
 node_modules/
 __pycache__/
 *.pyc
 .DS_Store
+.env
+.env.*
+!.env.example
