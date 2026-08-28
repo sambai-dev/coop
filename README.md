@@ -332,6 +332,10 @@ A successful unit test run on macOS, Windows, or another Linux architecture is n
 
 Runnable starting templates for systemd, its environment file, and Caddy live under [`deploy/`](deploy/).
 
+## Contributing
+
+Issues and focused pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for development checks, hostile-suite requirements, security reporting, and the design principles expected in security-sensitive changes.
+
 ## Project direction
 
 Coop's next priorities are an external hardened-runtime adapter such as

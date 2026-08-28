@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible problem in Coop
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Coop. Do not report vulnerabilities here; follow SECURITY.md instead.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest job payload, configuration, and steps that reproduce the problem. Remove API keys and sensitive data.
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: sandbox
+    attributes:
+      label: Active sandbox mode
+      description: Use the sandbox value reported by the authenticated /v1/status endpoint.
+      options:
+        - namespaces+cgroups-v2+private-rootfs
+        - off
+        - unknown
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Coop version or commit
+      placeholder: v0.3.0 or a commit SHA
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: Ubuntu 24.04 x86_64
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Redact API keys, job contents, paths, and tenant identifiers before posting.
+      render: text
