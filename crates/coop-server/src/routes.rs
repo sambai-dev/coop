@@ -756,6 +756,32 @@ struct PendingSubmission {
     job_trace: crate::request_context::JobTraceContext,
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+struct SubmissionCommitPause {
+    key: String,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static SUBMISSION_COMMIT_PAUSE: std::sync::Mutex<Option<SubmissionCommitPause>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+async fn pause_after_submission_commit(idempotency: Option<&coop_store::IdempotencyRequest>) {
+    let pause = SUBMISSION_COMMIT_PAUSE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .filter(|pause| idempotency.is_some_and(|request| request.key == pause.key))
+        .cloned();
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
+}
+
 fn spawn_submission_commit(
     state: AppState,
     reservation: crate::scheduler::AdmissionReservation,
@@ -774,6 +800,13 @@ fn spawn_submission_commit(
             job_trace,
         } = pending;
         let started_at = std::time::Instant::now();
+        // Establish process-local observation and retain the composite queue
+        // reservation before COMMIT can publish the durable idempotency row.
+        // A racing replay may therefore return only after both ownership
+        // structures already exist; this registration is never repeated
+        // after COMMIT, so a racing cancellation cannot be overwritten by a
+        // fresh nonterminal channel.
+        state.bus.register(&job_id);
         let persisted = state
             .store
             .create_job_with_event_idempotent(
@@ -790,9 +823,10 @@ fn spawn_submission_commit(
             started_at.elapsed(),
             persisted.is_ok(),
         );
+        #[cfg(test)]
+        pause_after_submission_commit(idempotency.as_ref()).await;
         let result = match persisted {
             Ok(coop_store::CreateJobOutcome::Created(event)) => {
-                state.bus.register(&job_id);
                 state.bus.send(&job_id, wire_event(event));
                 reservation.send(job_id.clone());
                 state.job_traces.insert(job_id.clone(), job_trace);
@@ -804,10 +838,13 @@ fn spawn_submission_commit(
                     replayed: false,
                 })
             }
-            Ok(coop_store::CreateJobOutcome::Replayed { job_id }) => {
+            Ok(coop_store::CreateJobOutcome::Replayed {
+                job_id: replayed_job_id,
+            }) => {
+                state.bus.remove(&job_id);
                 drop(reservation);
                 Ok(SubmissionAcceptance {
-                    job_id,
+                    job_id: replayed_job_id,
                     replayed: true,
                 })
             }
@@ -830,7 +867,6 @@ fn spawn_submission_commit(
                                 && row.status == "queued" =>
                         {
                             tracing::warn!(%job_id, "reconciled an ambiguously acknowledged durable job acceptance");
-                            state.bus.register(&job_id);
                             reservation.send(job_id.clone());
                             state.job_traces.insert(job_id.clone(), job_trace);
                             state
@@ -843,6 +879,7 @@ fn spawn_submission_commit(
                         }
                         Ok(_) => {
                             let Some(request) = idempotency.as_ref() else {
+                                state.bus.remove(&job_id);
                                 drop(reservation);
                                 break Err(commit_error);
                             };
@@ -854,20 +891,25 @@ fn spawn_submission_commit(
                                 lookup.is_ok(),
                             );
                             match lookup {
-                                Ok(coop_store::IdempotencyLookup::Replay { job_id }) => {
+                                Ok(coop_store::IdempotencyLookup::Replay {
+                                    job_id: replayed_job_id,
+                                }) => {
+                                    state.bus.remove(&job_id);
                                     drop(reservation);
                                     break Ok(SubmissionAcceptance {
-                                        job_id,
+                                        job_id: replayed_job_id,
                                         replayed: true,
                                     });
                                 }
                                 Ok(coop_store::IdempotencyLookup::Conflict)
                                     if coop_store::is_idempotency_conflict(&commit_error) =>
                                 {
+                                    state.bus.remove(&job_id);
                                     drop(reservation);
                                     break Err(commit_error);
                                 }
                                 Ok(_) => {
+                                    state.bus.remove(&job_id);
                                     drop(reservation);
                                     break Err(commit_error);
                                 }
@@ -897,7 +939,7 @@ fn spawn_submission_commit(
     tokio::spawn(future.instrument(accept_span))
 }
 
-pub fn router(state: AppState) -> Router {
+pub(crate) fn router(state: AppState) -> Router {
     let api = Router::new()
         .route(
             "/v1/jobs",
@@ -1022,12 +1064,15 @@ fn internal_error(context: &str, e: impl std::fmt::Display) -> Response {
 #[utoipa::path(
     post,
     path = "/v1/jobs",
+    params(
+        ("Idempotency-Key" = Option<String>, Header, description = "Optional 1-128 byte visible-ASCII opaque key. Scoped to the authenticated tenant; replaying the same canonical request returns the original job, while reuse with a different request returns 422.")
+    ),
     request_body = JobSpec,
     responses(
-        (status = 201, description = "Job accepted or safely replayed", body = SubmitResponse,
+        (status = 201, description = "Job accepted or replayed", body = SubmitResponse,
             headers(
-                ("Location" = String, description = "Canonical tenant-scoped job detail path"),
-                ("Idempotency-Replayed" = bool, description = "True when this response replayed a prior matching idempotent submission")
+                ("Location" = String, description = "Canonical /v1/jobs/{job_id} resource"),
+                ("Idempotency-Replayed" = String, description = "true when this response replays an existing idempotent acceptance; false for a new acceptance")
             )
         ),
         (status = 400, description = "Invalid job spec", body = ErrorEnvelope),
@@ -1035,7 +1080,7 @@ fn internal_error(context: &str, e: impl std::fmt::Display) -> Response {
         (status = 408, description = "Request body read deadline exceeded", body = ErrorEnvelope),
         (status = 413, description = "Code or stdin too large", body = ErrorEnvelope),
         (status = 415, description = "JSON content type required", body = ErrorEnvelope),
-        (status = 422, description = "Configured runtime is unavailable", body = ErrorEnvelope),
+        (status = 422, description = "Configured runtime is unavailable or an idempotency key conflicts with a different canonical request", body = ErrorEnvelope),
         (status = 429, description = "Rate or per-tenant body capacity exceeded", body = ErrorEnvelope),
         (status = 503, description = "Queue, global body, startup, shutdown, or logical storage capacity unavailable", body = ErrorEnvelope),
         (status = 507, description = "Filesystem free-space reserve prevents admission", body = ErrorEnvelope)
@@ -1622,7 +1667,7 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
 /// Cancel a job. Running jobs are terminated by the executor's containment
 /// boundary (cgroup-wide in namespace mode) and finish as `cancelled`; queued jobs are marked
 /// `cancelled` immediately so the scheduler skips them. Idempotent: an
-/// already-terminal job returns 409 with its current status.
+/// already-terminal job returns 200 with `already_terminal=true` and its current status.
 #[utoipa::path(
     delete,
     path = "/v1/jobs/{id}",
@@ -2846,6 +2891,7 @@ mod tests {
     use std::convert::Infallible;
     use std::pin::Pin;
     use std::task::{Context, Poll};
+    use tower::ServiceExt;
 
     #[derive(Default)]
     struct MessageSink {
@@ -3584,5 +3630,108 @@ mod tests {
         let _reclaimed = admission
             .try_acquire("tenant-a")
             .expect("EOF reclaims response admission");
+    }
+
+    #[tokio::test]
+    async fn committed_idempotent_replay_and_cancel_cannot_leave_bus_or_queue_leases() {
+        let base = std::env::temp_dir().join(format!("coop-handoff-race-{}", uuid::Uuid::now_v7()));
+        let db = base.join("coop.db");
+        let jobs = base.join("jobs");
+        let source = |key: &str| match key {
+            "COOP_API_KEYS" => Some("tenant:test-key-with-enough-entropy".to_string()),
+            "COOP_SANDBOX" => Some("off".to_string()),
+            "COOP_STORAGE_FREE_RESERVE_MB" => Some("0".to_string()),
+            "COOP_JOBS_ROOT" => Some(jobs.to_string_lossy().into_owned()),
+            _ => None,
+        };
+        let cfg = crate::config::Config::from_sources(&source, false).unwrap();
+        let store = Arc::new(
+            coop_store::Store::open_with_limits(&db, cfg.storage_limits())
+                .await
+                .unwrap(),
+        );
+        let (app, state, mut queue_rx) =
+            crate::build_app(cfg, Arc::clone(&store), "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *SUBMISSION_COMMIT_PAUSE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SubmissionCommitPause {
+            key: "race-key".to_string(),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+
+        let submit_request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/jobs")
+                .header(header::AUTHORIZATION, "Bearer test-key-with-enough-entropy")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "race-key")
+                .body(axum::body::Body::from(
+                    r#"{"language":"python","code":"print(1)"}"#,
+                ))
+                .unwrap()
+        };
+        let first_app = app.clone();
+        let first = tokio::spawn(async move { first_app.oneshot(submit_request()).await.unwrap() });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("first submit committed before handoff pause");
+
+        // The replay can observe the durable mapping while the original task
+        // is paused only because bus registration and the composite queue
+        // reservation were established before COMMIT.
+        let replay = tokio::time::timeout(
+            Duration::from_secs(2),
+            app.clone().oneshot(submit_request()),
+        )
+        .await
+        .expect("replay did not wait on missing process-local ownership")
+        .unwrap();
+        assert_eq!(replay.status(), StatusCode::CREATED);
+        assert_eq!(replay.headers()["idempotency-replayed"], "true");
+        let replay_body = axum::body::to_bytes(replay.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let replay_body: serde_json::Value = serde_json::from_slice(&replay_body).unwrap();
+        let job_id = replay_body["job_id"].as_str().unwrap().to_string();
+        assert!(state.bus.subscribe(&job_id).is_some());
+
+        let cancel = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/jobs/{job_id}"))
+                    .header(header::AUTHORIZATION, "Bearer test-key-with-enough-entropy")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancel.status(), StatusCode::OK);
+        assert!(state.bus.subscribe(&job_id).is_none());
+
+        release.notify_one();
+        let first = first.await.unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let envelope = tokio::time::timeout(Duration::from_secs(2), queue_rx.recv())
+            .await
+            .expect("scheduler envelope missing")
+            .expect("queue closed");
+        assert_eq!(envelope.job_id, job_id);
+        drop(envelope);
+        assert_eq!(state.admission.depth(), 0);
+        assert_eq!(state.admission.tenant_depth("tenant"), 0);
+        assert!(state.bus.subscribe(&job_id).is_none());
+        *SUBMISSION_COMMIT_PAUSE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let _ = std::fs::remove_dir_all(base);
     }
 }

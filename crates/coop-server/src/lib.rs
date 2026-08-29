@@ -206,6 +206,7 @@ impl AppState {
 pub async fn build_app(
     cfg: Config,
     store: Arc<Store>,
+    bound_addr: std::net::SocketAddr,
 ) -> Result<(axum::Router, AppState, mpsc::Receiver<scheduler::QueuedJob>), String> {
     let expected_storage_limits = cfg.storage_limits();
     if store.storage_limits() != expected_storage_limits {
@@ -247,6 +248,7 @@ pub async fn build_app(
     }
     let sandbox_mode = resolve_sandbox(&cfg)?;
     cfg.validate_resolved_listener_security(sandbox_mode)?;
+    cfg.validate_bound_listener_security(bound_addr, sandbox_mode)?;
     if !early_strict && !matches!(sandbox_mode, coop_exec::SandboxMode::Off) {
         crate::config::prepare_jobs_root(jobs_root, true)?;
         coop_exec::quiesce_stale_gvisor_workloads(jobs_root)
@@ -402,6 +404,20 @@ async fn build_execution_provider(
             }
         }
     }
+}
+
+/// Rebuild a Router for an already-constructed state only after validating
+/// the address of the listener that will serve it. This is primarily useful
+/// for embedders that replace process-local admission components before
+/// serving; the unchecked router constructor remains crate-private.
+pub fn router_for_bound_state(
+    state: AppState,
+    bound_addr: std::net::SocketAddr,
+) -> Result<axum::Router, String> {
+    state
+        .cfg
+        .validate_bound_listener_security(bound_addr, state.sandbox_mode)?;
+    Ok(routes::router(state))
 }
 
 /// F8: sandbox selection never silently degrades. Explicit namespace requests
@@ -764,10 +780,47 @@ mod tests {
         };
         let cfg = Config::from_sources(&source, false).unwrap();
         let store = Arc::new(Store::open(&db).await.unwrap());
-        match build_app(cfg, store).await {
+        match build_app(cfg, store, "127.0.0.1:0".parse().unwrap()).await {
             Err(error) => assert!(error.contains("Store policy does not match"), "{error}"),
             Ok(_) => panic!("development embedder bypassed configured storage quotas"),
         }
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn embedded_router_contract_validates_the_actual_bound_listener() {
+        let base = std::env::temp_dir().join(format!(
+            "coop-bound-listener-contract-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let db = base.join("coop.db");
+        let jobs = base.join("jobs");
+        let source = |key: &str| match key {
+            "COOP_SANDBOX" => Some("off".to_string()),
+            "COOP_STORAGE_FREE_RESERVE_MB" => Some("0".to_string()),
+            "COOP_JOBS_ROOT" => Some(jobs.to_string_lossy().into_owned()),
+            _ => None,
+        };
+        let cfg = Config::from_sources(&source, false).unwrap();
+        let store = Arc::new(Store::open(&db).await.unwrap());
+        let public: std::net::SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        match build_app(cfg.clone(), Arc::clone(&store), public).await {
+            Err(error) => assert!(error.contains("non-loopback"), "{error}"),
+            Ok(_) => panic!("public embedder bypassed actual-listener validation"),
+        }
+
+        let (_app, state, _queue) = build_app(
+            cfg.clone(),
+            Arc::clone(&store),
+            "127.0.0.1:8080".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(router_for_bound_state(state, public).is_err());
+
+        let mut acknowledged = cfg;
+        acknowledged.unsafe_allow_public_dev = true;
+        assert!(build_app(acknowledged, store, public).await.is_ok());
         let _ = std::fs::remove_dir_all(base);
     }
 

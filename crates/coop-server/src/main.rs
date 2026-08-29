@@ -133,10 +133,7 @@ async fn run() -> Result<(), String> {
 
     // F8: an unsatisfiable sandbox configuration is a startup error, not a
     // silent downgrade to unprotected execution.
-    let (app, state, queue_rx) = build_app(cfg, store).await?;
-    state
-        .cfg
-        .validate_bound_listener_security(bound_addr, state.sandbox_mode)?;
+    let (app, state, queue_rx) = build_app(cfg, store, bound_addr).await?;
     state
         .startup_ready
         .store(false, std::sync::atomic::Ordering::Release);
@@ -420,15 +417,61 @@ async fn recover_queued_jobs(state: coop_server::AppState) -> Result<usize, Stri
                 // can observe the close first; classify both orderings as the
                 // same expected recovery stop rather than a fatal boot error.
                 .map_err(|_| "shutdown requested".to_string())?;
+            // Publish process-local ownership before the durable recheck.
+            // A concurrent cancellation can now always close this channel;
+            // without this ordering a terminal row could retain a freshly
+            // registered channel forever after the cancellation completed.
             state.bus.register(&row.job_id);
-            reservation.send(row.job_id.clone());
-            restored += 1;
+            let current = match job_summary_retrying(&state, &row.job_id).await {
+                Ok(current) => current,
+                Err(error) => {
+                    state.bus.complete(&row.job_id);
+                    return Err(error);
+                }
+            };
+            match current {
+                Some(current) if current.status == "queued" && current.tenant == row.tenant => {
+                    reservation.send(row.job_id.clone());
+                    restored += 1;
+                }
+                // Cancellation, retention, or an unexpected lifecycle race
+                // won after the page read. Dropping the reservation releases
+                // both global and tenant leases; completing is idempotent if
+                // the cancellation path already removed the channel.
+                _ => state.bus.complete(&row.job_id),
+            }
         }
         cursor = page.last().map(JobCursor::from);
         if page_len < RECOVERY_PAGE_SIZE as usize {
             return Ok(restored);
         }
     }
+}
+
+async fn job_summary_retrying(
+    state: &coop_server::AppState,
+    job_id: &str,
+) -> Result<Option<coop_store::JobSummary>, String> {
+    let mut delay = Duration::from_millis(20);
+    for attempt in 1..=STORAGE_RETRY_ATTEMPTS {
+        if *state.shutdown.borrow() {
+            return Err("shutdown requested".to_string());
+        }
+        match state.store.get_job_summary(job_id).await {
+            Ok(row) => return Ok(row),
+            Err(error) if attempt == STORAGE_RETRY_ATTEMPTS => {
+                return Err(format!(
+                    "queued-job recovery status recheck failed after {STORAGE_RETRY_ATTEMPTS} attempts: {error}"
+                ));
+            }
+            Err(error) => {
+                tracing::warn!(%error, attempt, %job_id, "boot recovery status recheck failed; retrying");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(1));
+            }
+        }
+    }
+    unreachable!("retry loop returns on its final attempt")
 }
 
 async fn queued_page_retrying(

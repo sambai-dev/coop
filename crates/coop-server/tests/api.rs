@@ -64,6 +64,10 @@ fn test_config(db: &std::path::Path) -> Config {
     }
 }
 
+fn loopback_addr() -> std::net::SocketAddr {
+    "127.0.0.1:0".parse().unwrap()
+}
+
 async fn spawn_app() -> Router {
     spawn_app_with_limits(2, 4).await
 }
@@ -74,7 +78,9 @@ async fn spawn_app_with_limits(workers: usize, tenant_concurrency: usize) -> Rou
     cfg.workers = workers;
     cfg.tenant_concurrency = tenant_concurrency;
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, state, queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (app, state, queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .expect("build app");
     scheduler::spawn_workers(state, queue_rx);
     app
 }
@@ -147,7 +153,9 @@ async fn spawn_scoped_app() -> (Router, HashMap<&'static str, String>) {
     cfg.credentials =
         coop_server::auth::CredentialStore::load(&credentials_path, &pepper_path, false).unwrap();
     let store = Arc::new(Store::open(&db).await.unwrap());
-    let (app, _state, queue_rx) = coop_server::build_app(cfg, store).await.unwrap();
+    let (app, _state, queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .unwrap();
     tokio::spawn(async move {
         let _queue_rx = queue_rx;
         std::future::pending::<()>().await;
@@ -182,6 +190,37 @@ fn request(method: &str, uri: &str, key: Option<&str>, body: Option<String>) -> 
     builder
         .body(Body::from(body.unwrap_or_default()))
         .expect("request")
+}
+
+async fn send_idempotent(
+    app: &Router,
+    idempotency_key: &str,
+    body: &str,
+) -> (StatusCode, Option<String>, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/jobs")
+                .header(header::AUTHORIZATION, "Bearer test-key")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", idempotency_key)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let replayed = response
+        .headers()
+        .get("idempotency-replayed")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (status, replayed, serde_json::from_slice(&bytes).unwrap())
 }
 
 async fn wait_terminal(app: &Router, job_id: &str) -> serde_json::Value {
@@ -460,7 +499,9 @@ async fn full_decoded_code_and_stdin_fit_even_with_worst_case_json_escaping() {
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .expect("build app");
     let escaped = "\u{1}".repeat(1_048_576);
     let payload = serde_json::json!({
         "language": "python",
@@ -501,7 +542,9 @@ async fn queued_detail_exposes_unknown_effective_policy_without_fabrication() {
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .expect("build app");
     let (status, accepted) = send(
         &app,
         request(
@@ -547,7 +590,9 @@ async fn unavailable_development_runtime_is_not_advertised_or_admitted() {
             .into_owned(),
     );
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .expect("build app");
 
     let (capabilities_status, capabilities) = send(
         &app,
@@ -609,7 +654,9 @@ async fn saturated_admission_is_nonblocking_and_retryable() {
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, state, _queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (app, state, _queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .expect("build app");
     for n in 0..coop_server::QUEUE_CAPACITY {
         state
             .admission
@@ -651,7 +698,9 @@ async fn tenant_queue_capacity_returns_429_without_blocking_another_tenant() {
     let mut cfg = test_config(&db);
     cfg.tenant_queue_capacity = 2;
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .expect("build app");
     let body = r#"{"language":"python","code":"print(1)"}"#;
     for _ in 0..2 {
         let (status, value) = send(
@@ -688,7 +737,9 @@ async fn retained_storage_quota_maps_tenant_capacity_without_charging_other_tena
             .await
             .expect("open limited store"),
     );
-    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .expect("build app");
     let body = r#"{"language":"python","code":"print(1)"}"#;
     let (status, first) = send(
         &app,
@@ -767,11 +818,51 @@ async fn idempotency_replays_original_job_and_rejects_fingerprint_reuse() {
 }
 
 #[tokio::test]
+async fn concurrent_same_key_requests_have_one_acceptance_and_fingerprint_conflicts() {
+    let app = spawn_app().await;
+    let body = r#"{"language":"python","code":"print(7)"}"#;
+    let (left, right) = tokio::join!(
+        send_idempotent(&app, "concurrent-same", body),
+        send_idempotent(&app, "concurrent-same", body),
+    );
+    assert_eq!(left.0, StatusCode::CREATED, "{}", left.2);
+    assert_eq!(right.0, StatusCode::CREATED, "{}", right.2);
+    assert_eq!(left.2["job_id"], right.2["job_id"]);
+    let replay_flags = [left.1.as_deref(), right.1.as_deref()];
+    assert!(replay_flags.contains(&Some("false")));
+    assert!(replay_flags.contains(&Some("true")));
+
+    let (left, right) = tokio::join!(
+        send_idempotent(
+            &app,
+            "concurrent-conflict",
+            r#"{"language":"python","code":"print('left')"}"#,
+        ),
+        send_idempotent(
+            &app,
+            "concurrent-conflict",
+            r#"{"language":"python","code":"print('right')"}"#,
+        ),
+    );
+    let statuses = [left.0, right.0];
+    assert!(statuses.contains(&StatusCode::CREATED));
+    assert!(statuses.contains(&StatusCode::UNPROCESSABLE_ENTITY));
+    let conflict = if left.0 == StatusCode::UNPROCESSABLE_ENTITY {
+        left.2
+    } else {
+        right.2
+    };
+    assert_eq!(conflict["error"]["code"], "idempotency_key_reused");
+}
+
+#[tokio::test]
 async fn shutdown_is_sticky_and_queued_work_does_not_start_after_it() {
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (_app, state, queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (_app, state, queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .expect("build app");
     state
         .store
         .create_job_with_event(
@@ -809,7 +900,9 @@ async fn readiness_monitor_exits_when_shutdown_was_already_sticky() {
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (_app, state, _queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (_app, state, _queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .expect("build app");
     state.begin_shutdown();
 
     let monitor = coop_server::readiness::spawn_monitor(state);
@@ -824,7 +917,9 @@ async fn long_result_wait_returns_promptly_when_shutdown_begins() {
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, state, _queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (app, state, _queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .expect("build app");
     let (status, accepted) = send(
         &app,
         request(
@@ -865,11 +960,12 @@ async fn result_wait_honors_budget_before_recovery_registers_completion_watch() 
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (_unused_app, mut state, _queue_rx) = coop_server::build_app(cfg, Arc::clone(&store))
-        .await
-        .expect("build app");
+    let (_unused_app, mut state, _queue_rx) =
+        coop_server::build_app(cfg, Arc::clone(&store), loopback_addr())
+            .await
+            .expect("build app");
     state.result_wait_admission = coop_server::LifetimeAdmission::new(1, 1);
-    let app = coop_server::routes::router(state.clone());
+    let app = coop_server::router_for_bound_state(state.clone(), loopback_addr()).unwrap();
     let job_id = "recovery-row-before-completion-watch";
     store
         .create_job_with_event(job_id, "t1", "bash", r#"{"language":"bash","code":":"}"#)
@@ -921,7 +1017,9 @@ async fn cancelled_envelope_reclaims_capacity_only_after_scheduler_dequeues_it()
     cfg.workers = 1;
     cfg.tenant_concurrency = 1;
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (_app, state, queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (_app, state, queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .expect("build app");
     state
         .store
         .create_job_with_event(
@@ -964,7 +1062,9 @@ async fn rate_limit_errors_include_retry_after_and_request_id() {
     let mut cfg = test_config(&db);
     cfg.rate_per_min = 1;
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .expect("build app");
 
     let first = app
         .clone()
@@ -1178,7 +1278,9 @@ async fn status_queue_depth_is_tenant_scoped() {
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
     let store = Arc::new(Store::open(&db).await.unwrap());
-    let (app, state, _queue_rx) = coop_server::build_app(cfg, store).await.unwrap();
+    let (app, state, _queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+        .await
+        .unwrap();
     state
         .admission
         .try_reserve("t2", 256)
@@ -1196,9 +1298,10 @@ async fn queued_job_keeps_acceptance_memory_ceiling_when_server_limit_increases(
     let mut low = test_config(&db);
     low.max_job_mem_mb = 512;
     let store = Arc::new(Store::open(&db).await.unwrap());
-    let (first_app, first_state, first_queue) = coop_server::build_app(low, Arc::clone(&store))
-        .await
-        .unwrap();
+    let (first_app, first_state, first_queue) =
+        coop_server::build_app(low, Arc::clone(&store), loopback_addr())
+            .await
+            .unwrap();
     let (status, submitted) = send(
         &first_app,
         request(
@@ -1215,10 +1318,12 @@ async fn queued_job_keeps_acceptance_memory_ceiling_when_server_limit_increases(
     assert_eq!(status, StatusCode::CREATED, "{submitted}");
     let job_id = submitted["job_id"].as_str().unwrap().to_string();
     drop((first_app, first_state, first_queue));
+    drop(store);
 
     let mut high = test_config(&db);
     high.max_job_mem_mb = 1024;
-    let (app, state, queue_rx) = coop_server::build_app(high, Arc::clone(&store))
+    let store = Arc::new(Store::open(&db).await.unwrap());
+    let (app, state, queue_rx) = coop_server::build_app(high, Arc::clone(&store), loopback_addr())
         .await
         .unwrap();
     let queued = store.queued_jobs_page(None, 10).await.unwrap();
@@ -1287,16 +1392,17 @@ async fn stream_ticket_is_rejected_after_shutdown_becomes_sticky() {
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (_unused_app, state, _queue_rx) = coop_server::build_app(cfg, Arc::clone(&store))
-        .await
-        .expect("build app");
+    let (_unused_app, state, _queue_rx) =
+        coop_server::build_app(cfg, Arc::clone(&store), loopback_addr())
+            .await
+            .expect("build app");
     let job_id = "ticket-after-shutdown";
     store
         .create_job_with_event(job_id, "t1", "bash", r#"{"language":"bash","code":":"}"#)
         .await
         .expect("create ticket fixture");
     state.begin_shutdown();
-    let app = coop_server::routes::router(state);
+    let app = coop_server::router_for_bound_state(state, loopback_addr()).unwrap();
 
     let (status, body) = send(
         &app,
@@ -1317,14 +1423,14 @@ async fn production_never_accepts_api_keys_in_stream_query_strings() {
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (_app, mut state, _queue_rx) = coop_server::build_app(cfg.clone(), store)
+    let (_app, mut state, _queue_rx) = coop_server::build_app(cfg.clone(), store, loopback_addr())
         .await
         .expect("build app");
     let mut production_cfg = cfg;
     production_cfg.production = true;
     production_cfg.unsafe_allow_naive = true;
     state.cfg = Arc::new(production_cfg);
-    let app = coop_server::routes::router(state);
+    let app = coop_server::router_for_bound_state(state, loopback_addr()).unwrap();
     let (status, body) = send(
         &app,
         request("GET", "/v1/jobs/unknown/stream?key=test-key", None, None),
@@ -2033,11 +2139,12 @@ async fn result_wait_capacity_is_tenant_global_and_only_for_actual_waits() {
     cfg.api_keys
         .insert("third-key".to_string(), "t3".to_string());
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (_unused_app, mut state, _queue_rx) = coop_server::build_app(cfg, Arc::clone(&store))
-        .await
-        .expect("build app");
+    let (_unused_app, mut state, _queue_rx) =
+        coop_server::build_app(cfg, Arc::clone(&store), loopback_addr())
+            .await
+            .expect("build app");
     state.result_wait_admission = coop_server::LifetimeAdmission::new(2, 1);
-    let app = coop_server::routes::router(state.clone());
+    let app = coop_server::router_for_bound_state(state.clone(), loopback_addr()).unwrap();
 
     for (id, tenant) in [
         ("result-cap-t1", "t1"),
@@ -2128,11 +2235,12 @@ async fn large_response_capacity_guards_all_blob_endpoints_and_reclaims() {
     cfg.api_keys
         .insert("third-key".to_string(), "t3".to_string());
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (_unused_app, mut state, _queue_rx) = coop_server::build_app(cfg, Arc::clone(&store))
-        .await
-        .expect("build app");
+    let (_unused_app, mut state, _queue_rx) =
+        coop_server::build_app(cfg, Arc::clone(&store), loopback_addr())
+            .await
+            .expect("build app");
     state.large_response_admission = coop_server::LifetimeAdmission::new(2, 1);
-    let app = coop_server::routes::router(state.clone());
+    let app = coop_server::router_for_bound_state(state.clone(), loopback_addr()).unwrap();
 
     for (id, tenant) in [
         ("response-cap-t1", "t1"),

@@ -134,7 +134,9 @@ async fn spawn_app_with_root() -> (Router, String) {
         seccomp: true,
     };
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, state, queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (app, state, queue_rx) = coop_server::build_app(cfg, store, "127.0.0.1:0".parse().unwrap())
+        .await
+        .expect("build app");
     // Read everything needed off `state` before it moves into the workers.
     let cfg_jobs_root = state.cfg.jobs_root.clone();
     eprintln!(

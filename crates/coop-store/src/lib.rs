@@ -62,6 +62,8 @@ const ROW_VALIDATION_REVISION: i64 = 2;
 // the sentinel until the transaction commits (which Coop never does).
 const OWNED_ROW_WRITE_REVISION: i64 = ROW_VALIDATION_REVISION + 1;
 const STORAGE_GUARD_REVISION_MARKER: &str = "coop-storage-guard-r2";
+const ACCOUNTING_VALIDATION_REVISION: i64 = 1;
+const OWNED_ACCOUNTING_WRITE_REVISION: i64 = ACCOUNTING_VALIDATION_REVISION + 1;
 pub const JOB_COMPLETION_RESERVE_BYTES: u64 = 32 * 1024 * 1024;
 const LOGICAL_ROW_OVERHEAD_BYTES: u64 = 64;
 const TERMINAL_RESERVE_BYTES: u64 = 64 * 1024;
@@ -85,9 +87,10 @@ pub fn capacity_error_kind(error: &sqlx::Error) -> Option<CapacityErrorKind> {
         None
     }
 }
-const STORAGE_GUARD_NAMES: [&str; 13] = [
+const STORAGE_GUARD_NAMES: [&str; 14] = [
     "coop_schema_migrations_storage_guard_insert",
     "coop_schema_migrations_storage_guard_update",
+    "coop_schema_migrations_storage_guard_delete",
     "coop_jobs_storage_guard_insert",
     "coop_jobs_storage_guard_update",
     "coop_events_storage_guard_insert",
@@ -99,6 +102,34 @@ const STORAGE_GUARD_NAMES: [&str; 13] = [
     "coop_events_validation_dirty_insert",
     "coop_events_validation_dirty_update",
     "coop_events_validation_dirty_delete",
+];
+const ACCOUNTING_GUARD_NAMES: [&str; 26] = [
+    "coop_usage_aggregate_insert",
+    "coop_usage_aggregate_update",
+    "coop_usage_aggregate_delete",
+    "coop_job_storage_guard_insert",
+    "coop_job_storage_guard_update",
+    "coop_job_storage_dirty_insert",
+    "coop_job_storage_dirty_update",
+    "coop_job_storage_dirty_delete",
+    "coop_total_storage_guard_insert",
+    "coop_total_storage_guard_update",
+    "coop_total_storage_dirty_insert",
+    "coop_total_storage_dirty_update",
+    "coop_total_storage_dirty_delete",
+    "coop_tenant_storage_guard_insert",
+    "coop_tenant_storage_guard_update",
+    "coop_tenant_storage_dirty_insert",
+    "coop_tenant_storage_dirty_update",
+    "coop_tenant_storage_dirty_delete",
+    "coop_idempotency_storage_guard_insert",
+    "coop_idempotency_storage_guard_update",
+    "coop_idempotency_dirty_insert",
+    "coop_idempotency_dirty_update",
+    "coop_idempotency_dirty_delete",
+    "coop_tombstone_dirty_insert",
+    "coop_tombstone_dirty_update",
+    "coop_tombstone_dirty_delete",
 ];
 const DEFAULT_RETENTION_BATCH: i64 = 32;
 const MAX_RETENTION_BATCH: i64 = 64;
@@ -286,7 +317,7 @@ fn requested_mem_mb_from_json(spec_json: &str) -> StoreResult<u32> {
         .and_then(|limits| limits.get("mem_mb"))
         .and_then(Value::as_u64)
         .unwrap_or(256)
-        .clamp(1, 4096);
+        .clamp(16, 4096);
     Ok(raw as u32)
 }
 
@@ -450,8 +481,11 @@ async fn lookup_idempotency_tx(
     request: &IdempotencyRequest,
 ) -> StoreResult<IdempotencyLookup> {
     let row = sqlx::query(
-        "SELECT request_sha256, job_id FROM idempotency_keys
-         WHERE tenant = ?1 AND idempotency_key = ?2",
+        "SELECT mapping.request_sha256, mapping.job_id
+         FROM idempotency_keys AS mapping
+         INNER JOIN jobs AS job
+           ON job.tenant = mapping.tenant AND job.job_id = mapping.job_id
+         WHERE mapping.tenant = ?1 AND mapping.idempotency_key = ?2",
     )
     .bind(tenant)
     .bind(&request.key)
@@ -608,9 +642,8 @@ fn build_queued_jobs_query<'args>(
     let mut statement = QueryBuilder::<Sqlite>::new(prefix);
     statement.push(
         "SELECT jobs.job_id, jobs.tenant, jobs.created_at_ms,
-                job_storage_usage.requested_mem_mb
-         FROM jobs INDEXED BY idx_jobs_status_created_recovery
-         INNER JOIN job_storage_usage ON job_storage_usage.job_id = jobs.job_id
+                jobs.admitted_mem_mb AS requested_mem_mb
+         FROM jobs INDEXED BY idx_jobs_status_created_recovery_v3
          WHERE jobs.status = 'queued'
            AND NOT EXISTS (
                 SELECT 1 FROM retention_tombstones
@@ -734,6 +767,34 @@ impl Store {
             history_version == CURRENT_SCHEMA_VERSION && user_version == CURRENT_SCHEMA_VERSION;
 
         let has_jobs = table_exists(conn, "jobs").await?;
+        let v3_table_count = physical_v3_table_count(conn).await?;
+        let has_admitted_memory =
+            has_jobs && column_exists(conn, "jobs", "admitted_mem_mb").await?;
+        let has_accounting_revision = table_exists(conn, "store_integrity").await?
+            && column_exists(conn, "store_integrity", "accounting_validation_revision").await?;
+        let physical_v3_signature =
+            v3_table_count != 0 || has_admitted_memory || has_accounting_revision;
+        if physical_v3_signature && v3_table_count != 4 {
+            return Err(sqlx::Error::Protocol(format!(
+                "database has a partial v3 physical schema ({v3_table_count}/4 required tables)"
+            )));
+        }
+        if version == CURRENT_SCHEMA_VERSION && v3_table_count != 4 {
+            return Err(sqlx::Error::Protocol(
+                "v3 database markers require the complete physical v3 schema".to_string(),
+            ));
+        }
+        let physical_v3 = physical_v3_signature;
+        if physical_v3
+            && (history_version != CURRENT_SCHEMA_VERSION || user_version != CURRENT_SCHEMA_VERSION)
+        {
+            return Err(sqlx::Error::Protocol(format!(
+                "physical v3 schema has downgraded or missing version markers (history={history_version}, user_version={user_version})"
+            )));
+        }
+        if has_jobs && schema_has_v2_extensions(conn).await? {
+            ensure_admitted_memory_column(conn, physical_v3).await?;
+        }
         match (version, has_jobs) {
             (0, false) => {
                 Self::create_current_schema(conn).await?;
@@ -791,9 +852,20 @@ impl Store {
         // every open and prevents cursor reuse/exhaustion on the fast path.
         validated_event_sequence_counter(conn, "events").await?;
         Self::ensure_integrity_state(conn).await?;
-        let requires_full_validation = !schema_markers_current
-            || !Self::row_validation_current(conn).await?
-            || !storage_guards_current(conn).await?;
+        let row_validation_current = Self::row_validation_current(conn).await?;
+        let storage_guards_were_current = storage_guards_current(conn).await?;
+        // Current guards turn every committed raw jobs/events mutation into a
+        // durable dirty revision. There is no legitimate crash state with a
+        // committed dirty sentinel (owned writes either commit the validated
+        // revision atomically or roll back), so silently rescanning and
+        // blessing such edits would launder immutable identity/evidence.
+        if schema_markers_current && storage_guards_were_current && !row_validation_current {
+            return Err(sqlx::Error::Protocol(
+                "jobs/events were modified outside an owned write".to_string(),
+            ));
+        }
+        let requires_full_validation =
+            !schema_markers_current || !row_validation_current || !storage_guards_were_current;
         if requires_full_validation {
             Self::validate_current_rows(conn).await?;
             validate_foreign_keys(conn).await?;
@@ -829,6 +901,9 @@ impl Store {
                  row_validation_revision INTEGER NOT NULL
                      CHECK (typeof(row_validation_revision) = 'integer'
                             AND row_validation_revision >= 0),
+                 accounting_validation_revision INTEGER NOT NULL
+                     CHECK (typeof(accounting_validation_revision) = 'integer'
+                            AND accounting_validation_revision >= 0),
                  validated_at_ms INTEGER NOT NULL
                      CHECK (typeof(validated_at_ms) = 'integer' AND validated_at_ms >= 0),
                  full_scan_count INTEGER NOT NULL
@@ -837,12 +912,23 @@ impl Store {
         )
         .execute(&mut *conn)
         .await?;
+        if !column_exists(conn, "store_integrity", "accounting_validation_revision").await? {
+            sqlx::query(
+                "ALTER TABLE store_integrity
+                 ADD COLUMN accounting_validation_revision INTEGER NOT NULL DEFAULT 0
+                 CHECK (typeof(accounting_validation_revision) = 'integer'
+                        AND accounting_validation_revision >= 0)",
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
         validate_required_columns(
             conn,
             "store_integrity",
             &[
                 RequiredColumn::primary_key("singleton", "INTEGER"),
                 RequiredColumn::not_null("row_validation_revision", "INTEGER"),
+                RequiredColumn::not_null("accounting_validation_revision", "INTEGER"),
                 RequiredColumn::not_null("validated_at_ms", "INTEGER"),
                 RequiredColumn::not_null("full_scan_count", "INTEGER"),
             ],
@@ -854,6 +940,8 @@ impl Store {
                  WHERE typeof(singleton) != 'integer' OR singleton != 1
                     OR typeof(row_validation_revision) != 'integer'
                     OR row_validation_revision < 0
+                    OR typeof(accounting_validation_revision) != 'integer'
+                    OR accounting_validation_revision < 0
                     OR typeof(validated_at_ms) != 'integer' OR validated_at_ms < 0
                     OR typeof(full_scan_count) != 'integer' OR full_scan_count <= 0
              ) AS invalid",
@@ -884,17 +972,37 @@ impl Store {
         Ok(revision == Some(ROW_VALIDATION_REVISION))
     }
 
+    async fn accounting_validation_current(conn: &mut SqliteConnection) -> StoreResult<bool> {
+        let revision = sqlx::query(
+            "SELECT accounting_validation_revision
+             FROM store_integrity WHERE singleton = 1",
+        )
+        .fetch_optional(&mut *conn)
+        .await?
+        .map(|row| row.try_get::<i64, _>("accounting_validation_revision"))
+        .transpose()?;
+        if revision.is_some_and(|value| value > ACCOUNTING_VALIDATION_REVISION) {
+            return Err(sqlx::Error::Protocol(format!(
+                "database accounting-validation revision is newer than supported revision {ACCOUNTING_VALIDATION_REVISION}"
+            )));
+        }
+        Ok(revision == Some(ACCOUNTING_VALIDATION_REVISION))
+    }
+
     async fn record_row_validation(conn: &mut SqliteConnection) -> StoreResult<()> {
         sqlx::query(
             "INSERT INTO store_integrity(
-                 singleton, row_validation_revision, validated_at_ms, full_scan_count
-             ) VALUES (1, ?1, ?2, 1)
+                 singleton, row_validation_revision, accounting_validation_revision,
+                 validated_at_ms, full_scan_count
+             ) VALUES (1, ?1, ?2, ?3, 1)
              ON CONFLICT(singleton) DO UPDATE SET
                  row_validation_revision = excluded.row_validation_revision,
+                 accounting_validation_revision = excluded.accounting_validation_revision,
                  validated_at_ms = excluded.validated_at_ms,
                  full_scan_count = store_integrity.full_scan_count + 1",
         )
         .bind(ROW_VALIDATION_REVISION)
+        .bind(ACCOUNTING_VALIDATION_REVISION)
         .bind(now_ms())
         .execute(&mut *conn)
         .await?;
@@ -904,11 +1012,15 @@ impl Store {
     async fn begin_row_writes(conn: &mut SqliteConnection) -> StoreResult<()> {
         let updated = sqlx::query(
             "UPDATE store_integrity
-             SET row_validation_revision = ?2
-             WHERE singleton = 1 AND row_validation_revision = ?1",
+             SET row_validation_revision = ?2,
+                 accounting_validation_revision = ?4
+             WHERE singleton = 1 AND row_validation_revision = ?1
+               AND accounting_validation_revision = ?3",
         )
         .bind(ROW_VALIDATION_REVISION)
         .bind(OWNED_ROW_WRITE_REVISION)
+        .bind(ACCOUNTING_VALIDATION_REVISION)
+        .bind(OWNED_ACCOUNTING_WRITE_REVISION)
         .execute(&mut *conn)
         .await?;
         if updated.rows_affected() != 1 {
@@ -923,12 +1035,17 @@ impl Store {
     async fn mark_row_writes_validated(conn: &mut SqliteConnection) -> StoreResult<()> {
         let updated = sqlx::query(
             "UPDATE store_integrity
-             SET row_validation_revision = ?1, validated_at_ms = ?2
-             WHERE singleton = 1 AND row_validation_revision = ?3",
+             SET row_validation_revision = ?1,
+                 accounting_validation_revision = ?4,
+                 validated_at_ms = ?2
+             WHERE singleton = 1 AND row_validation_revision = ?3
+               AND accounting_validation_revision = ?5",
         )
         .bind(ROW_VALIDATION_REVISION)
         .bind(now_ms())
         .bind(OWNED_ROW_WRITE_REVISION)
+        .bind(ACCOUNTING_VALIDATION_REVISION)
+        .bind(OWNED_ACCOUNTING_WRITE_REVISION)
         .execute(&mut *conn)
         .await?;
         if updated.rows_affected() != 1 {
@@ -942,8 +1059,11 @@ impl Store {
     async fn create_indexes(conn: &mut SqliteConnection) -> StoreResult<()> {
         Self::ensure_integrity_state(conn).await?;
         Self::ensure_retention_tombstones(conn).await?;
-        Self::ensure_storage_accounting(conn).await?;
+        ensure_admitted_memory_column(conn, false).await?;
+        let accounting_guards_were_current = accounting_guards_current(conn).await?;
+        drop_accounting_guard_triggers(conn).await?;
         Self::ensure_idempotency_keys(conn).await?;
+        Self::ensure_storage_accounting(conn, accounting_guards_were_current).await?;
         // These non-covering v2-development indexes can force SQLite to walk
         // large table-record overflow chains for lifecycle columns stored
         // after the JSON payloads. Replace them transactionally with indexes
@@ -953,6 +1073,7 @@ impl Store {
             "idx_jobs_tenant_status_created",
             "idx_jobs_tenant_language_created",
             "idx_jobs_status",
+            "idx_jobs_status_created_recovery",
         ] {
             sqlx::query(&format!("DROP INDEX IF EXISTS {stale_index}"))
                 .execute(&mut *conn)
@@ -980,8 +1101,8 @@ impl Store {
                  job_id, tenant, language, status, created_at_ms,
                  started_at_ms, finished_at_ms, exit_code
              )",
-            "CREATE INDEX IF NOT EXISTS idx_jobs_status_created_recovery ON jobs(
-                 status, created_at_ms ASC, job_id ASC, tenant
+            "CREATE INDEX IF NOT EXISTS idx_jobs_status_created_recovery_v3 ON jobs(
+                 status, created_at_ms ASC, job_id ASC, tenant, admitted_mem_mb
              )",
             "CREATE INDEX IF NOT EXISTS idx_jobs_retention ON jobs(finished_at_ms, job_id) WHERE finished_at_ms IS NOT NULL",
         ] {
@@ -991,12 +1112,14 @@ impl Store {
         Ok(())
     }
 
-    async fn ensure_storage_accounting(conn: &mut SqliteConnection) -> StoreResult<()> {
+    async fn ensure_storage_accounting(
+        conn: &mut SqliteConnection,
+        guards_were_current: bool,
+    ) -> StoreResult<()> {
         let existed = table_exists(conn, "job_storage_usage").await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS job_storage_usage (
-                 job_id TEXT PRIMARY KEY NOT NULL
-                     REFERENCES jobs(job_id) ON DELETE CASCADE,
+                 job_id TEXT PRIMARY KEY NOT NULL,
                  tenant TEXT NOT NULL
                      CHECK (typeof(tenant) = 'text' AND length(trim(tenant)) > 0),
                  retained_bytes INTEGER NOT NULL
@@ -1005,11 +1128,14 @@ impl Store {
                      CHECK (typeof(reserved_bytes) = 'integer' AND reserved_bytes >= 0),
                  requested_mem_mb INTEGER NOT NULL
                      CHECK (typeof(requested_mem_mb) = 'integer'
-                            AND requested_mem_mb BETWEEN 1 AND 4096)
+                            AND requested_mem_mb BETWEEN 16 AND 4096),
+                 FOREIGN KEY(tenant, job_id)
+                     REFERENCES jobs(tenant, job_id) ON DELETE CASCADE
              )",
         )
         .execute(&mut *conn)
         .await?;
+        upgrade_job_storage_fk_if_needed(conn).await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS storage_usage_total (
                  singleton INTEGER PRIMARY KEY
@@ -1091,11 +1217,7 @@ impl Store {
                               FROM events AS event WHERE event.job_id = job.job_id
                             ), 0),
                         CASE WHEN job.status IN ('queued','running') THEN ?1 ELSE 0 END,
-                        CASE
-                            WHEN json_type(job.spec_json, '$.limits.mem_mb') = 'integer'
-                            THEN MIN(MAX(CAST(json_extract(job.spec_json, '$.limits.mem_mb') AS INTEGER), 1), 4096)
-                            ELSE 256
-                        END
+                        job.admitted_mem_mb
                  FROM jobs AS job",
             )
             .bind(JOB_COMPLETION_RESERVE_BYTES as i64)
@@ -1127,54 +1249,27 @@ impl Store {
         )
         .execute(&mut *conn)
         .await?;
-        for trigger in [
-            "coop_usage_aggregate_insert",
-            "coop_usage_aggregate_update",
-            "coop_usage_aggregate_delete",
-        ] {
-            sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger}"))
-                .execute(&mut *conn)
-                .await?;
+
+        let row_validation_current = Self::row_validation_current(conn).await?;
+        let accounting_validation_current = Self::accounting_validation_current(conn).await?;
+        let rebuilt = !existed || !row_validation_current;
+        let requires_full_validation = rebuilt || !guards_were_current;
+        if !accounting_validation_current && guards_were_current && !rebuilt {
+            return Err(sqlx::Error::Protocol(
+                "logical storage/idempotency accounting was modified outside an owned write"
+                    .to_string(),
+            ));
         }
-        for statement in [
-            "CREATE TRIGGER coop_usage_aggregate_insert
-             AFTER INSERT ON job_storage_usage BEGIN
-                 UPDATE storage_usage_total
-                 SET charged_bytes = charged_bytes + NEW.retained_bytes + NEW.reserved_bytes
-                 WHERE singleton = 1;
-                 INSERT INTO tenant_storage_usage(tenant, charged_bytes)
-                 VALUES (NEW.tenant, NEW.retained_bytes + NEW.reserved_bytes)
-                 ON CONFLICT(tenant) DO UPDATE SET
-                     charged_bytes = charged_bytes + excluded.charged_bytes;
-             END",
-            "CREATE TRIGGER coop_usage_aggregate_update
-             AFTER UPDATE OF retained_bytes, reserved_bytes ON job_storage_usage BEGIN
-                 UPDATE storage_usage_total
-                 SET charged_bytes = charged_bytes
-                     + (NEW.retained_bytes + NEW.reserved_bytes)
-                     - (OLD.retained_bytes + OLD.reserved_bytes)
-                 WHERE singleton = 1;
-                 UPDATE tenant_storage_usage
-                 SET charged_bytes = charged_bytes
-                     + (NEW.retained_bytes + NEW.reserved_bytes)
-                     - (OLD.retained_bytes + OLD.reserved_bytes)
-                 WHERE tenant = NEW.tenant;
-             END",
-            "CREATE TRIGGER coop_usage_aggregate_delete
-             AFTER DELETE ON job_storage_usage BEGIN
-                 UPDATE storage_usage_total
-                 SET charged_bytes = charged_bytes - OLD.retained_bytes - OLD.reserved_bytes
-                 WHERE singleton = 1;
-                 UPDATE tenant_storage_usage
-                 SET charged_bytes = charged_bytes - OLD.retained_bytes - OLD.reserved_bytes
-                 WHERE tenant = OLD.tenant;
-                 DELETE FROM tenant_storage_usage
-                 WHERE tenant = OLD.tenant AND charged_bytes = 0;
-             END",
-        ] {
-            sqlx::query(statement).execute(&mut *conn).await?;
+        if requires_full_validation || !accounting_validation_current {
+            Self::validate_storage_accounting_full(conn).await?;
+        } else {
+            Self::validate_storage_accounting_fast(conn).await?;
         }
-        Self::validate_storage_accounting(conn).await
+        create_accounting_guard_triggers(conn).await?;
+        if requires_full_validation || !accounting_validation_current {
+            Self::record_accounting_validation(conn).await?;
+        }
+        Ok(())
     }
 
     async fn ensure_idempotency_keys(conn: &mut SqliteConnection) -> StoreResult<()> {
@@ -1202,14 +1297,17 @@ impl Store {
                             AND length(idempotency_key) BETWEEN 1 AND 128),
                  request_sha256 TEXT NOT NULL
                      CHECK (typeof(request_sha256) = 'text' AND length(request_sha256) = 64),
-                 job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+                 job_id TEXT NOT NULL,
                  created_at_ms INTEGER NOT NULL
                      CHECK (typeof(created_at_ms) = 'integer' AND created_at_ms >= 0),
-                 PRIMARY KEY(tenant, idempotency_key)
+                 PRIMARY KEY(tenant, idempotency_key),
+                 FOREIGN KEY(tenant, job_id)
+                     REFERENCES jobs(tenant, job_id) ON DELETE CASCADE
              ) WITHOUT ROWID",
         )
         .execute(&mut *conn)
         .await?;
+        upgrade_idempotency_fk_if_needed(conn).await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_idempotency_job ON idempotency_keys(job_id)")
             .execute(&mut *conn)
             .await?;
@@ -1228,13 +1326,14 @@ impl Store {
         Ok(())
     }
 
-    async fn validate_storage_accounting(conn: &mut SqliteConnection) -> StoreResult<()> {
+    async fn validate_storage_accounting_full(conn: &mut SqliteConnection) -> StoreResult<()> {
         let invalid: i64 = sqlx::query(
             "SELECT EXISTS(
                  SELECT 1
                  FROM jobs AS job
                  LEFT JOIN job_storage_usage AS usage ON usage.job_id = job.job_id
                  WHERE usage.job_id IS NULL OR usage.tenant != job.tenant
+                    OR usage.requested_mem_mb != job.admitted_mem_mb
                     OR usage.retained_bytes != (
                         64
                         + length(CAST(job.job_id AS BLOB))
@@ -1299,6 +1398,40 @@ impl Store {
         if global_valid == 0 || tenants_invalid != 0 {
             return Err(sqlx::Error::Protocol(
                 "logical storage aggregate counters are inconsistent".to_string(),
+            ));
+        }
+        validate_v3_foreign_keys_and_tenants(conn).await?;
+        validate_idempotency_fingerprints(conn).await?;
+        Ok(())
+    }
+
+    async fn validate_storage_accounting_fast(conn: &mut SqliteConnection) -> StoreResult<()> {
+        // Exact owned-trigger definitions plus the durable clean revision are
+        // the healthy-open proof. Content joins/sums here would turn every
+        // restart back into O(jobs), while events/spec scans are substantially
+        // worse. The bounded schema checks still reject weakened FKs/indexes;
+        // any content mutation under intact guards dirties the revision and is
+        // rejected above or routed through the full validator.
+        validate_v3_foreign_key_schema(conn).await
+    }
+
+    async fn record_accounting_validation(conn: &mut SqliteConnection) -> StoreResult<()> {
+        let updated = sqlx::query(
+            "UPDATE store_integrity
+             SET accounting_validation_revision = ?1, validated_at_ms = ?2
+             WHERE singleton = 1",
+        )
+        .bind(ACCOUNTING_VALIDATION_REVISION)
+        .bind(now_ms())
+        .execute(&mut *conn)
+        .await?;
+        // A brand-new database records the combined row/accounting revision
+        // immediately after create_indexes. There is no singleton row yet in
+        // that path, so zero affected rows deliberately defers to
+        // record_row_validation's atomic upsert.
+        if updated.rows_affected() > 1 {
+            return Err(sqlx::Error::Protocol(
+                "accounting validation updated multiple singleton rows".to_string(),
             ));
         }
         Ok(())
@@ -1383,6 +1516,7 @@ impl Store {
                 RequiredColumn::not_null("language", "TEXT"),
                 RequiredColumn::not_null("status", "TEXT"),
                 RequiredColumn::not_null("spec_json", "TEXT"),
+                RequiredColumn::not_null("admitted_mem_mb", "INTEGER"),
                 RequiredColumn::nullable("effective_spec_json", "TEXT"),
                 RequiredColumn::nullable("receipt_json", "TEXT"),
                 RequiredColumn::not_null("created_at_ms", "INTEGER"),
@@ -1449,6 +1583,8 @@ impl Store {
                     OR typeof(status) != 'text'
                     OR status NOT IN ('queued','running','succeeded','failed','timed_out','oom_killed','cancelled','error')
                     OR typeof(spec_json) != 'text' OR NOT json_valid(spec_json)
+                    OR typeof(admitted_mem_mb) != 'integer'
+                    OR admitted_mem_mb NOT BETWEEN 16 AND 4096
                     OR (effective_spec_json IS NOT NULL AND
                         (typeof(effective_spec_json) != 'text' OR NOT json_valid(effective_spec_json)))
                     OR (receipt_json IS NOT NULL AND
@@ -1604,7 +1740,7 @@ impl Store {
         sqlx::query(
             "INSERT INTO jobs (
                 job_id, tenant, language, status, spec_json,
-                effective_spec_json, receipt_json, created_at_ms,
+                admitted_mem_mb, effective_spec_json, receipt_json, created_at_ms,
                 started_at_ms, finished_at_ms, exit_code
              )
              SELECT
@@ -1624,6 +1760,12 @@ impl Store {
                               THEN 'blob:hex:' || hex(spec_json)
                               ELSE CAST(spec_json AS TEXT) END
                      ) END,
+                CASE
+                    WHEN typeof(spec_json) = 'text' AND json_valid(spec_json)
+                         AND json_type(spec_json, '$.limits.mem_mb') = 'integer'
+                    THEN MIN(MAX(CAST(json_extract(spec_json, '$.limits.mem_mb') AS INTEGER), 16), 4096)
+                    ELSE 256
+                END,
                 NULL,
                 NULL,
                 CASE WHEN typeof(created_at_ms) = 'integer' AND created_at_ms >= 0
@@ -1845,11 +1987,11 @@ impl Store {
             "status": "queued",
             "tenant": tenant,
             "language": language,
-            "requested_spec_sha256": requested_spec_sha256,
+            "requested_spec_sha256": requested_spec_sha256.clone(),
         });
-        if !(1..=4096).contains(&requested_mem_mb) {
+        if !(16..=4096).contains(&requested_mem_mb) {
             return Err(sqlx::Error::InvalidArgument(
-                "requested_mem_mb must be between 1 and 4096".to_string(),
+                "requested_mem_mb must be between 16 and 4096".to_string(),
             ));
         }
         if let Some(request) = idempotency {
@@ -1867,6 +2009,11 @@ impl Store {
             {
                 return Err(sqlx::Error::InvalidArgument(
                     "invalid idempotency key or canonical request fingerprint".to_string(),
+                ));
+            }
+            if request.request_sha256 != requested_spec_sha256 {
+                return Err(sqlx::Error::InvalidArgument(
+                    "idempotency fingerprint does not match canonical spec_json".to_string(),
                 ));
             }
         }
@@ -1910,13 +2057,15 @@ impl Store {
         .await?;
         sqlx::query(
             "INSERT INTO jobs (
-                job_id, tenant, language, status, spec_json, created_at_ms
-             ) VALUES (?1, ?2, ?3, 'queued', ?4, ?5)",
+                job_id, tenant, language, status, spec_json,
+                admitted_mem_mb, created_at_ms
+             ) VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6)",
         )
         .bind(job_id)
         .bind(tenant)
         .bind(language)
         .bind(spec_json)
+        .bind(i64::from(requested_mem_mb))
         .bind(created_at)
         .execute(&mut *tx)
         .await?;
@@ -2528,12 +2677,11 @@ impl Store {
     }
 
     pub async fn job_requested_mem_mb(&self, job_id: &str) -> StoreResult<Option<u32>> {
-        let value = sqlx::query_scalar::<_, i64>(
-            "SELECT requested_mem_mb FROM job_storage_usage WHERE job_id = ?1",
-        )
-        .bind(job_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let value =
+            sqlx::query_scalar::<_, i64>("SELECT admitted_mem_mb FROM jobs WHERE job_id = ?1")
+                .bind(job_id)
+                .fetch_optional(&self.pool)
+                .await?;
         value
             .map(|value| {
                 u32::try_from(value).map_err(|_| {
@@ -3116,6 +3264,321 @@ async fn schema_has_v2_extensions(conn: &mut SqliteConnection) -> StoreResult<bo
     Ok(false)
 }
 
+async fn physical_v3_table_count(conn: &mut SqliteConnection) -> StoreResult<usize> {
+    let mut count = 0_usize;
+    for table in [
+        "job_storage_usage",
+        "storage_usage_total",
+        "tenant_storage_usage",
+        "idempotency_keys",
+    ] {
+        count += usize::from(table_exists(conn, table).await?);
+    }
+    Ok(count)
+}
+
+async fn ensure_admitted_memory_column(
+    conn: &mut SqliteConnection,
+    preserve_v3_value: bool,
+) -> StoreResult<()> {
+    if !column_exists(conn, "jobs", "admitted_mem_mb").await? {
+        sqlx::query(
+            "ALTER TABLE jobs
+             ADD COLUMN admitted_mem_mb INTEGER NOT NULL DEFAULT 256
+             CHECK (typeof(admitted_mem_mb) = 'integer'
+                    AND admitted_mem_mb BETWEEN 16 AND 4096)",
+        )
+        .execute(&mut *conn)
+        .await?;
+        if preserve_v3_value {
+            let missing: i64 = sqlx::query(
+                "SELECT EXISTS(
+                     SELECT 1 FROM jobs
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM job_storage_usage
+                         WHERE job_storage_usage.job_id = jobs.job_id
+                           AND job_storage_usage.tenant = jobs.tenant
+                     )
+                 ) AS missing",
+            )
+            .fetch_one(&mut *conn)
+            .await?
+            .try_get("missing")?;
+            if missing != 0 {
+                return Err(sqlx::Error::Protocol(
+                    "v3 accounting is missing a durable admitted-memory value".to_string(),
+                ));
+            }
+            sqlx::query(
+                "UPDATE jobs
+                 SET admitted_mem_mb = MIN(MAX((
+                     SELECT requested_mem_mb FROM job_storage_usage
+                     WHERE job_storage_usage.job_id = jobs.job_id
+                       AND job_storage_usage.tenant = jobs.tenant
+                 ), 16), 4096)",
+            )
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                "UPDATE job_storage_usage
+                 SET requested_mem_mb = MIN(MAX(requested_mem_mb, 16), 4096)",
+            )
+            .execute(&mut *conn)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE jobs SET admitted_mem_mb = CASE
+                     WHEN json_type(spec_json, '$.limits.mem_mb') = 'integer'
+                     THEN MIN(MAX(CAST(json_extract(spec_json, '$.limits.mem_mb') AS INTEGER), 16), 4096)
+                     ELSE 256
+                 END",
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_tenant_id_unique
+         ON jobs(tenant, job_id)",
+    )
+    .execute(&mut *conn)
+    .await?;
+    validate_jobs_tenant_unique_index(conn).await?;
+    Ok(())
+}
+
+async fn validate_jobs_tenant_unique_index(conn: &mut SqliteConnection) -> StoreResult<()> {
+    let indexes = sqlx::query("PRAGMA index_list(jobs)")
+        .fetch_all(&mut *conn)
+        .await?;
+    let Some(index) = indexes
+        .iter()
+        .find(|row| row.get::<String, _>("name") == "idx_jobs_tenant_id_unique")
+    else {
+        return Err(sqlx::Error::Protocol(
+            "jobs is missing the tenant/job unique parent key".to_string(),
+        ));
+    };
+    if index.get::<i64, _>("unique") != 1 || index.get::<i64, _>("partial") != 0 {
+        return Err(sqlx::Error::Protocol(
+            "jobs tenant/job parent index must be unique and non-partial".to_string(),
+        ));
+    }
+    let columns = sqlx::query("PRAGMA index_info(idx_jobs_tenant_id_unique)")
+        .fetch_all(&mut *conn)
+        .await?;
+    let names = columns
+        .iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect::<Vec<_>>();
+    if names != ["tenant", "job_id"] {
+        return Err(sqlx::Error::Protocol(
+            "jobs tenant/job parent index has the wrong column order".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn exact_composite_job_fk(conn: &mut SqliteConnection, table: &str) -> StoreResult<bool> {
+    let rows = sqlx::query(&format!("PRAGMA foreign_key_list({table})"))
+        .fetch_all(&mut *conn)
+        .await?;
+    if rows.len() != 2 {
+        return Ok(false);
+    }
+    let id = rows[0].get::<i64, _>("id");
+    Ok(rows.iter().all(|row| {
+        row.get::<i64, _>("id") == id
+            && row.get::<String, _>("table") == "jobs"
+            && row
+                .get::<String, _>("on_delete")
+                .eq_ignore_ascii_case("CASCADE")
+            && row
+                .get::<String, _>("on_update")
+                .eq_ignore_ascii_case("NO ACTION")
+    }) && rows.iter().any(|row| {
+        row.get::<String, _>("from") == "tenant" && row.get::<String, _>("to") == "tenant"
+    }) && rows.iter().any(|row| {
+        row.get::<String, _>("from") == "job_id" && row.get::<String, _>("to") == "job_id"
+    }))
+}
+
+async fn exact_legacy_job_fk(conn: &mut SqliteConnection, table: &str) -> StoreResult<bool> {
+    let rows = sqlx::query(&format!("PRAGMA foreign_key_list({table})"))
+        .fetch_all(&mut *conn)
+        .await?;
+    Ok(rows.len() == 1
+        && rows[0].get::<String, _>("table") == "jobs"
+        && rows[0].get::<String, _>("from") == "job_id"
+        && rows[0].get::<String, _>("to") == "job_id"
+        && rows[0]
+            .get::<String, _>("on_delete")
+            .eq_ignore_ascii_case("CASCADE"))
+}
+
+async fn upgrade_job_storage_fk_if_needed(conn: &mut SqliteConnection) -> StoreResult<()> {
+    if exact_composite_job_fk(conn, "job_storage_usage").await? {
+        return Ok(());
+    }
+    if !exact_legacy_job_fk(conn, "job_storage_usage").await? {
+        return Err(sqlx::Error::Protocol(
+            "job_storage_usage has an unexpected foreign-key definition".to_string(),
+        ));
+    }
+    sqlx::query(
+        "CREATE TABLE job_storage_usage_v3 (
+             job_id TEXT PRIMARY KEY NOT NULL,
+             tenant TEXT NOT NULL
+                 CHECK (typeof(tenant) = 'text' AND length(trim(tenant)) > 0),
+             retained_bytes INTEGER NOT NULL
+                 CHECK (typeof(retained_bytes) = 'integer' AND retained_bytes >= 0),
+             reserved_bytes INTEGER NOT NULL
+                 CHECK (typeof(reserved_bytes) = 'integer' AND reserved_bytes >= 0),
+             requested_mem_mb INTEGER NOT NULL
+                 CHECK (typeof(requested_mem_mb) = 'integer'
+                        AND requested_mem_mb BETWEEN 16 AND 4096),
+             FOREIGN KEY(tenant, job_id)
+                 REFERENCES jobs(tenant, job_id) ON DELETE CASCADE
+         )",
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT INTO job_storage_usage_v3(
+             job_id, tenant, retained_bytes, reserved_bytes, requested_mem_mb
+         )
+         SELECT job_id, tenant, retained_bytes, reserved_bytes,
+                MIN(MAX(requested_mem_mb, 16), 4096)
+         FROM job_storage_usage",
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("DROP TABLE job_storage_usage")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("ALTER TABLE job_storage_usage_v3 RENAME TO job_storage_usage")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+async fn upgrade_idempotency_fk_if_needed(conn: &mut SqliteConnection) -> StoreResult<()> {
+    if exact_composite_job_fk(conn, "idempotency_keys").await? {
+        return Ok(());
+    }
+    if !exact_legacy_job_fk(conn, "idempotency_keys").await? {
+        return Err(sqlx::Error::Protocol(
+            "idempotency_keys has an unexpected foreign-key definition".to_string(),
+        ));
+    }
+    sqlx::query(
+        "CREATE TABLE idempotency_keys_v3 (
+             tenant TEXT NOT NULL
+                 CHECK (typeof(tenant) = 'text' AND length(trim(tenant)) > 0),
+             idempotency_key TEXT NOT NULL
+                 CHECK (typeof(idempotency_key) = 'text'
+                        AND length(idempotency_key) BETWEEN 1 AND 128),
+             request_sha256 TEXT NOT NULL
+                 CHECK (typeof(request_sha256) = 'text' AND length(request_sha256) = 64),
+             job_id TEXT NOT NULL,
+             created_at_ms INTEGER NOT NULL
+                 CHECK (typeof(created_at_ms) = 'integer' AND created_at_ms >= 0),
+             PRIMARY KEY(tenant, idempotency_key),
+             FOREIGN KEY(tenant, job_id)
+                 REFERENCES jobs(tenant, job_id) ON DELETE CASCADE
+         ) WITHOUT ROWID",
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT INTO idempotency_keys_v3(
+             tenant, idempotency_key, request_sha256, job_id, created_at_ms
+         )
+         SELECT tenant, idempotency_key, request_sha256, job_id, created_at_ms
+         FROM idempotency_keys",
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("DROP TABLE idempotency_keys")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("ALTER TABLE idempotency_keys_v3 RENAME TO idempotency_keys")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+async fn validate_v3_foreign_keys_and_tenants(conn: &mut SqliteConnection) -> StoreResult<()> {
+    validate_v3_foreign_key_schema(conn).await?;
+    let inconsistent: i64 = sqlx::query(
+        "SELECT EXISTS(
+             SELECT 1 FROM job_storage_usage AS usage
+             LEFT JOIN jobs AS job
+               ON job.tenant = usage.tenant AND job.job_id = usage.job_id
+             WHERE job.job_id IS NULL
+         ) OR EXISTS(
+             SELECT 1 FROM idempotency_keys AS mapping
+             LEFT JOIN jobs AS job
+               ON job.tenant = mapping.tenant AND job.job_id = mapping.job_id
+             WHERE job.job_id IS NULL
+         ) AS inconsistent",
+    )
+    .fetch_one(&mut *conn)
+    .await?
+    .try_get("inconsistent")?;
+    if inconsistent != 0 {
+        return Err(sqlx::Error::Protocol(
+            "v3 accounting/idempotency tenant ownership is inconsistent".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_v3_foreign_key_schema(conn: &mut SqliteConnection) -> StoreResult<()> {
+    validate_jobs_tenant_unique_index(conn).await?;
+    if !exact_composite_job_fk(conn, "job_storage_usage").await?
+        || !exact_composite_job_fk(conn, "idempotency_keys").await?
+    {
+        return Err(sqlx::Error::Protocol(
+            "v3 accounting/idempotency tables require exact composite cascading job foreign keys"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_idempotency_fingerprints(conn: &mut SqliteConnection) -> StoreResult<()> {
+    let mut rows = sqlx::query(
+        "SELECT mapping.idempotency_key, mapping.request_sha256,
+                mapping.created_at_ms, job.spec_json
+         FROM idempotency_keys AS mapping
+         INNER JOIN jobs AS job
+           ON job.tenant = mapping.tenant AND job.job_id = mapping.job_id",
+    )
+    .fetch(&mut *conn);
+    while let Some(row) = rows.try_next().await? {
+        let key: String = row.try_get("idempotency_key")?;
+        let fingerprint: String = row.try_get("request_sha256")?;
+        let created_at_ms: i64 = row.try_get("created_at_ms")?;
+        let spec_json: String = row.try_get("spec_json")?;
+        let spec: Value = serde_json::from_str(&spec_json)
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+        let expected = sha256_hex(canonical_json(&spec).as_bytes());
+        if key.is_empty()
+            || key.len() > 128
+            || !key.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+            || fingerprint != expected
+            || created_at_ms < 0
+        {
+            return Err(sqlx::Error::Protocol(
+                "idempotency mapping is incompatible with its canonical job specification"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn validated_event_sequence_counter(
     conn: &mut SqliteConnection,
     events_table: &str,
@@ -3224,6 +3687,7 @@ async fn storage_guards_current(conn: &mut SqliteConnection) -> StoreResult<bool
          WHERE type = 'trigger' AND name IN (
              'coop_schema_migrations_storage_guard_insert',
              'coop_schema_migrations_storage_guard_update',
+             'coop_schema_migrations_storage_guard_delete',
              'coop_jobs_storage_guard_insert',
              'coop_jobs_storage_guard_update',
              'coop_events_storage_guard_insert',
@@ -3241,9 +3705,258 @@ async fn storage_guards_current(conn: &mut SqliteConnection) -> StoreResult<bool
     .await?;
     Ok(rows.len() == STORAGE_GUARD_NAMES.len()
         && rows.iter().all(|row| {
-            row.try_get::<String, _>("sql")
-                .is_ok_and(|sql| sql.contains(STORAGE_GUARD_REVISION_MARKER))
+            let Ok(name) = row.try_get::<String, _>("name") else {
+                return false;
+            };
+            let Ok(sql) = row.try_get::<String, _>("sql") else {
+                return false;
+            };
+            sql.contains(STORAGE_GUARD_REVISION_MARKER)
+                && match name.as_str() {
+                    "coop_schema_migrations_storage_guard_update" => {
+                        sql.contains("NEW.version != OLD.version")
+                    }
+                    "coop_schema_migrations_storage_guard_delete" => {
+                        sql.contains("BEFORE DELETE ON schema_migrations")
+                    }
+                    "coop_jobs_storage_guard_update" => {
+                        sql.contains("NEW.job_id != OLD.job_id")
+                            && sql.contains("NEW.admitted_mem_mb != OLD.admitted_mem_mb")
+                    }
+                    "coop_events_storage_guard_update" => {
+                        sql.contains("NEW.seq != OLD.seq") && sql.contains("OLD.hash_version = 1")
+                    }
+                    name if name.contains("validation_dirty") => {
+                        sql.contains("accounting_validation_revision = 0")
+                    }
+                    _ => true,
+                }
         }))
+}
+
+fn normalize_trigger_sql(sql: &str) -> String {
+    sql.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn accounting_trigger_statements() -> [&'static str; 26] {
+    [
+        "CREATE TRIGGER coop_usage_aggregate_insert
+         AFTER INSERT ON job_storage_usage
+         WHEN 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1' BEGIN
+             UPDATE storage_usage_total
+             SET charged_bytes = charged_bytes + NEW.retained_bytes + NEW.reserved_bytes
+             WHERE singleton = 1;
+             INSERT INTO tenant_storage_usage(tenant, charged_bytes)
+             VALUES (NEW.tenant, NEW.retained_bytes + NEW.reserved_bytes)
+             ON CONFLICT(tenant) DO UPDATE SET
+                 charged_bytes = charged_bytes + excluded.charged_bytes;
+         END",
+        "CREATE TRIGGER coop_usage_aggregate_update
+         AFTER UPDATE OF retained_bytes, reserved_bytes ON job_storage_usage
+         WHEN 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1' BEGIN
+             UPDATE storage_usage_total
+             SET charged_bytes = charged_bytes
+                 + (NEW.retained_bytes + NEW.reserved_bytes)
+                 - (OLD.retained_bytes + OLD.reserved_bytes)
+             WHERE singleton = 1;
+             UPDATE tenant_storage_usage
+             SET charged_bytes = charged_bytes
+                 + (NEW.retained_bytes + NEW.reserved_bytes)
+                 - (OLD.retained_bytes + OLD.reserved_bytes)
+             WHERE tenant = NEW.tenant;
+         END",
+        "CREATE TRIGGER coop_usage_aggregate_delete
+         AFTER DELETE ON job_storage_usage
+         WHEN 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1' BEGIN
+             UPDATE storage_usage_total
+             SET charged_bytes = charged_bytes - OLD.retained_bytes - OLD.reserved_bytes
+             WHERE singleton = 1;
+             UPDATE tenant_storage_usage
+             SET charged_bytes = charged_bytes - OLD.retained_bytes - OLD.reserved_bytes
+             WHERE tenant = OLD.tenant;
+             DELETE FROM tenant_storage_usage
+             WHERE tenant = OLD.tenant AND charged_bytes = 0;
+         END",
+        "CREATE TRIGGER coop_job_storage_guard_insert
+         BEFORE INSERT ON job_storage_usage
+         WHEN typeof(NEW.job_id) != 'text' OR length(trim(NEW.job_id)) = 0
+           OR typeof(NEW.tenant) != 'text' OR length(trim(NEW.tenant)) = 0
+           OR typeof(NEW.retained_bytes) != 'integer' OR NEW.retained_bytes < 0
+           OR typeof(NEW.reserved_bytes) != 'integer' OR NEW.reserved_bytes < 0
+           OR typeof(NEW.requested_mem_mb) != 'integer'
+           OR NEW.requested_mem_mb NOT BETWEEN 16 AND 4096
+         BEGIN
+             SELECT RAISE(ABORT, 'invalid job_storage_usage [coop-accounting-guard-r1]');
+         END",
+        "CREATE TRIGGER coop_job_storage_guard_update
+         BEFORE UPDATE ON job_storage_usage
+         WHEN NEW.job_id != OLD.job_id OR NEW.tenant != OLD.tenant
+           OR NEW.requested_mem_mb != OLD.requested_mem_mb
+           OR typeof(NEW.retained_bytes) != 'integer' OR NEW.retained_bytes < 0
+           OR typeof(NEW.reserved_bytes) != 'integer' OR NEW.reserved_bytes < 0
+         BEGIN
+             SELECT RAISE(ABORT, 'immutable or invalid job_storage_usage [coop-accounting-guard-r1]');
+         END",
+        "CREATE TRIGGER coop_job_storage_dirty_insert AFTER INSERT ON job_storage_usage BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_job_storage_dirty_update AFTER UPDATE ON job_storage_usage BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_job_storage_dirty_delete AFTER DELETE ON job_storage_usage BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_total_storage_guard_insert BEFORE INSERT ON storage_usage_total
+         WHEN typeof(NEW.singleton) != 'integer' OR NEW.singleton != 1
+           OR typeof(NEW.charged_bytes) != 'integer' OR NEW.charged_bytes < 0
+         BEGIN
+             SELECT RAISE(ABORT, 'invalid storage_usage_total [coop-accounting-guard-r1]');
+         END",
+        "CREATE TRIGGER coop_total_storage_guard_update BEFORE UPDATE ON storage_usage_total
+         WHEN NEW.singleton != OLD.singleton
+           OR typeof(NEW.charged_bytes) != 'integer' OR NEW.charged_bytes < 0
+         BEGIN
+             SELECT RAISE(ABORT, 'immutable or invalid storage_usage_total [coop-accounting-guard-r1]');
+         END",
+        "CREATE TRIGGER coop_total_storage_dirty_insert AFTER INSERT ON storage_usage_total BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_total_storage_dirty_update AFTER UPDATE ON storage_usage_total BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_total_storage_dirty_delete AFTER DELETE ON storage_usage_total BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_tenant_storage_guard_insert BEFORE INSERT ON tenant_storage_usage
+         WHEN typeof(NEW.tenant) != 'text' OR length(trim(NEW.tenant)) = 0
+           OR typeof(NEW.charged_bytes) != 'integer' OR NEW.charged_bytes < 0
+         BEGIN
+             SELECT RAISE(ABORT, 'invalid tenant_storage_usage [coop-accounting-guard-r1]');
+         END",
+        "CREATE TRIGGER coop_tenant_storage_guard_update BEFORE UPDATE ON tenant_storage_usage
+         WHEN NEW.tenant != OLD.tenant
+           OR typeof(NEW.charged_bytes) != 'integer' OR NEW.charged_bytes < 0
+         BEGIN
+             SELECT RAISE(ABORT, 'immutable or invalid tenant_storage_usage [coop-accounting-guard-r1]');
+         END",
+        "CREATE TRIGGER coop_tenant_storage_dirty_insert AFTER INSERT ON tenant_storage_usage BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_tenant_storage_dirty_update AFTER UPDATE ON tenant_storage_usage BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_tenant_storage_dirty_delete AFTER DELETE ON tenant_storage_usage BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_idempotency_storage_guard_insert BEFORE INSERT ON idempotency_keys
+         WHEN typeof(NEW.tenant) != 'text' OR length(trim(NEW.tenant)) = 0
+           OR typeof(NEW.idempotency_key) != 'text'
+           OR length(NEW.idempotency_key) NOT BETWEEN 1 AND 128
+           OR typeof(NEW.request_sha256) != 'text' OR length(NEW.request_sha256) != 64
+           OR NEW.request_sha256 GLOB '*[^0-9a-f]*'
+           OR typeof(NEW.job_id) != 'text' OR length(trim(NEW.job_id)) = 0
+           OR typeof(NEW.created_at_ms) != 'integer' OR NEW.created_at_ms < 0
+         BEGIN
+             SELECT RAISE(ABORT, 'invalid idempotency_keys [coop-accounting-guard-r1]');
+         END",
+        "CREATE TRIGGER coop_idempotency_storage_guard_update BEFORE UPDATE ON idempotency_keys
+         WHEN NEW.tenant != OLD.tenant OR NEW.idempotency_key != OLD.idempotency_key
+           OR NEW.request_sha256 != OLD.request_sha256 OR NEW.job_id != OLD.job_id
+           OR NEW.created_at_ms != OLD.created_at_ms
+         BEGIN
+             SELECT RAISE(ABORT, 'idempotency mapping is immutable [coop-accounting-guard-r1]');
+         END",
+        "CREATE TRIGGER coop_idempotency_dirty_insert AFTER INSERT ON idempotency_keys BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_idempotency_dirty_update AFTER UPDATE ON idempotency_keys BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_idempotency_dirty_delete AFTER DELETE ON idempotency_keys BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_tombstone_dirty_insert AFTER INSERT ON retention_tombstones BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_tombstone_dirty_update AFTER UPDATE ON retention_tombstones BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+        "CREATE TRIGGER coop_tombstone_dirty_delete AFTER DELETE ON retention_tombstones BEGIN
+             UPDATE store_integrity SET accounting_validation_revision = 0
+             WHERE singleton = 1 AND accounting_validation_revision != 2
+               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+         END",
+    ]
+}
+
+async fn accounting_guards_current(conn: &mut SqliteConnection) -> StoreResult<bool> {
+    let rows = sqlx::query("SELECT name, sql FROM sqlite_schema WHERE type = 'trigger'")
+        .fetch_all(&mut *conn)
+        .await?;
+    for expected in accounting_trigger_statements() {
+        let expected_name = expected
+            .split_whitespace()
+            .nth(2)
+            .expect("CREATE TRIGGER name");
+        let Some(row) = rows
+            .iter()
+            .find(|row| row.get::<String, _>("name") == expected_name)
+        else {
+            return Ok(false);
+        };
+        let actual: String = row.try_get("sql")?;
+        if normalize_trigger_sql(&actual) != normalize_trigger_sql(expected) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn drop_accounting_guard_triggers(conn: &mut SqliteConnection) -> StoreResult<()> {
+    for trigger in ACCOUNTING_GUARD_NAMES {
+        sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger}"))
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn create_accounting_guard_triggers(conn: &mut SqliteConnection) -> StoreResult<()> {
+    for statement in accounting_trigger_statements() {
+        sqlx::query(statement).execute(&mut *conn).await?;
+    }
+    Ok(())
 }
 
 async fn validate_foreign_keys(conn: &mut SqliteConnection) -> StoreResult<()> {
@@ -3278,10 +3991,15 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_schema_migrations_storage_guard_update
          BEFORE UPDATE ON schema_migrations
-         WHEN typeof(NEW.version) != 'integer' OR NEW.version <= 0
+         WHEN NEW.version != OLD.version OR NEW.applied_at_ms != OLD.applied_at_ms
+           OR typeof(NEW.version) != 'integer' OR NEW.version <= 0
            OR typeof(NEW.applied_at_ms) != 'integer' OR NEW.applied_at_ms < 0
          BEGIN
              SELECT RAISE(ABORT, 'invalid schema_migrations storage class [coop-storage-guard-r2]');
+         END",
+        "CREATE TRIGGER IF NOT EXISTS coop_schema_migrations_storage_guard_delete
+         BEFORE DELETE ON schema_migrations BEGIN
+             SELECT RAISE(ABORT, 'schema migration history is immutable [coop-storage-guard-r2]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_storage_guard_insert
          BEFORE INSERT ON jobs
@@ -3291,6 +4009,8 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
            OR typeof(NEW.status) != 'text'
            OR NEW.status NOT IN ('queued','running','succeeded','failed','timed_out','oom_killed','cancelled','error')
            OR typeof(NEW.spec_json) != 'text' OR NOT json_valid(NEW.spec_json)
+           OR typeof(NEW.admitted_mem_mb) != 'integer'
+           OR NEW.admitted_mem_mb NOT BETWEEN 16 AND 4096
            OR (NEW.effective_spec_json IS NOT NULL AND
                (typeof(NEW.effective_spec_json) != 'text' OR NOT json_valid(NEW.effective_spec_json)))
            OR (NEW.receipt_json IS NOT NULL AND
@@ -3313,12 +4033,18 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_storage_guard_update
          BEFORE UPDATE ON jobs
-         WHEN typeof(NEW.job_id) != 'text' OR length(trim(NEW.job_id)) = 0
+         WHEN NEW.job_id != OLD.job_id OR NEW.tenant != OLD.tenant
+           OR NEW.language != OLD.language OR NEW.spec_json != OLD.spec_json
+           OR NEW.created_at_ms != OLD.created_at_ms
+           OR NEW.admitted_mem_mb != OLD.admitted_mem_mb
+           OR typeof(NEW.job_id) != 'text' OR length(trim(NEW.job_id)) = 0
            OR typeof(NEW.tenant) != 'text' OR length(trim(NEW.tenant)) = 0
            OR typeof(NEW.language) != 'text' OR length(trim(NEW.language)) = 0
            OR typeof(NEW.status) != 'text'
            OR NEW.status NOT IN ('queued','running','succeeded','failed','timed_out','oom_killed','cancelled','error')
            OR typeof(NEW.spec_json) != 'text' OR NOT json_valid(NEW.spec_json)
+           OR typeof(NEW.admitted_mem_mb) != 'integer'
+           OR NEW.admitted_mem_mb NOT BETWEEN 16 AND 4096
            OR (NEW.effective_spec_json IS NOT NULL AND
                (typeof(NEW.effective_spec_json) != 'text' OR NOT json_valid(NEW.effective_spec_json)))
            OR (NEW.receipt_json IS NOT NULL AND
@@ -3354,7 +4080,12 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_storage_guard_update
          BEFORE UPDATE ON events
-         WHEN typeof(NEW.seq) != 'integer'
+         WHEN NEW.seq != OLD.seq OR NEW.job_id != OLD.job_id
+           OR NEW.ts_ms != OLD.ts_ms OR NEW.kind != OLD.kind
+           OR NEW.data_json != OLD.data_json OR NEW.prev_hash != OLD.prev_hash
+           OR (OLD.hash_version = 1 AND
+               (NEW.event_hash != OLD.event_hash OR NEW.hash_version != OLD.hash_version))
+           OR typeof(NEW.seq) != 'integer'
            OR NEW.seq <= 0 OR NEW.seq >= 9223372036854775807
            OR typeof(NEW.job_id) != 'text'
            OR typeof(NEW.ts_ms) != 'integer' OR NEW.ts_ms < 0
@@ -3376,42 +4107,48 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_validation_dirty_insert
          AFTER INSERT ON jobs BEGIN
-             UPDATE store_integrity SET row_validation_revision = 0
+             UPDATE store_integrity
+             SET row_validation_revision = 0, accounting_validation_revision = 0
              WHERE singleton = 1
                AND row_validation_revision != 3
                AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_validation_dirty_update
          AFTER UPDATE ON jobs BEGIN
-             UPDATE store_integrity SET row_validation_revision = 0
+             UPDATE store_integrity
+             SET row_validation_revision = 0, accounting_validation_revision = 0
              WHERE singleton = 1
                AND row_validation_revision != 3
                AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_validation_dirty_delete
          AFTER DELETE ON jobs BEGIN
-             UPDATE store_integrity SET row_validation_revision = 0
+             UPDATE store_integrity
+             SET row_validation_revision = 0, accounting_validation_revision = 0
              WHERE singleton = 1
                AND row_validation_revision != 3
                AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_validation_dirty_insert
          AFTER INSERT ON events BEGIN
-             UPDATE store_integrity SET row_validation_revision = 0
+             UPDATE store_integrity
+             SET row_validation_revision = 0, accounting_validation_revision = 0
              WHERE singleton = 1
                AND row_validation_revision != 3
                AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_validation_dirty_update
          AFTER UPDATE ON events BEGIN
-             UPDATE store_integrity SET row_validation_revision = 0
+             UPDATE store_integrity
+             SET row_validation_revision = 0, accounting_validation_revision = 0
              WHERE singleton = 1
                AND row_validation_revision != 3
                AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_validation_dirty_delete
          AFTER DELETE ON events BEGIN
-             UPDATE store_integrity SET row_validation_revision = 0
+             UPDATE store_integrity
+             SET row_validation_revision = 0, accounting_validation_revision = 0
              WHERE singleton = 1
                AND row_validation_revision != 3
                AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
@@ -3457,6 +4194,9 @@ async fn create_jobs_table(conn: &mut SqliteConnection, table: &str) -> StoreRes
                 CHECK (typeof(status) = 'text' AND status IN ('queued','running','succeeded','failed','timed_out','oom_killed','cancelled','error')),
             spec_json TEXT NOT NULL
                 CHECK (typeof(spec_json) = 'text' AND json_valid(spec_json)),
+            admitted_mem_mb INTEGER NOT NULL
+                CHECK (typeof(admitted_mem_mb) = 'integer'
+                       AND admitted_mem_mb BETWEEN 16 AND 4096),
             effective_spec_json TEXT
                 CHECK (effective_spec_json IS NULL OR (typeof(effective_spec_json) = 'text' AND json_valid(effective_spec_json))),
             receipt_json TEXT
@@ -3474,7 +4214,8 @@ async fn create_jobs_table(conn: &mut SqliteConnection, table: &str) -> StoreRes
             ),
             CHECK (status != 'queued' OR (started_at_ms IS NULL AND finished_at_ms IS NULL)),
             CHECK (status != 'running' OR (started_at_ms IS NOT NULL AND finished_at_ms IS NULL)),
-            CHECK (status IN ('queued','running') OR finished_at_ms IS NOT NULL)
+            CHECK (status IN ('queued','running') OR finished_at_ms IS NOT NULL),
+            UNIQUE(tenant, job_id)
         )"
     );
     sqlx::query(&statement).execute(&mut *conn).await?;
@@ -4076,14 +4817,15 @@ mod query_plan_tests {
                  )
                  INSERT INTO jobs(
                      job_id, tenant, language, status, spec_json,
-                     created_at_ms, finished_at_ms
+                     created_at_ms, finished_at_ms, admitted_mem_mb
                  )
                  SELECT printf('plan-%05d', n),
                         CASE n % 2 WHEN 0 THEN 'tenant-a' ELSE 'tenant-b' END,
                         CASE (n / 2) % 2 WHEN 0 THEN 'python' ELSE 'node' END,
                         CASE (n / 4) % 2 WHEN 0 THEN 'queued' ELSE 'succeeded' END,
                         '{}', n,
-                        CASE (n / 4) % 2 WHEN 0 THEN NULL ELSE n END
+                        CASE (n / 4) % 2 WHEN 0 THEN NULL ELSE n END,
+                        16
                  FROM sequence",
             )
             .execute(&store.pool)

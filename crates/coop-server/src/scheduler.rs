@@ -708,6 +708,10 @@ async fn handle_job(
     // already finalized it. Skip silently; do not consume a worker slot.
     if let Some(status) = JobStatus::parse(&row.status) {
         if status.is_terminal() {
+            // Cancellation may have committed before a delayed scheduler
+            // envelope was received. Close any candidate/recovery channel so
+            // process-local ownership cannot outlive the durable terminal row.
+            state.bus.complete(&job_id);
             queued.release_admission();
             return;
         }
@@ -2058,7 +2062,9 @@ mod admission_tests {
             seccomp: false,
         };
         let store = Arc::new(coop_store::Store::open(&db).await.expect("open test store"));
-        let (_app, state, queue_rx) = crate::build_app(cfg, store).await.expect("build test app");
+        let (_app, state, queue_rx) = crate::build_app(cfg, store, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("build test app");
         (state, queue_rx)
     }
 

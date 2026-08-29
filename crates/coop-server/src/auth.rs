@@ -2052,7 +2052,13 @@ GcZ0izY/30012ajdHY+/QK5lsMoxTnn0skdS+spLxaS5ZEO4qvPVb8RAoCkWMMal
                 .await
                 .unwrap(),
         );
-        let (unused, mut state, _queue_rx) = crate::build_app(config, store).await.unwrap();
+        let (unused, mut state, _queue_rx) = crate::build_app(
+            config,
+            store,
+            "127.0.0.1:0".parse().expect("loopback test address"),
+        )
+        .await
+        .unwrap();
         drop(unused);
         state.cfg = Arc::new(configured_state);
         state.jwt_verifier = Some(Arc::new(verifier));

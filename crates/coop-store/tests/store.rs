@@ -91,6 +91,67 @@ async fn create_v1_schema(connection: &mut SqliteConnection) {
     .unwrap();
 }
 
+async fn create_v2_schema(connection: &mut SqliteConnection) {
+    sqlx::query(
+        "CREATE TABLE schema_migrations (
+             version INTEGER PRIMARY KEY,
+             applied_at_ms INTEGER NOT NULL
+         )",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE jobs (
+             job_id TEXT PRIMARY KEY NOT NULL,
+             tenant TEXT NOT NULL,
+             language TEXT NOT NULL,
+             status TEXT NOT NULL DEFAULT 'queued',
+             spec_json TEXT NOT NULL,
+             effective_spec_json TEXT,
+             receipt_json TEXT,
+             created_at_ms INTEGER NOT NULL,
+             started_at_ms INTEGER,
+             finished_at_ms INTEGER,
+             exit_code INTEGER
+         )",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TABLE events (
+             seq INTEGER PRIMARY KEY AUTOINCREMENT,
+             job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+             ts_ms INTEGER NOT NULL,
+             kind TEXT NOT NULL,
+             data_json TEXT NOT NULL,
+             prev_hash TEXT NOT NULL DEFAULT '',
+             event_hash TEXT NOT NULL DEFAULT '',
+             hash_version INTEGER NOT NULL DEFAULT 0
+         )",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO schema_migrations(version, applied_at_ms)
+         VALUES (1, 1), (2, 2)",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query("PRAGMA user_version = 2")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+}
+
+fn canonical_spec_sha256(spec_json: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(spec_json).unwrap();
+    format!("{:x}", Sha256::digest(canonical_json(&value).as_bytes()))
+}
+
 #[test]
 fn readiness_probe_requires_current_versions_and_both_data_tables() {
     sqlx::test_block_on(async {
@@ -132,6 +193,13 @@ fn readiness_probe_requires_current_versions_and_both_data_tables() {
         assert_eq!(unchanged, 1, "readiness must not migrate or repair schema");
 
         sqlx::query(&format!("PRAGMA user_version = {current_version}"))
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        // Model an offline/corrupting writer that bypassed Coop's immutable
+        // migration-history guard. Readiness must detect the marker drift but
+        // must never repair it as a side effect.
+        sqlx::query("DROP TRIGGER coop_schema_migrations_storage_guard_delete")
             .execute(&mut connection)
             .await
             .unwrap();
@@ -754,22 +822,6 @@ fn running_recovery_is_bounded_idempotent_and_atomic_between_rows() {
         let db = test_db("bounded-running-recovery");
         let store = Store::open(&db).await.unwrap();
         let mut connection = raw_connection(&db).await;
-        sqlx::query(
-            "WITH RECURSIVE sequence(n) AS (
-                 VALUES(1) UNION ALL SELECT n + 1 FROM sequence WHERE n < 256
-             )
-             INSERT INTO jobs(
-                 job_id, tenant, language, status, spec_json,
-                 effective_spec_json, created_at_ms, started_at_ms
-             )
-             SELECT printf('running-%03d', n), 'tenant-a', 'python', 'running',
-                    '{}', '{}', n, n
-             FROM sequence",
-        )
-        .execute(&mut connection)
-        .await
-        .unwrap();
-
         // Exercise the supported decoded maximum of 1 MiB each for code and
         // stdin without retaining all 256 requested/effective specs in memory.
         let maximal_spec = format!(
@@ -778,10 +830,19 @@ fn running_recovery_is_bounded_idempotent_and_atomic_between_rows() {
             "y".repeat(1024 * 1024)
         );
         sqlx::query(
-            "UPDATE jobs SET spec_json = ?2, effective_spec_json = ?2
-             WHERE job_id = ?1",
+            "WITH RECURSIVE sequence(n) AS (
+                 VALUES(1) UNION ALL SELECT n + 1 FROM sequence WHERE n < 256
+             )
+             INSERT INTO jobs(
+                 job_id, tenant, language, status, spec_json,
+                 effective_spec_json, created_at_ms, started_at_ms, admitted_mem_mb
+             )
+             SELECT printf('running-%03d', n), 'tenant-a', 'python', 'running',
+                    CASE WHEN n = 256 THEN ?1 ELSE '{}' END,
+                    CASE WHEN n = 256 THEN ?1 ELSE '{}' END,
+                    n, n, 256
+             FROM sequence",
         )
-        .bind("running-256")
         .bind(&maximal_spec)
         .execute(&mut connection)
         .await
@@ -856,7 +917,7 @@ fn running_recovery_is_bounded_idempotent_and_atomic_between_rows() {
 }
 
 #[test]
-fn current_markers_require_current_tables_and_missing_history_is_repaired() {
+fn current_markers_require_current_tables_and_v3_downgrades_fail_closed() {
     sqlx::test_block_on(async {
         let false_current = test_db("false-current-marker");
         let mut connection = raw_connection(&false_current).await;
@@ -876,22 +937,25 @@ fn current_markers_require_current_tables_and_missing_history_is_repaired() {
         let missing_history = test_db("missing-history");
         let store = Store::open(&missing_history).await.unwrap();
         let mut connection = raw_connection(&missing_history).await;
+        assert!(sqlx::query("DELETE FROM schema_migrations")
+            .execute(&mut connection)
+            .await
+            .is_err());
+        sqlx::query("DROP TRIGGER coop_schema_migrations_storage_guard_delete")
+            .execute(&mut connection)
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM schema_migrations")
             .execute(&mut connection)
             .await
             .unwrap();
         connection.close().await.unwrap();
         drop(store);
-
-        let repaired = Store::open(&missing_history).await.unwrap();
-        assert_eq!(repaired.schema_version().await.unwrap(), 3);
-        let mut connection = raw_connection(&missing_history).await;
-        let migration_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schema_migrations")
-            .fetch_one(&mut connection)
-            .await
-            .unwrap();
-        assert_eq!(migration_count, 3);
-        connection.close().await.unwrap();
+        let error = Store::open(&missing_history).await.unwrap_err();
+        assert!(
+            error.to_string().contains("physical v3 schema"),
+            "unexpected missing-history error: {error}"
+        );
 
         let lost_markers = test_db("lost-current-markers");
         let store = Store::open(&lost_markers).await.unwrap();
@@ -904,54 +968,40 @@ fn current_markers_require_current_tables_and_missing_history_is_repaired() {
             .await
             .unwrap()
             .unwrap();
-        let before = store.get_job("preserved").await.unwrap().unwrap();
-        let before_events = store.events_for("preserved").await.unwrap();
         let mut connection = raw_connection(&lost_markers).await;
-        sqlx::query("DELETE FROM schema_migrations")
-            .execute(&mut connection)
-            .await
-            .unwrap();
         sqlx::query("PRAGMA user_version = 0")
             .execute(&mut connection)
             .await
             .unwrap();
         connection.close().await.unwrap();
         drop(store);
-
-        let reopened = Store::open(&lost_markers).await.unwrap();
-        let after = reopened.get_job("preserved").await.unwrap().unwrap();
-        assert_eq!(after.receipt_json, before.receipt_json);
-        assert_eq!(
-            reopened.events_for("preserved").await.unwrap(),
-            before_events
+        let error = Store::open(&lost_markers).await.unwrap_err();
+        assert!(
+            error.to_string().contains("physical v3 schema"),
+            "unexpected downgraded-marker error: {error}"
         );
-        assert_eq!(reopened.schema_version().await.unwrap(), 3);
     });
 }
 
 #[test]
-fn existing_v2_reconciles_covering_summary_and_recovery_indexes() {
+fn genuine_v2_migrates_memory_accounting_and_reconciles_covering_indexes() {
     sqlx::test_block_on(async {
         let db = test_db("covering-index-reconciliation");
-        let store = Store::open(&db).await.unwrap();
-        drop(store);
-
         let mut connection = raw_connection(&db).await;
-        for name in [
-            "idx_jobs_tenant_created_summary",
-            "idx_jobs_tenant_status_created_summary",
-            "idx_jobs_tenant_language_created_summary",
-            "idx_jobs_tenant_status_language_created_summary",
-            "idx_jobs_id_summary",
-            "idx_jobs_status_created_recovery",
-        ] {
-            sqlx::query(&format!("DROP INDEX {name}"))
-                .execute(&mut connection)
-                .await
-                .unwrap();
-        }
-        // Simulate an existing v2 database from before the covering-index
-        // optimization. Reopen must remove these owned, non-covering forms.
+        create_v2_schema(&mut connection).await;
+        sqlx::query(
+            "INSERT INTO jobs(
+                 job_id, tenant, language, status, spec_json, created_at_ms
+             ) VALUES (
+                 'v2-queued', 'tenant-a', 'python', 'queued',
+                 '{\"language\":\"python\",\"code\":\"pass\",\"limits\":{\"mem_mb\":512}}', 1
+             )",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        // Genuine v2 installations can carry these older non-covering forms.
+        // Migration must replace them and derive durable admitted memory.
         sqlx::query(
             "CREATE INDEX idx_jobs_tenant_created
              ON jobs(tenant, created_at_ms DESC, job_id DESC)",
@@ -966,6 +1016,11 @@ fn existing_v2_reconciles_covering_summary_and_recovery_indexes() {
         connection.close().await.unwrap();
 
         let store = Store::open(&db).await.unwrap();
+        assert_eq!(store.schema_version().await.unwrap(), 3);
+        assert_eq!(
+            store.job_requested_mem_mb("v2-queued").await.unwrap(),
+            Some(512)
+        );
         let mut connection = raw_connection(&db).await;
         let rows = sqlx::query(
             "SELECT name, sql FROM sqlite_schema
@@ -975,7 +1030,7 @@ fn existing_v2_reconciles_covering_summary_and_recovery_indexes() {
                  'idx_jobs_tenant_language_created_summary',
                  'idx_jobs_tenant_status_language_created_summary',
                  'idx_jobs_id_summary',
-                 'idx_jobs_status_created_recovery'
+                 'idx_jobs_status_created_recovery_v3'
              ) ORDER BY name",
         )
         .fetch_all(&mut connection)
@@ -1131,7 +1186,7 @@ fn current_database_with_invalid_utf8_fails_closed() {
             .await
             .unwrap();
         sqlx::query(
-            "UPDATE jobs SET tenant = CAST(X'80' AS TEXT)
+            "UPDATE jobs SET language = CAST(X'80' AS TEXT)
              WHERE job_id = 'invalid-utf8'",
         )
         .execute(&mut connection)
@@ -1158,6 +1213,10 @@ fn json_valid_payload_with_invalid_utf8_still_fails_closed() {
             .unwrap();
 
         let mut connection = raw_connection(&db).await;
+        sqlx::query("DROP TRIGGER coop_jobs_storage_guard_update")
+            .execute(&mut connection)
+            .await
+            .unwrap();
         sqlx::query("PRAGMA ignore_check_constraints = ON")
             .execute(&mut connection)
             .await
@@ -1255,6 +1314,13 @@ fn validated_max_payload_writes_keep_healthy_reopen_on_the_bounded_fast_path() {
         .await
         .unwrap();
         assert_eq!(revision, 2);
+        let accounting_revision: i64 = sqlx::query_scalar(
+            "SELECT accounting_validation_revision FROM store_integrity WHERE singleton = 1",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(accounting_revision, 1);
         connection.close().await.unwrap();
         drop(store);
 
@@ -1269,6 +1335,13 @@ fn validated_max_payload_writes_keep_healthy_reopen_on_the_bounded_fast_path() {
                 .await
                 .unwrap();
         assert_eq!(after_reopen, before);
+        let accounting_after_reopen: i64 = sqlx::query_scalar(
+            "SELECT accounting_validation_revision FROM store_integrity WHERE singleton = 1",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(accounting_after_reopen, accounting_revision);
         connection.close().await.unwrap();
 
         reopened.validate_integrity().await.unwrap();
@@ -1484,19 +1557,12 @@ fn queued_recovery_cursor_is_stable_when_earlier_rows_disappear() {
     sqlx::test_block_on(async {
         let db = test_db("queued-pages");
         let store = Store::open(&db).await.unwrap();
-        for (job_id, tenant) in [("q3", "tenant-c"), ("q1", "tenant-a"), ("q2", "tenant-b")] {
+        for (job_id, tenant) in [("q1", "tenant-a"), ("q2", "tenant-b"), ("q3", "tenant-c")] {
             store
                 .create_job(job_id, tenant, "python", "{}")
                 .await
                 .unwrap();
         }
-        let mut connection = raw_connection(&db).await;
-        sqlx::query("UPDATE jobs SET created_at_ms = 42")
-            .execute(&mut connection)
-            .await
-            .unwrap();
-        connection.close().await.unwrap();
-        store.validate_integrity().await.unwrap();
 
         let first = store.queued_jobs_page(None, 2).await.unwrap();
         assert_eq!(
@@ -1534,8 +1600,10 @@ fn job_page_supports_one_internal_lookahead_row() {
             "WITH RECURSIVE sequence(n) AS (
                  VALUES(1) UNION ALL SELECT n + 1 FROM sequence WHERE n < 501
              )
-             INSERT INTO jobs(job_id, tenant, language, status, spec_json, created_at_ms)
-             SELECT printf('job-%03d', n), 'tenant-a', 'python', 'queued', '{}', 42
+             INSERT INTO jobs(
+                 job_id, tenant, language, status, spec_json, created_at_ms, admitted_mem_mb
+             )
+             SELECT printf('job-%03d', n), 'tenant-a', 'python', 'queued', '{}', 42, 256
              FROM sequence",
         )
         .execute(&mut connection)
@@ -1577,10 +1645,12 @@ fn job_summary_page_does_not_load_maximal_payload_columns() {
         let mut connection = raw_connection(&db).await;
         sqlx::query(
             "WITH RECURSIVE sequence(n) AS (
-                 VALUES(1) UNION ALL SELECT n + 1 FROM sequence WHERE n < 501
+                 VALUES(1) UNION ALL SELECT n + 1 FROM sequence WHERE n < 500
              )
-             INSERT INTO jobs(job_id, tenant, language, status, spec_json, created_at_ms)
-             SELECT printf('job-%03d', n), 'tenant-a', 'python', 'queued', '{}', 42
+             INSERT INTO jobs(
+                 job_id, tenant, language, status, spec_json, created_at_ms, admitted_mem_mb
+             )
+             SELECT printf('job-%03d', n), 'tenant-a', 'python', 'queued', '{}', 42, 256
              FROM sequence",
         )
         .execute(&mut connection)
@@ -1591,11 +1661,13 @@ fn job_summary_page_does_not_load_maximal_payload_columns() {
         // that decoded-size boundary in every omitted JSON column.
         let maximal_payload = format!(r#"{{"payload":"{}"}}"#, "x".repeat(2 * 1024 * 1024));
         sqlx::query(
-            "UPDATE jobs
-             SET spec_json = ?2, effective_spec_json = ?2, receipt_json = ?2
-             WHERE job_id = ?1",
+            "INSERT INTO jobs(
+                 job_id, tenant, language, status, spec_json,
+                 effective_spec_json, receipt_json, created_at_ms, admitted_mem_mb
+             ) VALUES (
+                 'job-501', 'tenant-a', 'python', 'queued', ?1, ?1, ?1, 42, 256
+             )",
         )
-        .bind("job-501")
         .bind(&maximal_payload)
         .execute(&mut connection)
         .await
@@ -1603,10 +1675,13 @@ fn job_summary_page_does_not_load_maximal_payload_columns() {
         drop(maximal_payload);
 
         connection.close().await.unwrap();
+        // Fixture-only raw writes are explicitly reconciled while the store
+        // is still under test ownership. Ordinary reopen now fails closed on
+        // a dirty current-v3 revision instead of laundering those edits.
+        store.validate_integrity().await.unwrap();
         drop(store);
-        // Opening performs full physical/value validation. It must validate
-        // maximal JSON in SQLite without returning those blobs in a 256-row
-        // UTF-8 validation batch.
+        // A healthy open must not return the maximal JSON blobs merely to
+        // validate the summary projection.
         let store = Store::open(&db).await.unwrap();
 
         let summaries = store
@@ -1854,16 +1929,17 @@ fn idempotency_is_tenant_scoped_fingerprint_bound_and_retention_coupled() {
     sqlx::test_block_on(async {
         let db = test_db("idempotency");
         let store = Store::open(&db).await.unwrap();
+        let first_spec = r#"{"language":"python","code":"print(1)"}"#;
         let request = IdempotencyRequest {
             key: "opaque-key-1".to_string(),
-            request_sha256: "a".repeat(64),
+            request_sha256: canonical_spec_sha256(first_spec),
         };
         let first = store
             .create_job_with_event_idempotent(
                 "idem-job",
                 "tenant-a",
                 "python",
-                r#"{"language":"python","code":"print(1)"}"#,
+                first_spec,
                 256,
                 Some(&request),
             )
@@ -1877,7 +1953,7 @@ fn idempotency_is_tenant_scoped_fingerprint_bound_and_retention_coupled() {
                 "unused-generated-id",
                 "tenant-a",
                 "python",
-                r#"{"language":"python","code":"print(1)"}"#,
+                first_spec,
                 256,
                 Some(&request),
             )
@@ -1896,16 +1972,17 @@ fn idempotency_is_tenant_scoped_fingerprint_bound_and_retention_coupled() {
             .unwrap()
             .is_none());
 
+        let conflict_spec = r#"{"language":"python","code":"print(2)"}"#;
         let conflict = IdempotencyRequest {
             key: request.key.clone(),
-            request_sha256: "b".repeat(64),
+            request_sha256: canonical_spec_sha256(conflict_spec),
         };
         let error = store
             .create_job_with_event_idempotent(
                 "conflict-job",
                 "tenant-a",
                 "python",
-                r#"{"language":"python","code":"print(2)"}"#,
+                conflict_spec,
                 256,
                 Some(&conflict),
             )
@@ -1937,20 +2014,276 @@ fn idempotency_is_tenant_scoped_fingerprint_bound_and_retention_coupled() {
 }
 
 #[test]
+fn current_v3_accounting_mutations_dirty_the_durable_revision_and_fail_closed() {
+    sqlx::test_block_on(async {
+        for (label, mutation) in [
+            (
+                "job-ledger",
+                "UPDATE job_storage_usage SET retained_bytes = retained_bytes + 1 WHERE job_id = 'guarded'",
+            ),
+            (
+                "global-total",
+                "UPDATE storage_usage_total SET charged_bytes = charged_bytes + 1 WHERE singleton = 1",
+            ),
+            (
+                "tenant-total",
+                "UPDATE tenant_storage_usage SET charged_bytes = charged_bytes + 1 WHERE tenant = 'tenant-a'",
+            ),
+            (
+                "idempotency",
+                "DELETE FROM idempotency_keys WHERE tenant = 'tenant-a' AND idempotency_key = 'guard-key'",
+            ),
+            (
+                "tombstone",
+                "INSERT INTO retention_tombstones(job_id, marked_at_ms) VALUES ('guarded', 0)",
+            ),
+        ] {
+            let db = test_db(label);
+            let store = Store::open(&db).await.unwrap();
+            let spec = r#"{"language":"python","code":"pass"}"#;
+            let request = IdempotencyRequest {
+                key: "guard-key".to_string(),
+                request_sha256: canonical_spec_sha256(spec),
+            };
+            store
+                .create_job_with_event_idempotent(
+                    "guarded",
+                    "tenant-a",
+                    "python",
+                    spec,
+                    256,
+                    Some(&request),
+                )
+                .await
+                .unwrap();
+            drop(store);
+
+            let mut connection = raw_connection(&db).await;
+            sqlx::query(mutation)
+                .execute(&mut connection)
+                .await
+                .unwrap();
+            let revision: i64 = sqlx::query_scalar(
+                "SELECT accounting_validation_revision FROM store_integrity WHERE singleton = 1",
+            )
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+            assert_eq!(revision, 0, "{label} did not dirty accounting validation");
+            connection.close().await.unwrap();
+
+            let error = Store::open(&db)
+                .await
+                .expect_err("raw current-v3 accounting edits must fail closed");
+            assert!(
+                error.to_string().contains("modified outside an owned write"),
+                "unexpected {label} error: {error}"
+            );
+        }
+    });
+}
+
+#[test]
+fn v3_identity_and_admitted_memory_fields_are_immutable() {
+    sqlx::test_block_on(async {
+        let db = test_db("v3-immutable-fields");
+        let store = Store::open(&db).await.unwrap();
+        let spec = r#"{"language":"python","code":"pass"}"#;
+        let request = IdempotencyRequest {
+            key: "immutable-key".to_string(),
+            request_sha256: canonical_spec_sha256(spec),
+        };
+        store
+            .create_job_with_event_idempotent(
+                "immutable",
+                "tenant-a",
+                "python",
+                spec,
+                256,
+                Some(&request),
+            )
+            .await
+            .unwrap();
+
+        let mut connection = raw_connection(&db).await;
+        for mutation in [
+            "UPDATE jobs SET job_id = 'renamed' WHERE job_id = 'immutable'",
+            "UPDATE jobs SET tenant = 'tenant-b' WHERE job_id = 'immutable'",
+            "UPDATE jobs SET language = 'node' WHERE job_id = 'immutable'",
+            "UPDATE jobs SET spec_json = '{\"language\":\"node\",\"code\":\"pass\"}' WHERE job_id = 'immutable'",
+            "UPDATE jobs SET created_at_ms = created_at_ms + 1 WHERE job_id = 'immutable'",
+            "UPDATE jobs SET admitted_mem_mb = 512 WHERE job_id = 'immutable'",
+            "UPDATE events SET kind = 'rewritten' WHERE job_id = 'immutable'",
+            "UPDATE job_storage_usage SET tenant = 'tenant-b' WHERE job_id = 'immutable'",
+            "UPDATE job_storage_usage SET requested_mem_mb = 512 WHERE job_id = 'immutable'",
+            "UPDATE idempotency_keys SET idempotency_key = 'rewritten' WHERE tenant = 'tenant-a'",
+            "UPDATE schema_migrations SET applied_at_ms = applied_at_ms + 1 WHERE version = 3",
+            "DELETE FROM schema_migrations WHERE version = 3",
+        ] {
+            assert!(
+                sqlx::query(mutation)
+                    .execute(&mut connection)
+                    .await
+                    .is_err(),
+                "immutable mutation unexpectedly succeeded: {mutation}"
+            );
+        }
+        connection.close().await.unwrap();
+        assert!(store.get_job("immutable").await.unwrap().is_some());
+    });
+}
+
+#[test]
+fn current_v3_valid_range_lifecycle_edits_are_dirty_and_fail_closed() {
+    sqlx::test_block_on(async {
+        let db = test_db("v3-valid-raw-lifecycle");
+        let store = Store::open(&db).await.unwrap();
+        store
+            .create_job("raw-lifecycle", "tenant-a", "python", "{}")
+            .await
+            .unwrap();
+        drop(store);
+
+        let mut connection = raw_connection(&db).await;
+        sqlx::query(
+            "UPDATE jobs SET status = 'running', started_at_ms = 1
+             WHERE job_id = 'raw-lifecycle'",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        let revisions = sqlx::query(
+            "SELECT row_validation_revision, accounting_validation_revision
+             FROM store_integrity WHERE singleton = 1",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(revisions.get::<i64, _>("row_validation_revision"), 0);
+        assert_eq!(revisions.get::<i64, _>("accounting_validation_revision"), 0);
+        connection.close().await.unwrap();
+
+        let error = Store::open(&db).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("jobs/events were modified outside an owned write"),
+            "unexpected raw lifecycle error: {error}"
+        );
+    });
+}
+
+#[test]
+fn admitted_memory_ledger_mismatch_and_cross_tenant_foreign_keys_fail_closed() {
+    sqlx::test_block_on(async {
+        let mismatch_db = test_db("admitted-memory-ledger-mismatch");
+        let store = Store::open(&mismatch_db).await.unwrap();
+        let spec = r#"{"language":"python","code":"pass","limits":{"mem_mb":512}}"#;
+        store
+            .create_job_with_event_idempotent("memory-job", "tenant-a", "python", spec, 512, None)
+            .await
+            .unwrap();
+        drop(store);
+        let mut connection = raw_connection(&mismatch_db).await;
+        sqlx::query("DROP TRIGGER coop_job_storage_guard_update")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE job_storage_usage SET requested_mem_mb = 256 WHERE job_id = 'memory-job'",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+        let error = Store::open(&mismatch_db).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("accounting disagrees with retained rows"),
+            "unexpected admitted-memory mismatch error: {error}"
+        );
+
+        let fk_db = test_db("composite-tenant-foreign-keys");
+        let store = Store::open(&fk_db).await.unwrap();
+        store
+            .create_job("parent", "tenant-a", "python", "{}")
+            .await
+            .unwrap();
+        let mut connection = raw_connection(&fk_db).await;
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        for table in ["job_storage_usage", "idempotency_keys"] {
+            let rows = sqlx::query(&format!("PRAGMA foreign_key_list({table})"))
+                .fetch_all(&mut connection)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2, "{table} must have one two-column FK");
+            let id = rows[0].get::<i64, _>("id");
+            assert!(rows.iter().all(|row| {
+                row.get::<i64, _>("id") == id
+                    && row.get::<String, _>("table") == "jobs"
+                    && row
+                        .get::<String, _>("on_delete")
+                        .eq_ignore_ascii_case("CASCADE")
+            }));
+            let pairs = rows
+                .iter()
+                .map(|row| (row.get::<String, _>("from"), row.get::<String, _>("to")))
+                .collect::<Vec<_>>();
+            assert!(pairs.contains(&("tenant".to_string(), "tenant".to_string())));
+            assert!(pairs.contains(&("job_id".to_string(), "job_id".to_string())));
+        }
+
+        let idempotency_fk_error = sqlx::query(
+            "INSERT INTO idempotency_keys(
+                 tenant, idempotency_key, request_sha256, job_id, created_at_ms
+             ) VALUES ('tenant-b', 'wrong-tenant', ?1, 'parent', 1)",
+        )
+        .bind(canonical_spec_sha256("{}"))
+        .execute(&mut connection)
+        .await;
+        assert!(idempotency_fk_error.is_err());
+
+        let mut tx = connection.begin().await.unwrap();
+        sqlx::query(
+            "INSERT INTO jobs(
+                 job_id, tenant, language, status, spec_json, created_at_ms, admitted_mem_mb
+             ) VALUES ('raw-parent', 'tenant-a', 'python', 'queued', '{}', 1, 256)",
+        )
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        let ledger_fk_error = sqlx::query(
+            "INSERT INTO job_storage_usage(
+                 job_id, tenant, retained_bytes, reserved_bytes, requested_mem_mb
+             ) VALUES ('raw-parent', 'tenant-b', 1, 0, 256)",
+        )
+        .execute(&mut *tx)
+        .await;
+        assert!(ledger_fk_error.is_err());
+        tx.rollback().await.unwrap();
+    });
+}
+
+#[test]
 fn current_schema_missing_idempotency_table_fails_closed() {
     sqlx::test_block_on(async {
         let db = test_db("missing-idempotency-table");
         let store = Store::open(&db).await.unwrap();
+        let spec = r#"{"language":"python","code":"print(1)"}"#;
         let request = IdempotencyRequest {
             key: "durable-key".to_string(),
-            request_sha256: "c".repeat(64),
+            request_sha256: canonical_spec_sha256(spec),
         };
         store
             .create_job_with_event_idempotent(
                 "durable-idempotent-job",
                 "tenant-a",
                 "python",
-                r#"{"language":"python","code":"print(1)"}"#,
+                spec,
                 256,
                 Some(&request),
             )
@@ -1967,7 +2300,8 @@ fn current_schema_missing_idempotency_table_fails_closed() {
             .await
             .expect_err("v3 mapping loss must not become an idempotency miss");
         assert!(
-            error.to_string().contains("idempotency mappings"),
+            error.to_string().contains("partial v3 physical schema")
+                || error.to_string().contains("idempotency mappings"),
             "{error}"
         );
     });
@@ -2049,14 +2383,8 @@ fn retention_commit_failure_rolls_back_and_releases_the_writer() {
 fn migration_commit_failure_does_not_leave_partial_history() {
     sqlx::test_block_on(async {
         let db = test_db("migration-commit-rollback");
-        let store = Store::open(&db).await.unwrap();
-        drop(store);
-
         let mut connection = raw_connection(&db).await;
-        sqlx::query("DELETE FROM schema_migrations")
-            .execute(&mut connection)
-            .await
-            .unwrap();
+        create_v2_schema(&mut connection).await;
         sqlx::query("CREATE TABLE migration_parent(id INTEGER PRIMARY KEY)")
             .execute(&mut connection)
             .await
@@ -2088,7 +2416,12 @@ fn migration_commit_failure_does_not_leave_partial_history() {
             .fetch_one(&mut connection)
             .await
             .unwrap();
-        assert_eq!(history_count, 0);
+        assert_eq!(history_count, 2);
+        let user_version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(user_version, 2);
         connection.close().await.unwrap();
     });
 }

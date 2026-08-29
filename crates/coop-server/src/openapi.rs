@@ -125,7 +125,7 @@ mod tests {
         );
         assert_eq!(
             submit_responses["201"]["headers"]["Idempotency-Replayed"]["schema"]["type"],
-            "boolean"
+            "string"
         );
         for status in ["408", "415", "422", "429", "503", "507"] {
             assert!(
@@ -133,5 +133,26 @@ mod tests {
                 "submit OpenAPI missing {status} response"
             );
         }
+        let submit = &value["paths"]["/v1/jobs"]["post"];
+        let idempotency = submit["parameters"]
+            .as_array()
+            .and_then(|parameters| {
+                parameters
+                    .iter()
+                    .find(|parameter| parameter["name"] == "Idempotency-Key")
+            })
+            .expect("submit OpenAPI declares Idempotency-Key");
+        assert_eq!(idempotency["in"], "header");
+        assert_eq!(idempotency["required"], false);
+        assert!(submit_responses["201"]["headers"]["Location"].is_object());
+        assert!(submit_responses["201"]["headers"]["Idempotency-Replayed"].is_object());
+        assert!(submit_responses["422"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("idempotency key conflicts")));
+        assert!(
+            value["components"]["schemas"]["LimitCapabilities"]["properties"]
+                ["concurrent_mem_mb_max"]
+                .is_object()
+        );
     }
 }
