@@ -431,6 +431,7 @@ pub struct SubmitPayload {
     _permit: crate::LifetimePermit,
 }
 
+#[allow(clippy::result_large_err)]
 impl FromRequest<AppState> for SubmitPayload {
     type Rejection = Response;
 
@@ -451,6 +452,7 @@ impl FromRequest<AppState> for SubmitPayload {
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn extract_submit_payload(
     req: Request,
     admission: &crate::LifetimeAdmission,

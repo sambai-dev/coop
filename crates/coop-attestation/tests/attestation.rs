@@ -21,9 +21,13 @@ fn signing_key(seed: u8) -> SigningKey {
 }
 
 fn decode_hex(value: &str) -> Vec<u8> {
-    value
-        .as_bytes()
-        .chunks_exact(2)
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    assert!(
+        remainder.is_empty(),
+        "hex test vector must contain byte pairs"
+    );
+    pairs
+        .iter()
         .map(|pair| {
             let high = (pair[0] as char).to_digit(16).unwrap();
             let low = (pair[1] as char).to_digit(16).unwrap();
