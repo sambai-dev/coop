@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import asdict, dataclass
 from email.utils import parsedate_to_datetime
 from enum import Enum
@@ -35,6 +36,7 @@ from typing import (
 
 __all__ = [
     "Capabilities",
+    "CancellationResponse",
     "Coop",
     "CoopError",
     "CoopEvent",
@@ -44,6 +46,7 @@ __all__ = [
     "ExecutorStreamEvidence",
     "EffectiveJobSpec",
     "EffectiveLimits",
+    "ExecutionRequirements",
     "ExecutionPolicy",
     "HashedCoopEvent",
     "Job",
@@ -56,6 +59,7 @@ __all__ = [
     "JobView",
     "Limits",
     "LimitEnforcement",
+    "MinimumIsolation",
     "OutputEvidence",
     "Receipt",
     "ReceiptLimits",
@@ -122,6 +126,23 @@ class _RequiredJobSpec(TypedDict):
 class JobSpec(_RequiredJobSpec, total=False):
     stdin: str
     limits: Dict[str, Union[int, bool]]
+    requirements: "ExecutionRequirements"
+
+
+MinimumIsolation = Literal[
+    "none",
+    "linux-shared-kernel",
+    "gvisor-application-kernel",
+    "wasm-capability",
+    "hardware-vm",
+    "confidential-vm",
+]
+
+
+class ExecutionRequirements(TypedDict):
+    """Atomic admission requirements enforced by a supporting Coop server."""
+
+    minimum_isolation: MinimumIsolation
 
 
 class StoredLimits(TypedDict):
@@ -135,13 +156,17 @@ class StoredLimits(TypedDict):
     allow_network: bool
 
 
-class StoredJobSpec(TypedDict):
+class _RequiredStoredJobSpec(TypedDict):
     """The complete requested spec returned by a job lookup."""
 
     language: str
     code: str
     stdin: Optional[str]
     limits: StoredLimits
+
+
+class StoredJobSpec(_RequiredStoredJobSpec, total=False):
+    requirements: ExecutionRequirements
 
 
 class EffectiveLimits(TypedDict):
@@ -190,6 +215,14 @@ class JobView(TypedDict):
     started_at_ms: Optional[int]
     finished_at_ms: Optional[int]
     exit_code: Optional[int]
+
+
+class CancellationResponse(TypedDict):
+    """Normalized cancellation acknowledgement across current and legacy servers."""
+
+    job: Optional[JobView]
+    cancellation_requested: bool
+    already_terminal: bool
 
 
 class ExecutionPolicy(TypedDict):
@@ -416,6 +449,7 @@ class CoopError(RuntimeError):
         retryable: bool = False,
         body: str = "",
         retry_after: Optional[float] = None,
+        idempotency_key: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -425,6 +459,7 @@ class CoopError(RuntimeError):
         self.retryable = retryable
         self.body = body
         self.retry_after = retry_after
+        self.idempotency_key = idempotency_key
 
     def __str__(self) -> str:
         prefix = f"coop {self.status}" if self.status is not None else "coop"
@@ -518,6 +553,13 @@ class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
                 code="unsafe_redirect",
                 body=newurl,
             )
+        if req.has_header("Idempotency-key") and code in (301, 302, 303):
+            raise CoopError(
+                "refused a redirect that could change a keyed submission's method or body",
+                status=code,
+                code="unsafe_redirect",
+                body=newurl,
+            )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -542,8 +584,8 @@ class Coop:
             )
         if not api_key.strip():
             raise ValueError("api_key must not be empty")
-        if timeout <= 0:
-            raise ValueError("timeout must be positive")
+        if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
         base_path = parts.path.rstrip("/")
         self.base_url = urllib.parse.urlunsplit(
             (parts.scheme, parts.netloc, base_path, "", "")
@@ -582,6 +624,7 @@ class Coop:
         *,
         query: Optional[Mapping[str, Union[str, int, None]]] = None,
         timeout: Optional[float] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Any:
         data = (
             json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -595,6 +638,8 @@ class Coop:
         }
         if data is not None:
             headers["Content-Type"] = "application/json"
+        if idempotency_key is not None:
+            headers["Idempotency-Key"] = idempotency_key
         request = urllib.request.Request(
             self._url(path, query), data=data, method=method, headers=headers
         )
@@ -688,16 +733,117 @@ class Coop:
         code: str,
         stdin: Optional[str] = None,
         limits: Optional[LimitInput] = None,
+        *,
+        requirements: Optional[ExecutionRequirements] = None,
+        idempotency_key: Optional[str] = None,
+        retry_ambiguous: bool = False,
+        max_ambiguous_retries: int = 1,
+        retry_backoff: float = 0.25,
         **limit_overrides: Union[int, bool],
     ) -> SubmitResponse:
-        """Submit a job without double-nesting an explicit ``limits`` value."""
+        """Submit a job, optionally retrying an ambiguous keyed request safely.
+
+        Ambiguous retries are disabled by default. Opting in reuses one caller-
+        supplied or generated key and assumes the target Coop server implements
+        ``Idempotency-Key`` replay semantics for an identical submission.
+        """
+        if retry_ambiguous and idempotency_key is None:
+            idempotency_key = str(uuid.uuid4())
+        if idempotency_key is not None:
+            key_value: Any = idempotency_key
+            if (
+                not isinstance(key_value, str)
+                or not key_value
+                or len(key_value) > 255
+                or any(ord(char) < 0x21 or ord(char) > 0x7E for char in key_value)
+            ):
+                raise ValueError(
+                    "idempotency_key must contain 1-255 visible ASCII characters"
+                )
+            idempotency_key = key_value
+        retry_value: Any = retry_ambiguous
+        if not isinstance(retry_value, bool):
+            raise TypeError("retry_ambiguous must be a boolean")
+        retries_value: Any = max_ambiguous_retries
+        if isinstance(retries_value, bool) or not isinstance(retries_value, int):
+            raise TypeError("max_ambiguous_retries must be an integer")
+        if not 0 <= max_ambiguous_retries <= 10:
+            raise ValueError("max_ambiguous_retries must be between 0 and 10")
+        backoff_value: Any = retry_backoff
+        if (
+            isinstance(backoff_value, bool)
+            or not isinstance(backoff_value, (int, float))
+            or not math.isfinite(float(retry_backoff))
+            or retry_backoff < 0
+            or retry_backoff > 60
+        ):
+            raise ValueError("retry_backoff must be finite and between 0 and 60")
         spec: JobSpec = {"language": language, "code": code}
         if stdin is not None:
             spec["stdin"] = stdin
         limit_values = self._limits_dict(limits, limit_overrides)
         if limit_values:
             spec["limits"] = cast(Dict[str, Union[int, bool]], limit_values)
-        return cast(SubmitResponse, self._request("POST", "/v1/jobs", spec))
+        if requirements is not None:
+            requirements_value: Any = requirements
+            if not isinstance(requirements_value, dict):
+                raise TypeError("requirements must be an object")
+            requirements_mapping = cast(Dict[str, Any], requirements_value)
+            unknown_requirements = set(requirements_mapping).difference(
+                {"minimum_isolation"}
+            )
+            if unknown_requirements:
+                raise TypeError(
+                    "unknown requirement: " + ", ".join(sorted(unknown_requirements))
+                )
+            if "minimum_isolation" not in requirements_mapping:
+                raise ValueError("requirements.minimum_isolation is required")
+            minimum: Any = requirements_mapping.get("minimum_isolation")
+            allowed_isolation = {
+                "none",
+                "linux-shared-kernel",
+                "gvisor-application-kernel",
+                "wasm-capability",
+                "hardware-vm",
+                "confidential-vm",
+            }
+            if not isinstance(minimum, str) or minimum not in allowed_isolation:
+                raise ValueError("minimum_isolation is not a supported isolation class")
+            spec["requirements"] = cast(
+                ExecutionRequirements, dict(requirements_mapping)
+            )
+        attempt = 0
+        while True:
+            try:
+                return cast(
+                    SubmitResponse,
+                    self._request(
+                        "POST",
+                        "/v1/jobs",
+                        spec,
+                        idempotency_key=idempotency_key,
+                    ),
+                )
+            except CoopError as exc:
+                if idempotency_key is not None:
+                    exc.idempotency_key = idempotency_key
+                ambiguous = exc.code in {"request_timeout", "transport_error"}
+                if ambiguous and idempotency_key is None:
+                    # Retrying an unkeyed accepted-or-not submission can create
+                    # a duplicate job, so this failure is not safely retryable.
+                    exc.retryable = False
+                if (
+                    not retry_ambiguous
+                    or not ambiguous
+                    or attempt >= max_ambiguous_retries
+                ):
+                    raise
+                delay = float(retry_backoff) * (2**attempt)
+                if exc.retry_after is not None:
+                    delay = max(delay, min(exc.retry_after, 60.0))
+                if delay > 0:
+                    time.sleep(min(delay, 60.0))
+                attempt += 1
 
     def _get_with_timeout(
         self, job_id: str, request_timeout: Optional[float]
@@ -714,8 +860,47 @@ class Coop:
     def get(self, job_id: str) -> JobDetail:
         return self._get_with_timeout(job_id, None)
 
+    def cancel_result(self, job_id: str) -> CancellationResponse:
+        raw = self._request("DELETE", self._job_path(job_id))
+        if raw is None:
+            return {
+                "job": None,
+                "cancellation_requested": True,
+                "already_terminal": False,
+            }
+        if not isinstance(raw, dict):
+            raise CoopError("invalid cancellation response", code="invalid_response")
+        response = cast(Dict[str, Any], raw)
+        if "cancellation_requested" in response or "already_terminal" in response:
+            requested = response.get("cancellation_requested")
+            already_terminal = response.get("already_terminal")
+            job_value = response.get("job")
+            if (
+                not isinstance(requested, bool)
+                or not isinstance(already_terminal, bool)
+                or (job_value is not None and not isinstance(job_value, dict))
+            ):
+                raise CoopError(
+                    "invalid cancellation response", code="invalid_response"
+                )
+            return {
+                "job": cast(Optional[JobView], job_value),
+                "cancellation_requested": requested,
+                "already_terminal": already_terminal,
+            }
+        # Legacy servers returned a JobView directly. A successful response is
+        # an accepted cancellation even when its projected status has not yet
+        # changed to ``cancelled``.
+        return {
+            "job": cast(JobView, response),
+            "cancellation_requested": True,
+            "already_terminal": False,
+        }
+
     def cancel(self, job_id: str) -> Optional[JobView]:
-        return cast(Optional[JobView], self._request("DELETE", self._job_path(job_id)))
+        """Compatibility view of :meth:`cancel_result`, returning only the job."""
+
+        return self.cancel_result(job_id)["job"]
 
     def whoami(self) -> WhoAmI:
         return cast(WhoAmI, self._request("GET", "/v1/whoami"))
@@ -1022,8 +1207,21 @@ class Coop:
         poll_interval: float = 1.0,
     ) -> Iterator[CoopEvent]:
         """Yield ordered events until the job reaches a terminal state."""
-        if after < -1 or poll_interval <= 0:
-            raise ValueError("after must be -1 or greater and poll_interval positive")
+        after_value: Any = after
+        interval_value: Any = poll_interval
+        if (
+            isinstance(after_value, bool)
+            or not isinstance(after_value, int)
+            or after < -1
+            or isinstance(interval_value, bool)
+            or not isinstance(interval_value, (int, float))
+            or not math.isfinite(float(poll_interval))
+            or poll_interval <= 0
+        ):
+            raise ValueError(
+                "after must be an integer -1 or greater and poll_interval finite "
+                "and positive"
+            )
         cursor = after
         if prefer_websocket:
             socket = None

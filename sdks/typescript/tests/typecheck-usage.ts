@@ -8,13 +8,16 @@ import type {
   Receipt,
   EffectiveJobSpec,
 } from "../coop.js";
-import { Coop } from "../coop.js";
+import { Coop, CoopError } from "../coop.js";
 
 const client = new Coop("https://coop.example", "tenant-key", { timeoutMs: 5_000 });
 
 async function consume(): Promise<void> {
   const submitted = await client.submit("python", "print(42)", {
     limits: { wall_seconds: 5, mem_mb: 128 },
+    requirements: { minimum_isolation: "linux-shared-kernel" },
+    idempotencyKey: "consumer-request-1",
+    retryAmbiguous: true,
   });
   const detail: JobDetail = await client.get(submitted.job_id);
   const terminal: JobDetail = await client.wait(submitted.job_id);
@@ -24,6 +27,8 @@ async function consume(): Promise<void> {
     receipt?.executor_output;
   const durableOutput: OutputEvidence | undefined = receipt?.output;
   const events: CoopEvent[] = await client.replay(submitted.job_id);
+  const cancellation = await client.cancelResult(submitted.job_id);
+  const cancelledJob: JobDetail["job_id"] | undefined = cancellation.job?.job_id;
   if (
     events[0]?.hash_version === 1 &&
     typeof events[0].event_hash === "string"
@@ -32,7 +37,19 @@ async function consume(): Promise<void> {
     void hashed.event_hash;
   }
   const cancelled: void = await client.cancel(submitted.job_id);
-  void [effective, receipt, durableOutput, executorOutput, events, cancelled];
+  void [
+    effective,
+    receipt,
+    durableOutput,
+    executorOutput,
+    events,
+    cancelledJob,
+    cancelled,
+  ];
 }
 
-void consume;
+function preserveAmbiguousSubmission(error: unknown): string | undefined {
+  return error instanceof CoopError ? error.idempotencyKey : undefined;
+}
+
+void [consume, preserveAmbiguousSubmission];

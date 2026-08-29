@@ -13,6 +13,13 @@ export const JOB_STATUSES = [
 
 export type JobStatus = (typeof JOB_STATUSES)[number];
 export type Language = "python" | "node" | "bash";
+export type IsolationLevel =
+  | "none"
+  | "linux-shared-kernel"
+  | "gvisor-application-kernel"
+  | "wasm-capability"
+  | "hardware-vm"
+  | "confidential-vm";
 export type EventKind =
   | "accepted"
   | "started"
@@ -32,11 +39,16 @@ export interface Limits {
   allow_network?: boolean;
 }
 
+export interface JobRequirements {
+  minimum_isolation: IsolationLevel;
+}
+
 export interface JobSpec {
   language: Language | (string & {});
   code: string;
   stdin?: string;
   limits?: Limits;
+  requirements?: JobRequirements;
 }
 
 /** Complete limits recorded after the server applies defaults or policy. */
@@ -55,6 +67,8 @@ export interface StoredJobSpec {
   code: string;
   stdin: string | null;
   limits: StoredLimits;
+  /** Absent on pre-v0.4 servers; null when no minimum was requested. */
+  requirements?: JobRequirements | null;
 }
 
 /** Controls actually enforced for an execution; null means not enforced. */
@@ -89,6 +103,13 @@ export interface SubmitResponse {
   stream_url: string;
   replay_url: string;
   stream_ticket_url?: string;
+}
+
+export interface CancellationResponse {
+  /** Null only when adapting an empty cancellation response from a v0.1-v0.3 server. */
+  job: JobView | null;
+  cancellation_requested: boolean;
+  already_terminal: boolean;
 }
 
 export interface JobView {
@@ -300,6 +321,18 @@ export interface RequestOptions {
 export interface SubmitOptions extends RequestOptions {
   stdin?: string | undefined;
   limits?: Limits | undefined;
+  requirements?: JobRequirements | undefined;
+  /**
+   * Stable key for safely reconciling an ambiguously acknowledged submission.
+   * The value must contain 1-255 visible ASCII characters.
+   */
+  idempotencyKey?: string | undefined;
+  /**
+   * Retry one transport-level ambiguous failure. The same Idempotency-Key is
+   * reused for both attempts; one is generated when `idempotencyKey` is absent.
+   * Enable this only when the target server enforces submission idempotency.
+   */
+  retryAmbiguous?: boolean | undefined;
 }
 
 export interface ListOptions extends RequestOptions {
@@ -325,7 +358,11 @@ export interface StreamOptions {
   onError?: ((error: unknown) => void) | undefined;
 }
 
-export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+/** Fetch contract shared by browsers and Node.js without the DOM-only RequestInfo alias. */
+export type FetchLike = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>;
 
 export interface WebSocketLike {
   readonly readyState: number;
@@ -352,6 +389,8 @@ export interface CoopErrorInit {
   retryable?: boolean | undefined;
   body?: string | undefined;
   retryAfterMs?: number | undefined;
+  /** Submission key callers can persist after an ambiguous acknowledgement. */
+  idempotencyKey?: string | undefined;
   cause?: unknown;
 }
 
@@ -362,6 +401,7 @@ export class CoopError extends Error {
   readonly retryable: boolean;
   readonly body: string;
   readonly retryAfterMs: number | undefined;
+  readonly idempotencyKey: string | undefined;
   override readonly cause: unknown;
 
   constructor(message: string, init: CoopErrorInit = {}) {
@@ -373,6 +413,7 @@ export class CoopError extends Error {
     this.retryable = init.retryable ?? false;
     this.body = init.body ?? "";
     this.retryAfterMs = init.retryAfterMs;
+    this.idempotencyKey = init.idempotencyKey;
     this.cause = init.cause;
   }
 }
@@ -428,6 +469,65 @@ function abortError(message = "operation aborted"): CoopError {
   return new CoopError(message, { code: "request_aborted", retryable: false });
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError();
+}
+
+function validateIdempotencyKey(value: string): string {
+  if (value.length < 1 || value.length > 255 || !/^[\x21-\x7e]+$/.test(value)) {
+    throw new TypeError("idempotencyKey must contain 1-255 visible ASCII characters");
+  }
+  return value;
+}
+
+let fallbackIdempotencyCounter = 0;
+
+function generatedIdempotencyKey(): string {
+  const crypto = globalThis.crypto;
+  if (typeof crypto?.randomUUID === "function") return crypto.randomUUID();
+  if (typeof crypto?.getRandomValues === "function") {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+    bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+    return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+  }
+  // Node 18 does not expose Web Crypto globally in every launch mode. An
+  // idempotency key is a collision-avoidance token, not an authorization
+  // secret, so combine time, a process-local counter, and 128 pseudo-random
+  // bits as a portable last resort.
+  fallbackIdempotencyCounter = (fallbackIdempotencyCounter + 1) >>> 0;
+  const random = Array.from({ length: 4 }, () =>
+    Math.floor(Math.random() * 0x1_0000_0000)
+      .toString(16)
+      .padStart(8, "0"),
+  ).join("");
+  return `coop-${Date.now().toString(36)}-${fallbackIdempotencyCounter.toString(36)}-${random}`;
+}
+
+function isAmbiguousTransportFailure(error: unknown): error is CoopError {
+  return (
+    error instanceof CoopError &&
+    (error.code === "request_timeout" || error.code === "transport_error")
+  );
+}
+
+function withIdempotencyKey(error: CoopError, idempotencyKey: string): CoopError {
+  if (error.idempotencyKey === idempotencyKey) return error;
+  const contextual = new CoopError(error.message, {
+    status: error.status,
+    code: error.code,
+    requestId: error.requestId,
+    retryable: error.retryable,
+    body: error.body,
+    retryAfterMs: error.retryAfterMs,
+    idempotencyKey,
+    cause: error.cause,
+  });
+  if (error.stack !== undefined) contextual.stack = error.stack;
+  return contextual;
+}
+
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(abortError());
   return new Promise((resolve, reject) => {
@@ -468,12 +568,23 @@ interface RequestResult<T> {
   status: number;
 }
 
+interface RequestPolicy {
+  headers?: Readonly<Record<string, string>>;
+  ambiguousFailureRetryable?: boolean;
+  idempotencyKey?: string;
+}
+
 export class Coop {
   readonly baseUrl: string;
-  readonly apiKey: string;
   readonly timeoutMs: number;
+  readonly #apiKey: string;
   private readonly fetcher: FetchLike;
   private readonly webSocketFactory: WebSocketFactory | undefined;
+
+  /** @deprecated Prefer keeping the credential outside application state. */
+  get apiKey(): string {
+    return this.#apiKey;
+  }
 
   constructor(baseUrl: string, apiKey: string, options: ClientOptions = {}) {
     const parsed = new URL(baseUrl);
@@ -488,7 +599,7 @@ export class Coop {
     assertPositive("timeoutMs", this.timeoutMs);
     parsed.pathname = parsed.pathname.replace(/\/+$/, "");
     this.baseUrl = parsed.toString().replace(/\/$/, "");
-    this.apiKey = apiKey;
+    this.#apiKey = apiKey;
 
     const globalFetch = globalThis.fetch?.bind(globalThis) as FetchLike | undefined;
     const fetcher = options.fetch ?? globalFetch;
@@ -522,10 +633,25 @@ export class Coop {
     body?: unknown,
     options: RequestOptions = {},
     query?: Record<string, string | number | undefined>,
+    policy: RequestPolicy = {},
   ): Promise<RequestResult<T>> {
     const timeoutMs = options.timeoutMs ?? this.timeoutMs;
     assertPositive("timeoutMs", timeoutMs);
-    if (options.signal?.aborted) throw abortError();
+    throwIfAborted(options.signal);
+    const ambiguousFailureRetryable =
+      policy.ambiguousFailureRetryable ?? method.toUpperCase() !== "POST";
+    let serializedBody: string | undefined;
+    if (body !== undefined) {
+      try {
+        serializedBody = JSON.stringify(body);
+      } catch (cause) {
+        throw new CoopError("request body is not JSON serializable", {
+          code: "invalid_request",
+          retryable: false,
+          cause,
+        });
+      }
+    }
 
     const controller = new AbortController();
     let timedOut = false;
@@ -545,24 +671,27 @@ export class Coop {
           signal: controller.signal,
           headers: {
             Accept: "application/json",
-            Authorization: `Bearer ${this.apiKey}`,
+            Authorization: `Bearer ${this.#apiKey}`,
             ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
             "X-Coop-Client": "typescript/0.3.0",
+            ...policy.headers,
           },
-          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+          ...(serializedBody !== undefined ? { body: serializedBody } : {}),
         });
       } catch (cause) {
         if (timedOut) {
           throw new CoopError(`request timed out after ${timeoutMs}ms`, {
             code: "request_timeout",
-            retryable: true,
+            retryable: ambiguousFailureRetryable,
+            idempotencyKey: policy.idempotencyKey,
             cause,
           });
         }
         if (options.signal?.aborted) throw abortError();
         throw new CoopError(cause instanceof Error ? cause.message : String(cause), {
           code: "transport_error",
-          retryable: true,
+          retryable: ambiguousFailureRetryable,
+          idempotencyKey: policy.idempotencyKey,
           cause,
         });
       }
@@ -574,14 +703,16 @@ export class Coop {
         if (timedOut) {
           throw new CoopError(`request timed out after ${timeoutMs}ms`, {
             code: "request_timeout",
-            retryable: true,
+            retryable: ambiguousFailureRetryable,
+            idempotencyKey: policy.idempotencyKey,
             cause,
           });
         }
         if (options.signal?.aborted) throw abortError();
         throw new CoopError("failed to read the server response", {
           code: "transport_error",
-          retryable: true,
+          retryable: ambiguousFailureRetryable,
+          idempotencyKey: policy.idempotencyKey,
           cause,
         });
       }
@@ -609,28 +740,108 @@ export class Coop {
     body?: unknown,
     options: RequestOptions = {},
     query?: Record<string, string | number | undefined>,
+    policy: RequestPolicy = {},
   ): Promise<T> {
-    return (await this.requestResult<T>(method, path, body, options, query)).data;
+    return (await this.requestResult<T>(method, path, body, options, query, policy)).data;
   }
 
-  submit(
+  async submit(
     language: Language | (string & {}),
     code: string,
     options: SubmitOptions = {},
   ): Promise<SubmitResponse> {
-    const { signal, timeoutMs, stdin, limits } = options;
+    const {
+      signal,
+      timeoutMs,
+      stdin,
+      limits,
+      requirements,
+      retryAmbiguous = false,
+    } = options;
     const spec: JobSpec = { language, code };
     if (stdin !== undefined) spec.stdin = stdin;
     if (limits !== undefined) spec.limits = limits;
-    return this.request("POST", "/v1/jobs", spec, { signal, timeoutMs });
+    if (requirements !== undefined) spec.requirements = requirements;
+    const idempotencyKey =
+      options.idempotencyKey === undefined
+        ? retryAmbiguous
+          ? generatedIdempotencyKey()
+          : undefined
+        : validateIdempotencyKey(options.idempotencyKey);
+    const policy: RequestPolicy = {
+      ambiguousFailureRetryable: idempotencyKey !== undefined,
+      ...(idempotencyKey === undefined
+        ? {}
+        : {
+            idempotencyKey,
+            headers: { "Idempotency-Key": idempotencyKey },
+          }),
+    };
+    const attempts = retryAmbiguous ? 2 : 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await this.request(
+          "POST",
+          "/v1/jobs",
+          spec,
+          { signal, timeoutMs },
+          undefined,
+          policy,
+        );
+      } catch (error) {
+        if (attempt + 1 < attempts && isAmbiguousTransportFailure(error)) {
+          if (signal?.aborted) {
+            const aborted = abortError();
+            throw idempotencyKey === undefined
+              ? aborted
+              : withIdempotencyKey(aborted, idempotencyKey);
+          }
+          continue;
+        }
+        throw idempotencyKey !== undefined && error instanceof CoopError
+          ? withIdempotencyKey(error, idempotencyKey)
+          : error;
+      }
+    }
+    throw new Error("unreachable submission retry state");
   }
 
   get(jobId: string, options: RequestOptions = {}): Promise<JobDetail> {
     return this.request("GET", this.jobPath(jobId), undefined, options);
   }
 
-  cancel(jobId: string, options: RequestOptions = {}): Promise<void> {
-    return this.request("DELETE", this.jobPath(jobId), undefined, options);
+  async cancelResult(
+    jobId: string,
+    options: RequestOptions = {},
+  ): Promise<CancellationResponse> {
+    const result = await this.requestResult<CancellationResponse | undefined>(
+      "DELETE",
+      this.jobPath(jobId),
+      undefined,
+      options,
+    );
+    if (result.data === undefined) {
+      // v0.1-v0.3 returned an empty 200, which proves acceptance but carries no
+      // projection. Avoid an extra request while preserving that evidence.
+      return {
+        job: null,
+        cancellation_requested: true,
+        already_terminal: false,
+      };
+    }
+    if (
+      !result.data.job ||
+      typeof result.data.job !== "object" ||
+      typeof result.data.cancellation_requested !== "boolean" ||
+      typeof result.data.already_terminal !== "boolean"
+    ) {
+      throw new CoopError("invalid cancellation response", { code: "invalid_response" });
+    }
+    return result.data;
+  }
+
+  async cancel(jobId: string, options: RequestOptions = {}): Promise<void> {
+    await this.cancelResult(jobId, options);
   }
 
   whoami(options: RequestOptions = {}): Promise<WhoAmI> {
@@ -686,6 +897,9 @@ export class Coop {
       { after: after === undefined ? undefined : Math.max(0, after), limit },
     );
     if (Array.isArray(raw)) {
+      if (raw.some((event) => !Number.isSafeInteger(event.seq))) {
+        throw new CoopError("invalid event sequence", { code: "invalid_response" });
+      }
       return {
         events: after === undefined ? raw : raw.filter((event) => event.seq > after),
         next_cursor: null,
@@ -693,6 +907,15 @@ export class Coop {
     }
     if (!raw || !Array.isArray(raw.events)) {
       throw new CoopError("invalid event replay envelope", { code: "invalid_response" });
+    }
+    if (
+      raw.next_cursor !== null &&
+      !Number.isSafeInteger(raw.next_cursor)
+    ) {
+      throw new CoopError("invalid event replay cursor", { code: "invalid_response" });
+    }
+    if (raw.events.some((event) => !Number.isSafeInteger(event.seq))) {
+      throw new CoopError("invalid event sequence", { code: "invalid_response" });
     }
     return raw;
   }
@@ -709,7 +932,10 @@ export class Coop {
       const page = await this.eventPage(jobId, { ...options, after: cursor, limit });
       events.push(...page.events);
       if (page.next_cursor === null) return events;
-      if (cursor !== undefined && page.next_cursor <= cursor) {
+      if (
+        !Number.isSafeInteger(page.next_cursor) ||
+        page.next_cursor <= Math.max(0, cursor ?? 0)
+      ) {
         throw new CoopError("event cursor did not advance", { code: "invalid_response" });
       }
       cursor = page.next_cursor;
@@ -814,6 +1040,9 @@ export class Coop {
     const violations: Record<string, unknown>[] = [];
     let truncated = false;
     let after: number | undefined;
+    let terminalEventSeen = false;
+    let terminalCatchupPages = 0;
+    const maxTerminalCatchupPages = 3;
     while (true) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
@@ -827,16 +1056,53 @@ export class Coop {
         signal,
         timeoutMs: remaining,
       });
+      const pageStart = Math.max(0, after ?? 0);
+      let pageMax = pageStart;
       for (const event of page.events) {
-        after = Math.max(after ?? -1, event.seq);
+        if (event.seq <= pageStart) continue;
+        if (event.seq <= pageMax) {
+          throw new CoopError("event sequence did not advance", {
+            code: "invalid_response",
+          });
+        }
+        pageMax = event.seq;
+        after = pageMax;
         const line = typeof event.data.line === "string" ? event.data.line : "";
         if (event.kind === "stdout") stdout.push(line);
         else if (event.kind === "stderr") stderr.push(line);
         else if (event.kind === "truncated") truncated = true;
         else if (event.kind === "violation") violations.push(event.data);
+        if (event.kind === "finished" || isTerminal(event.data.status)) {
+          terminalEventSeen = true;
+        }
       }
-      if (page.next_cursor === null) break;
-      after = page.next_cursor;
+      if (page.next_cursor !== null) {
+        if (
+          !Number.isSafeInteger(page.next_cursor) ||
+          page.next_cursor <= pageStart ||
+          page.next_cursor < pageMax
+        ) {
+          throw new CoopError("event cursor did not advance", { code: "invalid_response" });
+        }
+        after = page.next_cursor;
+        continue;
+      }
+      if (terminalEventSeen) break;
+
+      // The terminal projection can become visible just before a replay read
+      // observes its final event. Retry a few short, cursor-resuming pages. Old
+      // servers that never wrote `finished` still return their accumulated
+      // output after this bounded compatibility allowance.
+      terminalCatchupPages += 1;
+      if (terminalCatchupPages >= maxTerminalCatchupPages) break;
+      const sleepBudget = deadline - Date.now();
+      if (sleepBudget <= 0) {
+        throw new CoopError(`job ${jobId} result deadline expired`, {
+          code: "job_wait_timeout",
+          retryable: true,
+        });
+      }
+      await delay(Math.min(25, sleepBudget), signal);
     }
     return {
       job_id: jobId,
@@ -911,7 +1177,10 @@ export class Coop {
     if (!this.webSocketFactory) return;
     if (signal?.aborted) throw abortError();
     const socket = this.webSocketFactory(url.toString());
-    const queue: CoopEvent[] = [];
+    // Enqueue raw frames synchronously. Decoding inside the generator preserves
+    // WebSocket arrival order even when Blob-like `text()` calls resolve out of
+    // order.
+    const queue: unknown[] = [];
     let done = false;
     let failure: unknown;
     let wake: (() => void) | undefined;
@@ -922,20 +1191,8 @@ export class Coop {
       current?.();
     };
     const onMessage = (message: unknown) => {
-      void messageText(eventData(message))
-        .then((text) => {
-          const event = JSON.parse(text) as CoopEvent;
-          if (typeof event.seq !== "number" || typeof event.kind !== "string") {
-            throw new Error("invalid event frame");
-          }
-          queue.push(event);
-          notify();
-        })
-        .catch((error: unknown) => {
-          failure = new CoopError("invalid WebSocket event", { code: "invalid_response", cause: error });
-          done = true;
-          notify();
-        });
+      queue.push(eventData(message));
+      notify();
     };
     const onClose = () => {
       done = true;
@@ -964,14 +1221,31 @@ export class Coop {
     attach("close", onClose);
     attach("error", onError);
     signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
 
     try {
       while (true) {
         while (queue.length) {
-          const event = queue.shift()!;
+          throwIfAborted(signal);
+          let event: CoopEvent;
+          try {
+            const text = await messageText(queue.shift());
+            throwIfAborted(signal);
+            event = JSON.parse(text) as CoopEvent;
+            if (!Number.isSafeInteger(event.seq) || typeof event.kind !== "string") {
+              throw new Error("invalid event frame");
+            }
+          } catch (error) {
+            if (signal?.aborted) throw abortError();
+            throw new CoopError("invalid WebSocket event", {
+              code: "invalid_response",
+              cause: error,
+            });
+          }
           if (event.seq <= cursor) continue;
           cursor = event.seq;
           yield event;
+          throwIfAborted(signal);
           if (event.kind === "finished" || isTerminal(event.data.status)) return;
         }
         if (done) {
@@ -1001,13 +1275,19 @@ export class Coop {
     const pollIntervalMs = options.pollIntervalMs ?? 1_000;
     assertPositive("pollIntervalMs", pollIntervalMs);
 
+    let terminalEventSeen = false;
     if (options.preferWebSocket !== false && this.webSocketFactory) {
       try {
         const url = await this.streamUrl(jobId, cursor, options);
         for await (const event of this.socketEvents(url, cursor, options.signal)) {
+          throwIfAborted(options.signal);
           cursor = event.seq;
           yield event;
-          if (event.kind === "finished" || isTerminal(event.data.status)) return;
+          throwIfAborted(options.signal);
+          if (event.kind === "finished" || isTerminal(event.data.status)) {
+            terminalEventSeen = true;
+            break;
+          }
         }
       } catch (error) {
         if (options.signal?.aborted) throw error;
@@ -1016,32 +1296,49 @@ export class Coop {
     }
 
     let checks = 0;
-    let terminalProjectionSeen = false;
+    // Even after a terminal WebSocket event, perform one durable replay. This
+    // catches a legacy tail and fences the live/durable hand-off before return.
+    let terminalProjectionSeen = terminalEventSeen;
     while (true) {
+      throwIfAborted(options.signal);
       const pageLimit = 500;
+      const pageStart = cursor;
       const page = await this.eventPage(jobId, {
         after: cursor,
         limit: pageLimit,
         signal: options.signal,
       });
-      let terminalSeen = false;
       for (const event of page.events) {
+        throwIfAborted(options.signal);
         if (event.seq <= cursor) continue;
         cursor = event.seq;
         yield event;
-        if (event.kind === "finished" || isTerminal(event.data.status)) terminalSeen = true;
+        throwIfAborted(options.signal);
+        if (event.kind === "finished" || isTerminal(event.data.status)) {
+          terminalEventSeen = true;
+        }
       }
-      // v0.2 finalization makes the terminal row last. Preserve any tail on a
-      // legacy replay page before stopping rather than silently dropping it.
-      if (terminalSeen) return;
       // A full page can have more durable history behind it. Drain backlog
       // without sleeping or consulting an already-terminal projection, which
       // would otherwise cut output off before the finished event's page.
-      if (page.events.length >= pageLimit) continue;
-      // Finalization commits projection and terminal event atomically, but it
-      // can race between replay and GET. Require a replay after observing the
-      // terminal projection before returning.
-      if (terminalProjectionSeen) return;
+      if (page.events.length >= pageLimit) {
+        if (cursor <= pageStart) {
+          throw new CoopError("event cursor did not advance", {
+            code: "invalid_response",
+          });
+        }
+        continue;
+      }
+      // v0.2 finalization makes the terminal row last. A legacy server can
+      // retain a tail after it, so only stop after draining a short final page.
+      if (terminalEventSeen) return;
+      // A terminal projection is only a hint to accelerate replay. Never let a
+      // stale/empty page cut off the durable terminal event; keep polling until
+      // that event is actually observed (or the caller aborts).
+      if (terminalProjectionSeen) {
+        await delay(pollIntervalMs, options.signal);
+        continue;
+      }
       checks += 1;
       if (checks % 5 === 0) {
         const view = await this.get(jobId, { signal: options.signal });

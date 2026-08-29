@@ -182,11 +182,15 @@ jobs:
           COOP_API_KEYS: ci:ci-only-key-with-more-than-16-characters
         run: docker compose config --quiet
       - name: Build locked image
-        run: >-
-          docker build --pull
-          --build-arg VERSION=0.2.0
-          --build-arg "VCS_REF=${GITHUB_SHA}"
-          --tag coop:ci .
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/^version = "/ { print $2; exit }' Cargo.toml)
+          test -n "$version"
+          docker build --pull \
+            --build-arg "VERSION=$version" \
+            --build-arg "VCS_REF=${GITHUB_SHA}" \
+            --tag coop:ci .
       - name: Inspect private rootfs
         run: |
           docker run --rm --entrypoint /bin/sh coop:ci -ec '

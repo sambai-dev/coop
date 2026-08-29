@@ -59,6 +59,159 @@ test("submit sends one correctly nested limits object", async () => {
   });
 });
 
+test("submit sends a typed minimum-isolation requirement", async () => {
+  const transport = queuedFetch(
+    response({ job_id: "j", status: "queued", stream_url: "/s", replay_url: "/r" }, 201),
+  );
+  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  await coop.submit("python", "print(1)", {
+    requirements: { minimum_isolation: "linux-shared-kernel" },
+  });
+  assert.deepEqual(JSON.parse(transport.calls[0].init.body).requirements, {
+    minimum_isolation: "linux-shared-kernel",
+  });
+});
+
+test("ambiguous submission retry reuses one generated idempotency key", async () => {
+  const transport = queuedFetch(
+    new Error("connection reset after write"),
+    response({ job_id: "j", status: "queued", stream_url: "/s", replay_url: "/r" }, 201),
+  );
+  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const submitted = await coop.submit("python", "print(1)", { retryAmbiguous: true });
+  assert.equal(submitted.job_id, "j");
+  assert.equal(transport.calls.length, 2);
+  const firstKey = transport.calls[0].init.headers["Idempotency-Key"];
+  const secondKey = transport.calls[1].init.headers["Idempotency-Key"];
+  assert.match(firstKey, /^[!-~]{1,255}$/);
+  assert.equal(secondKey, firstKey);
+});
+
+test("submission ambiguity is not retryable without an idempotency key", async () => {
+  const unkeyed = queuedFetch(new Error("connection reset"));
+  const coop = new Coop("https://example.test", "secret", { fetch: unkeyed.fetch });
+  await assert.rejects(coop.submit("python", "print(1)"), (error) => {
+    assert(error instanceof CoopError);
+    assert.equal(error.code, "transport_error");
+    assert.equal(error.retryable, false);
+    assert.equal(error.idempotencyKey, undefined);
+    return true;
+  });
+
+  const keyed = queuedFetch(new Error("connection reset"));
+  const keyedClient = new Coop("https://example.test", "secret", { fetch: keyed.fetch });
+  await assert.rejects(
+    keyedClient.submit("python", "print(1)", { idempotencyKey: "logical-request-1" }),
+    (error) => {
+      assert(error instanceof CoopError);
+      assert.equal(error.retryable, true);
+      assert.equal(error.idempotencyKey, "logical-request-1");
+      return true;
+    },
+  );
+  assert.equal(keyed.calls[0].init.headers["Idempotency-Key"], "logical-request-1");
+});
+
+test("ambiguous retry never repeats a structured HTTP rejection", async () => {
+  const transport = queuedFetch(
+    response({ error: { code: "queue_full", message: "busy", retryable: true } }, 503),
+    response({ job_id: "should-not-run" }, 201),
+  );
+  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  await assert.rejects(
+    coop.submit("python", "print(1)", {
+      idempotencyKey: "logical-request-2",
+      retryAmbiguous: true,
+    }),
+    (error) => error instanceof CoopError && error.code === "queue_full",
+  );
+  assert.equal(transport.calls.length, 1);
+});
+
+test("submission idempotency keys reject controls, whitespace, and overlength", async () => {
+  let calls = 0;
+  const coop = new Coop("https://example.test", "secret", {
+    fetch: async () => {
+      calls += 1;
+      return response({});
+    },
+  });
+  await assert.rejects(coop.submit("python", "", { idempotencyKey: "contains space" }), TypeError);
+  await assert.rejects(coop.submit("python", "", { idempotencyKey: "line\nbreak" }), TypeError);
+  await assert.rejects(coop.submit("python", "", { idempotencyKey: "x".repeat(256) }), TypeError);
+  assert.equal(calls, 0);
+});
+
+test("ambiguous retry does not repeat a client-side serialization failure", async () => {
+  let calls = 0;
+  const cyclic = {};
+  cyclic.self = cyclic;
+  const coop = new Coop("https://example.test", "secret", {
+    fetch: async () => {
+      calls += 1;
+      return response({});
+    },
+  });
+  await assert.rejects(
+    coop.submit("python", "", {
+      limits: cyclic,
+      idempotencyKey: "logical-request-cyclic",
+      retryAmbiguous: true,
+    }),
+    (error) => {
+      assert(error instanceof CoopError);
+      assert.equal(error.code, "invalid_request");
+      assert.equal(error.retryable, false);
+      assert.equal(error.idempotencyKey, "logical-request-cyclic");
+      return true;
+    },
+  );
+  assert.equal(calls, 0);
+});
+
+test("cancelResult returns the typed v0.4 cancellation outcome", async () => {
+  const cancellation = {
+    job: {
+      job_id: "j",
+      tenant: "acme",
+      language: "python",
+      status: "running",
+      created_at_ms: 1,
+      started_at_ms: 2,
+      finished_at_ms: null,
+      exit_code: null,
+    },
+    cancellation_requested: true,
+    already_terminal: false,
+  };
+  const transport = queuedFetch(response(cancellation));
+  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  assert.deepEqual(await coop.cancelResult("j"), cancellation);
+  assert.equal(transport.calls.length, 1);
+  assert.equal(transport.calls[0].init.method, "DELETE");
+});
+
+test("cancelResult adapts a legacy empty 200 without another request", async () => {
+  const transport = queuedFetch(response(undefined));
+  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  assert.deepEqual(await coop.cancelResult("j"), {
+    job: null,
+    cancellation_requested: true,
+    already_terminal: false,
+  });
+  assert.equal(transport.calls.length, 1);
+});
+
+test("cancel remains a void compatibility wrapper", async () => {
+  const transport = queuedFetch(response({
+    job: { job_id: "j" },
+    cancellation_requested: false,
+    already_terminal: true,
+  }));
+  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  assert.equal(await coop.cancel("j"), undefined);
+});
+
 test("structured error preserves server diagnostics and retry delay", async () => {
   const transport = queuedFetch(response({ error: { code: "queue_full", message: "busy", request_id: "req-1", retryable: true } }, 503, { "retry-after": "2" }));
   const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
@@ -108,12 +261,43 @@ test("unstructured result 404 uses the legacy polling fallback", async () => {
       events: [{ seq: 1, ts_ms: 2, kind: "stdout", data: { line: "ok" } }],
       next_cursor: null,
     }),
+    response({ events: [], next_cursor: null }),
+    response({ events: [], next_cursor: null }),
   );
   const result = await new Coop("https://example.test", "secret", {
     fetch: transport.fetch,
   }).result("j", 1_000);
   assert.equal(result.stdout, "ok");
-  assert.equal(transport.calls.length, 3);
+  assert.equal(transport.calls.length, 5);
+});
+
+test("legacy result polling retries an empty terminal replay before folding", async () => {
+  const transport = queuedFetch(
+    response("not found", 404),
+    response({
+      job_id: "j",
+      tenant: "acme",
+      language: "python",
+      status: "succeeded",
+      created_at_ms: 1,
+      started_at_ms: 2,
+      finished_at_ms: 3,
+      exit_code: 0,
+    }),
+    response({ events: [], next_cursor: null }),
+    response({
+      events: [
+        { seq: 1, ts_ms: 2, kind: "stdout", data: { line: "late" } },
+        { seq: 2, ts_ms: 3, kind: "finished", data: { status: "succeeded" } },
+      ],
+      next_cursor: null,
+    }),
+  );
+  const result = await new Coop("https://example.test", "secret", {
+    fetch: transport.fetch,
+  }).result("j", 1_000);
+  assert.equal(result.stdout, "late");
+  assert.equal(transport.calls.length, 4);
 });
 
 test("wait and result deadlines reject non-finite values and zero is immediate", async () => {
@@ -174,6 +358,16 @@ test("replay follows every cursor page", async () => {
   const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
   assert.deepEqual((await coop.replay("j")).map((event) => event.seq), [1, 2]);
   assert.equal(transport.calls[1].url.searchParams.get("after"), "1");
+});
+
+test("replay rejects a non-advancing initial cursor", async () => {
+  const transport = queuedFetch(response({ events: [], next_cursor: 0 }));
+  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  await assert.rejects(
+    coop.replay("j"),
+    (error) => error instanceof CoopError && error.code === "invalid_response",
+  );
+  assert.equal(transport.calls.length, 1);
 });
 
 test("whoami and capabilities expose the v0.2 discovery endpoints", async () => {
@@ -404,7 +598,10 @@ test("an AbortController stops an active request", async () => {
 });
 
 test("WebSocket streaming uses a one-use ticket and de-duplicates cursor replay", async () => {
-  const transport = queuedFetch(response({ ticket: "one use", stream_url: "/v1/jobs/j/stream", expires_at_ms: 1 }));
+  const transport = queuedFetch(
+    response({ ticket: "one use", stream_url: "/v1/jobs/j/stream", expires_at_ms: 1 }),
+    response({ events: [], next_cursor: null }),
+  );
   const socket = new FakeSocket();
   let socketUrl;
   const coop = new Coop("https://example.test/prefix", "secret", {
@@ -425,6 +622,98 @@ test("WebSocket streaming uses a one-use ticket and de-duplicates cursor replay"
   assert.equal(socketUrl.searchParams.get("ticket"), "one use");
   assert.equal(socketUrl.searchParams.get("after"), "2");
   assert.equal(socketUrl.pathname, "/prefix/v1/jobs/j/stream");
+  assert.equal(socket.closed, true);
+});
+
+test("WebSocket decoding preserves arrival order for asynchronous frame bodies", async () => {
+  const transport = queuedFetch(
+    response({ ticket: "ordered", stream_url: "/v1/jobs/j/stream", expires_at_ms: 1 }),
+    response({ events: [], next_cursor: null }),
+  );
+  const socket = new FakeSocket();
+  const coop = new Coop("https://example.test", "secret", {
+    fetch: transport.fetch,
+    webSocketFactory: () => {
+      queueMicrotask(() => {
+        socket.emit("message", {
+          data: {
+            text: () => new Promise((resolve) => setTimeout(() => resolve(JSON.stringify({
+              seq: 1,
+              ts_ms: 1,
+              kind: "stdout",
+              data: { line: "first" },
+            })), 10)),
+          },
+        });
+        socket.emit("message", {
+          data: {
+            text: () => Promise.resolve(JSON.stringify({
+              seq: 2,
+              ts_ms: 2,
+              kind: "finished",
+              data: { status: "succeeded" },
+            })),
+          },
+        });
+      });
+      return socket;
+    },
+  });
+  const events = [];
+  for await (const event of coop.streamEvents("j")) events.push(event.seq);
+  assert.deepEqual(events, [1, 2]);
+});
+
+test("terminal WebSocket event performs one durable tail replay", async () => {
+  const transport = queuedFetch(
+    response({ ticket: "catch-up", stream_url: "/v1/jobs/j/stream", expires_at_ms: 1 }),
+    response({
+      events: [{ seq: 2, ts_ms: 2, kind: "legacy_tail", data: {} }],
+      next_cursor: 2,
+    }),
+  );
+  const socket = new FakeSocket();
+  const coop = new Coop("https://example.test", "secret", {
+    fetch: transport.fetch,
+    webSocketFactory: () => {
+      queueMicrotask(() => socket.emit("message", {
+        data: JSON.stringify({ seq: 1, ts_ms: 1, kind: "finished", data: { status: "succeeded" } }),
+      }));
+      return socket;
+    },
+  });
+  const events = [];
+  for await (const event of coop.streamEvents("j")) events.push(event.seq);
+  assert.deepEqual(events, [1, 2]);
+  assert.equal(transport.calls[1].url.searchParams.get("after"), "1");
+});
+
+test("stream stop fences already-buffered WebSocket callbacks", async () => {
+  const transport = queuedFetch(
+    response({ ticket: "stop", stream_url: "/v1/jobs/j/stream", expires_at_ms: 1 }),
+  );
+  const socket = new FakeSocket();
+  const coop = new Coop("https://example.test", "secret", {
+    fetch: transport.fetch,
+    webSocketFactory: () => {
+      queueMicrotask(() => {
+        for (let seq = 1; seq <= 4; seq += 1) {
+          socket.emit("message", {
+            data: JSON.stringify({ seq, ts_ms: seq, kind: "stdout", data: { line: String(seq) } }),
+          });
+        }
+      });
+      return socket;
+    },
+  });
+  const events = [];
+  let stop = () => {};
+  stop = coop.stream("j", (event) => {
+    events.push(event.seq);
+    stop();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(events, [1]);
   assert.equal(socket.closed, true);
 });
 
@@ -482,7 +771,10 @@ test("legacy query-key streaming requires explicit opt-in", async () => {
   }
   assert.deepEqual(defaultSocketUrls, []);
 
-  const optedInTransport = queuedFetch(response("not found", 404));
+  const optedInTransport = queuedFetch(
+    response("not found", 404),
+    response({ events: [], next_cursor: null }),
+  );
   const optedInSocket = new FakeSocket();
   let optedInUrl;
   const optedInClient = new Coop("https://example.test", "secret", {
@@ -597,6 +889,101 @@ test("terminal status is followed by a final catch-up replay", async () => {
   assert.deepEqual(events.map((event) => event.kind), ["finished"]);
   assert.equal(replays, 6);
   assert.equal(statusRequests, 1);
+});
+
+test("an empty replay after terminal projection does not hide the terminal event", async () => {
+  let replays = 0;
+  let statusRequests = 0;
+  const fetch = async (input) => {
+    const url = new URL(input);
+    if (url.pathname.endsWith("/replay")) {
+      replays += 1;
+      if (replays <= 6) return response({ events: [], next_cursor: null });
+      return response({
+        events: [{
+          seq: 1,
+          ts_ms: 1,
+          kind: "finished",
+          data: { status: "succeeded" },
+        }],
+        next_cursor: 1,
+      });
+    }
+    statusRequests += 1;
+    return response({ job_id: "j", status: "succeeded" });
+  };
+  const coop = new Coop("https://example.test", "secret", { fetch });
+  const events = [];
+  for await (const event of coop.streamEvents("j", {
+    preferWebSocket: false,
+    pollIntervalMs: 1,
+  })) events.push(event);
+  assert.deepEqual(events.map((event) => event.kind), ["finished"]);
+  assert.equal(replays, 7);
+  assert.equal(statusRequests, 1);
+});
+
+test("polling abort fences the remainder of a buffered replay page", async () => {
+  const transport = queuedFetch(response({
+    events: [
+      { seq: 1, ts_ms: 1, kind: "stdout", data: { line: "one" } },
+      { seq: 2, ts_ms: 2, kind: "stdout", data: { line: "two" } },
+      { seq: 3, ts_ms: 3, kind: "finished", data: { status: "succeeded" } },
+    ],
+    next_cursor: 3,
+  }));
+  const controller = new AbortController();
+  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const events = [];
+  await assert.rejects(async () => {
+    for await (const event of coop.streamEvents("j", {
+      preferWebSocket: false,
+      signal: controller.signal,
+    })) {
+      events.push(event.seq);
+      controller.abort();
+    }
+  }, (error) => error instanceof CoopError && error.code === "request_aborted");
+  assert.deepEqual(events, [1]);
+});
+
+test("polling stream rejects a full page that makes no cursor progress", async () => {
+  let calls = 0;
+  const duplicatePage = {
+    events: Array.from({ length: 500 }, () => ({
+      seq: 1,
+      ts_ms: 1,
+      kind: "stdout",
+      data: { line: "duplicate" },
+    })),
+    next_cursor: 1,
+  };
+  const coop = new Coop("https://example.test", "secret", {
+    fetch: async () => {
+      calls += 1;
+      return response(duplicatePage);
+    },
+  });
+  await assert.rejects(async () => {
+    for await (const _event of coop.streamEvents("j", {
+      after: 1,
+      preferWebSocket: false,
+      pollIntervalMs: 60_000,
+    })) {
+      // The duplicate page must not yield or spin.
+    }
+  }, (error) => error instanceof CoopError && error.code === "invalid_response");
+  assert.equal(calls, 1);
+});
+
+test("client serialization and object spread do not expose the API key", () => {
+  const coop = new Coop("https://example.test", "super-secret", {
+    fetch: async () => response({}),
+  });
+  assert.equal(coop.apiKey, "super-secret");
+  assert.equal(Object.keys(coop).includes("apiKey"), false);
+  assert.equal(JSON.stringify(coop).includes("super-secret"), false);
+  assert.equal(JSON.stringify({ ...coop }).includes("super-secret"), false);
 });
 
 test("base URL rejects credentials and query confusion", () => {

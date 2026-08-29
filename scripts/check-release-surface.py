@@ -80,6 +80,15 @@ def check_versions() -> str:
     python_version = toml_string("sdks/python/pyproject.toml", "project", "version")
     typescript_package = json.loads(read("sdks/typescript/package.json"))
     typescript_version = typescript_package["version"]
+    typescript_scripts = typescript_package.get("scripts", {})
+    require(
+        typescript_scripts.get("prepack") == "npm run build",
+        "TypeScript package must build its ignored dist entrypoints before packing",
+    )
+    require(
+        "pack-smoke" in typescript_scripts,
+        "TypeScript package lacks a packed-artifact consumer smoke",
+    )
     for label, candidate in [
         ("Python SDK", python_version),
         ("TypeScript SDK", typescript_version),
@@ -88,6 +97,16 @@ def check_versions() -> str:
     require(
         f'__version__ = "{version}"' in read("sdks/python/coop.py"),
         "Python module version differs from its package metadata",
+    )
+    python_lock = read("sdks/python/uv.lock")
+    locked_python_project = re.search(
+        r'\[\[package\]\]\s+name = "coop-sdk"\s+version = "([^"]+)"',
+        python_lock,
+    )
+    require(
+        locked_python_project is not None
+        and locked_python_project.group(1) == python_version,
+        "Python uv.lock project version differs from pyproject.toml",
     )
     typescript_lock = json.loads(read("sdks/typescript/package-lock.json"))
     lock_root = typescript_lock["packages"][""]
@@ -101,6 +120,12 @@ def check_versions() -> str:
     require(
         f"ARG VERSION={version}" in read("Dockerfile"),
         "Dockerfile default version differs from the workspace",
+    )
+    ci_workflow = read(".github/workflows/ci.yml")
+    require(
+        "version=$(awk" in ci_workflow
+        and '--build-arg "VERSION=$version"' in ci_workflow,
+        "CI container build does not derive its OCI version from Cargo.toml",
     )
     require(
         f"FROM rust:{toolchain}-" in read("Dockerfile"),
@@ -316,6 +341,12 @@ def check_pins_and_packaging() -> int:
         '"coop_mcp.py" = "coop_mcp.py"',
     ]:
         require(required in python_manifest, f"Python MCP packaging contract missing: {required}")
+    root_license = read("LICENSE")
+    for relative in ["sdks/python/LICENSE", "sdks/typescript/LICENSE"]:
+        require(
+            read(relative) == root_license,
+            f"{relative} differs from the canonical repository license",
+        )
     bootstrap = read("scripts/bootstrap-production.sh")
     for required in [
         "COOP_PRODUCTION_VM_ACKNOWLEDGED",

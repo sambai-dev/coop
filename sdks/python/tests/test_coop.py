@@ -5,7 +5,7 @@ import unittest
 import urllib.error
 import urllib.parse
 
-from coop import Coop, CoopError, Limits
+from coop import Coop, CoopError, Limits, _SameOriginRedirect
 
 
 class Response:
@@ -115,6 +115,123 @@ class CoopTests(unittest.TestCase):
         client.submit("bash", "true", limits=Limits(mem_mb=64), wall_seconds=3)
         body = json.loads(opener.requests[0].data)
         self.assertEqual(body["limits"], {"mem_mb": 64, "wall_seconds": 3})
+
+    def test_submit_serializes_typed_atomic_execution_requirements(self):
+        opener = QueueOpener(
+            {"job_id": "j", "status": "queued", "stream_url": "/s", "replay_url": "/r"}
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+        client.submit(
+            "python",
+            "pass",
+            requirements={"minimum_isolation": "linux-shared-kernel"},
+        )
+        body = json.loads(opener.requests[0].data)
+        self.assertEqual(
+            body["requirements"], {"minimum_isolation": "linux-shared-kernel"}
+        )
+
+    def test_submit_rejects_incomplete_execution_requirements_before_transport(self):
+        client = Coop("https://example.test", "secret", opener=QueueOpener())
+        with self.assertRaisesRegex(ValueError, "minimum_isolation is required"):
+            client.submit("python", "pass", requirements={})
+
+    def test_submit_uses_one_idempotency_key_for_ambiguous_retries(self):
+        opener = QueueOpener(
+            urllib.error.URLError(TimeoutError("response was ambiguous")),
+            {
+                "job_id": "j",
+                "status": "queued",
+                "stream_url": "/s",
+                "replay_url": "/r",
+            },
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+
+        submitted = client.submit(
+            "python",
+            "print(1)",
+            idempotency_key="submit-123",
+            retry_ambiguous=True,
+            retry_backoff=0,
+        )
+
+        self.assertEqual(submitted["job_id"], "j")
+        self.assertEqual(len(opener.requests), 2)
+        self.assertEqual(opener.requests[0].data, opener.requests[1].data)
+        for request in opener.requests:
+            self.assertEqual(request.get_header("Idempotency-key"), "submit-123")
+
+    def test_submit_does_not_retry_ambiguity_without_explicit_opt_in(self):
+        opener = QueueOpener(
+            urllib.error.URLError(TimeoutError("response was ambiguous"))
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+
+        with self.assertRaises(CoopError) as raised:
+            client.submit("python", "pass", idempotency_key="submit-456")
+
+        self.assertEqual(raised.exception.code, "request_timeout")
+        self.assertEqual(raised.exception.idempotency_key, "submit-456")
+        self.assertEqual(len(opener.requests), 1)
+
+    def test_unkeyed_ambiguous_submit_failure_is_not_safe_to_retry(self):
+        opener = QueueOpener(
+            urllib.error.URLError(TimeoutError("response was ambiguous"))
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+        with self.assertRaises(CoopError) as raised:
+            client.submit("python", "pass")
+        self.assertFalse(raised.exception.retryable)
+        self.assertIsNone(raised.exception.idempotency_key)
+
+    def test_submit_rejects_unsafe_retry_configuration_before_transport(self):
+        client = Coop("https://example.test", "secret", opener=QueueOpener())
+        for operation in (
+            lambda: client.submit("python", "pass", idempotency_key="bad\nkey"),
+            lambda: client.submit(
+                "python", "pass", idempotency_key="key", max_ambiguous_retries=11
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                operation()
+        with self.assertRaises(TypeError):
+            client.submit("python", "pass", retry_ambiguous=1)  # type: ignore[arg-type]
+
+    def test_submit_generates_one_stable_key_for_opt_in_ambiguous_retry(self):
+        opener = QueueOpener(
+            urllib.error.URLError(TimeoutError("response was ambiguous")),
+            {
+                "job_id": "j",
+                "status": "queued",
+                "stream_url": "/s",
+                "replay_url": "/r",
+            },
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+        client.submit("python", "pass", retry_ambiguous=True, retry_backoff=0)
+        keys = [request.get_header("Idempotency-key") for request in opener.requests]
+        self.assertEqual(len(set(keys)), 1)
+        self.assertTrue(keys[0])
+
+    def test_keyed_submit_refuses_redirects_that_can_change_the_request(self):
+        request = urllib.request.Request(
+            "https://example.test/v1/jobs",
+            data=b"{}",
+            method="POST",
+            headers={"Idempotency-Key": "submit-1"},
+        )
+        handler = _SameOriginRedirect("https://example.test")
+        with self.assertRaises(CoopError) as raised:
+            handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "https://example.test/moved",
+            )
+        self.assertEqual(raised.exception.code, "unsafe_redirect")
 
     def test_structured_error_exposes_contract_fields(self):
         payload = {
@@ -410,10 +527,36 @@ class CoopTests(unittest.TestCase):
         self.assertEqual(opener.status_requests, 1)
 
     def test_cancel_accepts_an_empty_success_response(self):
-        opener = QueueOpener(None)
+        opener = QueueOpener(None, None)
         client = Coop("https://example.test", "secret", opener=opener)
         self.assertIsNone(client.cancel("j"))
+        self.assertEqual(
+            client.cancel_result("j"),
+            {
+                "job": None,
+                "cancellation_requested": True,
+                "already_terminal": False,
+            },
+        )
         self.assertEqual(opener.requests[0].method, "DELETE")
+
+    def test_cancel_normalizes_the_current_acknowledgement_envelope(self):
+        job = {"job_id": "j", "status": "running"}
+        opener = QueueOpener(
+            {
+                "job": job,
+                "cancellation_requested": True,
+                "already_terminal": False,
+            },
+            {
+                "job": job,
+                "cancellation_requested": True,
+                "already_terminal": False,
+            },
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+        self.assertEqual(client.cancel_result("j")["job"], job)
+        self.assertEqual(client.cancel("j"), job)
 
     def test_whoami_and_capabilities_are_typed_endpoints(self):
         opener = QueueOpener(
@@ -788,6 +931,22 @@ class CoopTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 Coop(url, "secret")
+
+        for timeout in (float("nan"), float("inf"), 0):
+            with self.assertRaises(ValueError):
+                Coop("https://example.test", "secret", timeout=timeout)
+
+    def test_stream_rejects_non_finite_polling_before_transport(self):
+        client = Coop("https://example.test", "secret", opener=QueueOpener())
+        for interval in (float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                list(
+                    client.stream(
+                        "j",
+                        prefer_websocket=False,
+                        poll_interval=interval,
+                    )
+                )
 
 
 if __name__ == "__main__":

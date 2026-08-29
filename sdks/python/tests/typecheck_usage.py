@@ -3,9 +3,11 @@
 from typing import Iterator, Optional, cast
 
 from coop import (
+    CancellationResponse,
     Coop,
     CoopEvent,
     EffectiveJobSpec,
+    ExecutionRequirements,
     ExecutorOutputEvidence,
     HashedCoopEvent,
     JobDetail,
@@ -18,10 +20,13 @@ from coop import (
 )
 
 client = Coop("https://coop.example", "tenant-key", timeout=5)
+requirements: ExecutionRequirements = {"minimum_isolation": "linux-shared-kernel"}
 submitted: SubmitResponse = client.submit(
     "python",
     "print(42)",
     limits=Limits(wall_seconds=5, mem_mb=128),
+    requirements=requirements,
+    idempotency_key="consumer-submit-1",
 )
 page: JobPage = client.list(status="running", language="python")
 detail: JobDetail = client.get(submitted["job_id"])
@@ -29,6 +34,7 @@ receipt: Optional[Receipt] = detail["receipt"]
 terminal: JobDetail = client.wait(submitted["job_id"])
 events: Iterator[CoopEvent] = client.stream(submitted["job_id"])
 result: JobResult = client.result(submitted["job_id"])
+cancelled: CancellationResponse = client.cancel_result(submitted["job_id"])
 hashed: HashedCoopEvent = cast(HashedCoopEvent, next(events))
 
 effective: Optional[EffectiveJobSpec] = detail["effective_spec"]
@@ -49,5 +55,6 @@ _ = (
     terminal,
     events,
     result,
+    cancelled,
     hashed,
 )
