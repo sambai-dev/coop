@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -407,9 +409,9 @@ impl JwtConfig {
         jwks_ttl_seconds: u64,
         max_token_age_seconds: u64,
     ) -> Result<Self, String> {
-        validate_https_url("COOP_OIDC_ISSUER", issuer, false)?;
-        validate_https_url("COOP_OIDC_AUDIENCE", audience, false)?;
-        let jwks_url = validate_https_url("COOP_OIDC_JWKS_URL", jwks_url, true)?;
+        validate_https_url("COOP_OIDC_ISSUER", issuer)?;
+        validate_https_url("COOP_OIDC_AUDIENCE", audience)?;
+        let jwks_url = validate_https_url("COOP_OIDC_JWKS_URL", jwks_url)?;
         validate_claim_name(tenant_claim)?;
         if matches!(
             tenant_claim,
@@ -515,9 +517,79 @@ struct JwksCache {
     last_refresh_attempt: Option<Instant>,
 }
 
+#[derive(Clone, Copy)]
+enum RefreshReason<'a> {
+    Expired,
+    UnknownKid(&'a str),
+}
+
+type JwksFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<HashMap<String, CachedJwtKey>, String>> + Send + 'a>>;
+
+trait JwksSource: Send + Sync {
+    fn fetch(&self) -> JwksFuture<'_>;
+}
+
+#[cfg(test)]
+struct StaticJwksSource {
+    keys: HashMap<String, CachedJwtKey>,
+}
+
+#[cfg(test)]
+impl JwksSource for StaticJwksSource {
+    fn fetch(&self) -> JwksFuture<'_> {
+        Box::pin(async move { Ok(self.keys.clone()) })
+    }
+}
+
+struct HttpJwksSource {
+    client: Client,
+    url: Url,
+    algorithms: Vec<Algorithm>,
+}
+
+impl JwksSource for HttpJwksSource {
+    fn fetch(&self) -> JwksFuture<'_> {
+        Box::pin(async move {
+            let response = self
+                .client
+                .get(self.url.clone())
+                .header(
+                    reqwest::header::ACCEPT,
+                    "application/jwk-set+json, application/json",
+                )
+                .send()
+                .await
+                .map_err(|error| format!("OIDC JWKS request failed: {error}"))?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "OIDC JWKS endpoint returned HTTP {}",
+                    response.status()
+                ));
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length > JWKS_MAX_BYTES as u64)
+            {
+                return Err("OIDC JWKS response exceeds the 1 MiB limit".to_string());
+            }
+            let mut body = Vec::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|error| format!("OIDC JWKS body failed: {error}"))?;
+                if body.len().saturating_add(chunk.len()) > JWKS_MAX_BYTES {
+                    return Err("OIDC JWKS response exceeds the 1 MiB limit".to_string());
+                }
+                body.extend_from_slice(&chunk);
+            }
+            parse_jwks(&body, &self.algorithms)
+        })
+    }
+}
+
 pub struct JwtVerifier {
     config: JwtConfig,
-    client: Client,
+    source: Arc<dyn JwksSource>,
     cache: RwLock<JwksCache>,
     refresh_lock: Mutex<()>,
 }
@@ -540,9 +612,14 @@ impl JwtVerifier {
             .user_agent(concat!("coop/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| format!("cannot build OIDC JWKS client: {error}"))?;
+        let source = Arc::new(HttpJwksSource {
+            client,
+            url: config.jwks_url.clone(),
+            algorithms: config.algorithms.clone(),
+        });
         let verifier = Self {
             config,
-            client,
+            source,
             cache: RwLock::new(JwksCache {
                 keys: HashMap::new(),
                 valid_until: Instant::now(),
@@ -550,7 +627,7 @@ impl JwtVerifier {
             }),
             refresh_lock: Mutex::new(()),
         };
-        verifier.refresh(false).await?;
+        verifier.refresh(RefreshReason::Expired).await?;
         Ok(verifier)
     }
 
@@ -663,11 +740,18 @@ impl JwtVerifier {
     }
 
     async fn key_for(&self, kid: &str) -> Result<CachedJwtKey, String> {
-        self.refresh(false).await?;
-        if let Some(key) = self.cache.read().await.keys.get(kid).cloned() {
-            return Ok(key);
-        }
-        self.refresh(true).await?;
+        let refresh_reason = {
+            let cache = self.cache.read().await;
+            if cache.valid_until > Instant::now() {
+                if let Some(key) = cache.keys.get(kid).cloned() {
+                    return Ok(key);
+                }
+                RefreshReason::UnknownKid(kid)
+            } else {
+                RefreshReason::Expired
+            }
+        };
+        self.refresh(refresh_reason).await?;
         self.cache
             .read()
             .await
@@ -677,24 +761,25 @@ impl JwtVerifier {
             .ok_or_else(|| "JWT kid is not present in the configured JWKS".to_string())
     }
 
-    async fn refresh(&self, unknown_kid: bool) -> Result<(), String> {
+    async fn refresh(&self, reason: RefreshReason<'_>) -> Result<(), String> {
         let _guard = self.refresh_lock.lock().await;
         let now = Instant::now();
         {
             let cache = self.cache.read().await;
-            if !unknown_kid && !cache.keys.is_empty() && cache.valid_until > now {
-                return Ok(());
-            }
-            if !unknown_kid
-                && !cache.keys.is_empty()
-                && cache.valid_until <= now
+            if cache.valid_until > now {
+                match reason {
+                    RefreshReason::Expired => return Ok(()),
+                    RefreshReason::UnknownKid(kid) if cache.keys.contains_key(kid) => return Ok(()),
+                    RefreshReason::UnknownKid(_) => {}
+                }
+            } else if !cache.keys.is_empty()
                 && cache.last_refresh_attempt.is_some_and(|last| {
                     now.duration_since(last) < JWKS_UNKNOWN_KID_REFRESH_COOLDOWN
                 })
             {
                 return Err("OIDC JWKS refresh is cooling down after a recent attempt".to_string());
             }
-            if unknown_kid
+            if matches!(reason, RefreshReason::UnknownKid(_))
                 && cache.last_refresh_attempt.is_some_and(|last| {
                     now.duration_since(last) < JWKS_UNKNOWN_KID_REFRESH_COOLDOWN
                 })
@@ -703,65 +788,11 @@ impl JwtVerifier {
             }
         }
         self.cache.write().await.last_refresh_attempt = Some(now);
-        let keys = self.fetch_jwks().await?;
+        let keys = self.source.fetch().await?;
         let mut cache = self.cache.write().await;
         cache.keys = keys;
         cache.valid_until = Instant::now() + self.config.jwks_ttl;
         Ok(())
-    }
-
-    async fn fetch_jwks(&self) -> Result<HashMap<String, CachedJwtKey>, String> {
-        let response = self
-            .client
-            .get(self.config.jwks_url.clone())
-            .header(
-                reqwest::header::ACCEPT,
-                "application/jwk-set+json, application/json",
-            )
-            .send()
-            .await
-            .map_err(|error| format!("OIDC JWKS request failed: {error}"))?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "OIDC JWKS endpoint returned HTTP {}",
-                response.status()
-            ));
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > JWKS_MAX_BYTES as u64)
-        {
-            return Err("OIDC JWKS response exceeds the 1 MiB limit".to_string());
-        }
-        let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| format!("OIDC JWKS body failed: {error}"))?;
-            if body.len().saturating_add(chunk.len()) > JWKS_MAX_BYTES {
-                return Err("OIDC JWKS response exceeds the 1 MiB limit".to_string());
-            }
-            body.extend_from_slice(&chunk);
-        }
-        parse_jwks(&body, &self.config.algorithms)
-    }
-
-    #[cfg(test)]
-    fn from_jwks(config: JwtConfig, jwks: &[u8]) -> Result<Self, String> {
-        let keys = parse_jwks(jwks, &config.algorithms)?;
-        let client = Client::builder()
-            .redirect(Policy::none())
-            .build()
-            .map_err(|error| error.to_string())?;
-        Ok(Self {
-            config,
-            client,
-            cache: RwLock::new(JwksCache {
-                keys,
-                valid_until: Instant::now() + Duration::from_secs(3600),
-                last_refresh_attempt: Some(Instant::now()),
-            }),
-            refresh_lock: Mutex::new(()),
-        })
     }
 }
 
@@ -855,7 +886,7 @@ fn parse_jwks(
     Ok(keys)
 }
 
-fn validate_https_url(setting: &str, value: &str, allow_query: bool) -> Result<Url, String> {
+fn validate_https_url(setting: &str, value: &str) -> Result<Url, String> {
     let url =
         Url::parse(value).map_err(|error| format!("{setting} is not a valid URL: {error}"))?;
     if url.scheme() != "https"
@@ -863,11 +894,10 @@ fn validate_https_url(setting: &str, value: &str, allow_query: bool) -> Result<U
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
-        || (!allow_query && url.query().is_some())
+        || url.query().is_some()
     {
         return Err(format!(
-            "{setting} must be an HTTPS URL without credentials{} or fragment",
-            if allow_query { "" } else { ", query" }
+            "{setting} must be an HTTPS URL without credentials, query, or fragment",
         ));
     }
     Ok(url)
@@ -1407,6 +1437,8 @@ mod tests {
     use axum::http::Request as HttpRequest;
     use jsonwebtoken::jwk::Jwk;
     use jsonwebtoken::{encode, EncodingKey, Header};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Semaphore;
     use tower::ServiceExt;
 
     const TEST_RSA_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
@@ -1657,7 +1689,7 @@ GcZ0izY/30012ajdHY+/QK5lsMoxTnn0skdS+spLxaS5ZEO4qvPVb8RAoCkWMMal
         .unwrap()
     }
 
-    fn jwt_fixture() -> (JwtVerifier, EncodingKey) {
+    fn jwt_material() -> (JwtConfig, HashMap<String, CachedJwtKey>, EncodingKey) {
         let encoding = EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY.as_bytes()).unwrap();
         let jwk: Jwk = serde_json::from_value(serde_json::json!({
             "kty":"RSA",
@@ -1669,8 +1701,25 @@ GcZ0izY/30012ajdHY+/QK5lsMoxTnn0skdS+spLxaS5ZEO4qvPVb8RAoCkWMMal
         }))
         .unwrap();
         let jwks = serde_json::to_vec(&serde_json::json!({"keys":[jwk]})).unwrap();
+        let config = jwt_config();
+        let keys = parse_jwks(&jwks, &config.algorithms).unwrap();
+        (config, keys, encoding)
+    }
+
+    fn jwt_fixture() -> (JwtVerifier, EncodingKey) {
+        let (config, keys, encoding) = jwt_material();
+        let jwks = Arc::new(StaticJwksSource { keys: keys.clone() });
         (
-            JwtVerifier::from_jwks(jwt_config(), &jwks).unwrap(),
+            JwtVerifier {
+                config,
+                source: jwks,
+                cache: RwLock::new(JwksCache {
+                    keys,
+                    valid_until: Instant::now() + Duration::from_secs(3600),
+                    last_refresh_attempt: Some(Instant::now()),
+                }),
+                refresh_lock: Mutex::new(()),
+            },
             encoding,
         )
     }
@@ -1700,6 +1749,147 @@ GcZ0izY/30012ajdHY+/QK5lsMoxTnn0skdS+spLxaS5ZEO4qvPVb8RAoCkWMMal
         header.kid = Some("test-key".to_string());
         mutate(&mut header);
         encode(&header, claims, encoding).unwrap()
+    }
+
+    struct BlockingJwksSource {
+        keys: HashMap<String, CachedJwtKey>,
+        calls: AtomicUsize,
+        entered: Semaphore,
+        release: Semaphore,
+    }
+
+    impl BlockingJwksSource {
+        fn new(keys: HashMap<String, CachedJwtKey>) -> Self {
+            Self {
+                keys,
+                calls: AtomicUsize::new(0),
+                entered: Semaphore::new(0),
+                release: Semaphore::new(0),
+            }
+        }
+
+        async fn wait_until_entered(&self) {
+            self.entered.acquire().await.unwrap().forget();
+        }
+
+        fn release_one(&self) {
+            self.release.add_permits(1);
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl JwksSource for BlockingJwksSource {
+        fn fetch(&self) -> JwksFuture<'_> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.entered.add_permits(1);
+                self.release.acquire().await.unwrap().forget();
+                Ok(self.keys.clone())
+            })
+        }
+    }
+
+    fn verifier_with_source(
+        config: JwtConfig,
+        keys: HashMap<String, CachedJwtKey>,
+        source: Arc<dyn JwksSource>,
+        last_refresh_attempt: Option<Instant>,
+    ) -> Arc<JwtVerifier> {
+        Arc::new(JwtVerifier {
+            config,
+            source,
+            cache: RwLock::new(JwksCache {
+                keys,
+                valid_until: Instant::now() + Duration::from_secs(3600),
+                last_refresh_attempt,
+            }),
+            refresh_lock: Mutex::new(()),
+        })
+    }
+
+    fn token_with_kid(encoding: &EncodingKey, kid: &str) -> String {
+        sign_claims(encoding, &valid_claims(), |header| {
+            header.kid = Some(kid.to_string());
+        })
+    }
+
+    #[tokio::test]
+    async fn cached_valid_token_bypasses_a_blocked_unknown_kid_refresh() {
+        let (config, keys, encoding) = jwt_material();
+        let source = Arc::new(BlockingJwksSource::new(keys.clone()));
+        let verifier = verifier_with_source(
+            config,
+            keys,
+            source.clone(),
+            Some(Instant::now() - JWKS_UNKNOWN_KID_REFRESH_COOLDOWN - Duration::from_secs(1)),
+        );
+        let unknown = token_with_kid(&encoding, "unknown-key");
+        let unknown_verifier = verifier.clone();
+        let refresh = tokio::spawn(async move { unknown_verifier.authenticate(&unknown).await });
+        tokio::time::timeout(Duration::from_secs(1), source.wait_until_entered())
+            .await
+            .expect("unknown kid starts one refresh");
+
+        let valid = token_with_kid(&encoding, "test-key");
+        let cached =
+            tokio::time::timeout(Duration::from_millis(250), verifier.authenticate(&valid))
+                .await
+                .expect("cached verification must not wait for the refresh mutex");
+        assert!(cached.is_ok());
+        assert_eq!(source.calls(), 1);
+
+        source.release_one();
+        assert!(refresh.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn unknown_kid_cooldown_skips_fetch_and_returns_promptly() {
+        let (config, keys, encoding) = jwt_material();
+        let source = Arc::new(BlockingJwksSource::new(keys.clone()));
+        let verifier = verifier_with_source(config, keys, source.clone(), Some(Instant::now()));
+        let unknown = token_with_kid(&encoding, "unknown-key");
+        let result =
+            tokio::time::timeout(Duration::from_millis(250), verifier.authenticate(&unknown))
+                .await
+                .expect("cooldown rejection must not perform network I/O");
+        assert!(result.is_err());
+        assert_eq!(source.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_unknown_kids_singleflight_one_refresh() {
+        let (config, keys, encoding) = jwt_material();
+        let source = Arc::new(BlockingJwksSource::new(keys.clone()));
+        let verifier = verifier_with_source(
+            config,
+            keys,
+            source.clone(),
+            Some(Instant::now() - JWKS_UNKNOWN_KID_REFRESH_COOLDOWN - Duration::from_secs(1)),
+        );
+        let unknown = token_with_kid(&encoding, "unknown-key");
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let verifier = verifier.clone();
+            let token = unknown.clone();
+            tasks.push(tokio::spawn(
+                async move { verifier.authenticate(&token).await },
+            ));
+        }
+        tokio::time::timeout(Duration::from_secs(1), source.wait_until_entered())
+            .await
+            .expect("one contender begins the refresh");
+        assert_eq!(source.calls(), 1);
+        source.release_one();
+        let results = tokio::time::timeout(Duration::from_secs(2), async {
+            futures_util::future::join_all(tasks).await
+        })
+        .await
+        .expect("all cooldown followers complete without another fetch");
+        assert!(results.into_iter().all(|result| result.unwrap().is_err()));
+        assert_eq!(source.calls(), 1);
     }
 
     #[tokio::test]
@@ -1911,6 +2101,14 @@ GcZ0izY/30012ajdHY+/QK5lsMoxTnn0skdS+spLxaS5ZEO4qvPVb8RAoCkWMMal
             (
                 "https://issuer.example",
                 "https://coop.example",
+                "https://issuer.example/jwks?token=must-not-enter-config",
+                "tenant_id",
+                "a=t",
+                "RS256",
+            ),
+            (
+                "https://issuer.example",
+                "https://coop.example",
                 "https://issuer.example/jwks",
                 "sub",
                 "a=t",
@@ -1938,5 +2136,17 @@ GcZ0izY/30012ajdHY+/QK5lsMoxTnn0skdS+spLxaS5ZEO4qvPVb8RAoCkWMMal
                     .is_err()
             );
         }
+        let secret_query = JwtConfig::parse(
+            "https://issuer.example",
+            "https://coop.example",
+            "https://issuer.example/jwks?token=must-not-enter-debug",
+            "tenant_id",
+            "a=t",
+            "RS256",
+            300,
+            3600,
+        )
+        .unwrap_err();
+        assert!(!secret_query.contains("must-not-enter-debug"));
     }
 }
