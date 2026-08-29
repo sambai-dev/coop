@@ -1069,6 +1069,31 @@ async fn namespaces_mode_never_falls_back_to_naive_execution() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn gvisor_mode_requires_the_explicit_provider_and_never_falls_back() {
+    let dir = workdir("gvisor-fail-closed");
+    let ctx = ExecContext {
+        job_key: "gvisor-fail-closed".into(),
+        language: "python".into(),
+        code: "print('MUST-NOT-RUN')".into(),
+        stdin: None,
+        limits: limits_wall(10),
+        workdir: dir.clone(),
+        interpreter_override: None,
+        rootfs: None,
+        helper_path: None,
+        cancel: None,
+        start_gate: None,
+        seccomp: false,
+    };
+    let error = execute(ctx, collector(), SandboxMode::Gvisor)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(!dir.join("job.py").exists(), "naive source staging ran");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires root, delegated cgroup v2, COOP_ROOTFS, and COOP_SANDBOX_HELPER"]

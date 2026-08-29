@@ -30,9 +30,11 @@ jobs:
       - name: Validate release shell support
         run: >-
           bash -n scripts/prepare-test-rootfs.sh scripts/smoke-container.sh
-          scripts/bootstrap-production.sh
+          scripts/bootstrap-production.sh scripts/smoke-gvisor.sh
       - name: Validate production verifier syntax
-        run: python3 -m py_compile scripts/verify-production.py
+        run: >-
+          python3 -m py_compile scripts/verify-production.py
+          scripts/build-rootfs-manifest.py
 
   rust-quality:
     name: rust quality
@@ -200,6 +202,7 @@ jobs:
             test -x /opt/coop/rootfs/usr/bin/python3
             test -x /opt/coop/rootfs/usr/bin/node
             test -x /opt/coop/rootfs/usr/bin/bash
+            test -x /opt/coop/rootfs/usr/local/bin/coop-oci-init
             test -d /opt/coop/rootfs/.pivot_old
             test "$(stat -c %a /opt/coop)" = 700
             test "$(stat -c %U:%G /opt/coop)" = root:root
@@ -214,6 +217,22 @@ jobs:
         env:
           COOP_SMOKE_ALLOW_PRIVILEGED: "true"
         run: bash scripts/smoke-container.sh coop:ci
+      - name: Smoke final image through the reviewed gVisor OCI backend
+        run: |
+          set -euo pipefail
+          base=https://storage.googleapis.com/gvisor/releases/release/20260817.0/x86_64
+          curl -fsSLo /tmp/coop-runsc "$base/runsc"
+          curl -fsSLo /tmp/runsc.sha512 "$base/runsc.sha512"
+          (cd /tmp && cp coop-runsc runsc && sha512sum -c runsc.sha512)
+          test "$(sha256sum /tmp/coop-runsc | awk '{print $1}')" = 048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c
+          sudo install -o root -g root -m 0755 /tmp/coop-runsc /usr/local/bin/coop-runsc-ci
+          docker run --rm --privileged --cgroupns=host \
+            --volume /usr/local/bin/coop-runsc-ci:/usr/local/bin/runsc:ro \
+            --volume "$PWD/scripts/smoke-gvisor.sh:/usr/local/bin/smoke-gvisor.sh:ro" \
+            --env COOP_GVISOR_RUNSC=/usr/local/bin/runsc \
+            --env COOP_GVISOR_SERVER_BIN=/usr/local/bin/coop \
+            --entrypoint /bin/bash \
+            coop:ci /usr/local/bin/smoke-gvisor.sh
 
   hostile:
     name: Linux containment (must run)
@@ -240,7 +259,7 @@ jobs:
             "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ bookworm-security main" \
             > /etc/apt/sources.list
           apt-get update -qq
-          apt-get install -y -qq --no-install-recommends git python3 nodejs bash ca-certificates util-linux
+          apt-get install -y -qq --no-install-recommends git python3 nodejs bash ca-certificates curl util-linux
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Restore Rust cache
@@ -249,8 +268,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked -p coop-exec --bin coop-sandbox-init
-          bash scripts/prepare-test-rootfs.sh target/debug/coop-sandbox-init
+          cargo build --locked -p coop-server --bin coop -p coop-exec --bin coop-sandbox-init --bin coop-oci-init
+          bash scripts/prepare-test-rootfs.sh target/debug/coop-sandbox-init target/debug/coop-oci-init
+      - name: Install reviewed gVisor runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=https://storage.googleapis.com/gvisor/releases/release/20260817.0/x86_64
+          curl -fsSLo /usr/local/bin/runsc "$base/runsc"
+          curl -fsSLo /tmp/runsc.sha512 "$base/runsc.sha512"
+          (cd /usr/local/bin && sha512sum -c /tmp/runsc.sha512)
+          test "$(sha256sum /usr/local/bin/runsc | awk '{print $1}')" = 048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c
+          chmod 0755 /usr/local/bin/runsc
+          test "$(/usr/local/bin/runsc --version | head -n1)" = "runsc version release-20260817.0"
+      - name: Run real gVisor OCI lifecycle and crash-reconciliation gate
+        shell: bash
+        env:
+          COOP_GVISOR_RUNSC: /usr/local/bin/runsc
+          COOP_GVISOR_SERVER_BIN: target/debug/coop
+        run: bash scripts/smoke-gvisor.sh
       - name: Fail if containment prerequisites are unavailable
         shell: bash
         run: |

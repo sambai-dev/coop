@@ -1,17 +1,25 @@
 mod bounded_output;
 pub mod naive;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub mod gvisor;
+
 #[cfg(target_os = "linux")]
 pub mod linux_sandbox;
 
 #[cfg(target_os = "linux")]
+pub mod oci_init;
+
+#[cfg(target_os = "linux")]
 pub mod seccomp;
 
-use coop_types::{EffectiveLimits, LimitEnforcement, Limits};
+use coop_types::{EffectiveLimits, IsolationClass, LimitEnforcement, Limits};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +238,8 @@ impl ExecOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionProvenance {
     pub backend: String,
+    #[serde(default)]
+    pub isolation_class: IsolationClass,
     pub bootstrap_ready: bool,
     pub isolated: bool,
     pub private_rootfs: bool,
@@ -238,6 +248,14 @@ pub struct ExecutionProvenance {
     pub network_allowed: Option<bool>,
     pub networking: Option<String>,
     pub limit_enforcement: LimitEnforcement,
+    #[serde(default)]
+    pub runtime_version: Option<String>,
+    #[serde(default)]
+    pub runtime_sha256: Option<String>,
+    #[serde(default)]
+    pub rootfs_sha256: Option<String>,
+    #[serde(default)]
+    pub config_sha256: Option<String>,
 }
 
 impl ExecutionProvenance {
@@ -250,6 +268,11 @@ impl ExecutionProvenance {
         let development = ready && mode == SandboxMode::Off;
         Self {
             backend: mode.as_str().to_string(),
+            isolation_class: if ready {
+                mode.isolation_class()
+            } else {
+                IsolationClass::None
+            },
             bootstrap_ready: ready,
             isolated,
             private_rootfs: isolated,
@@ -270,6 +293,10 @@ impl ExecutionProvenance {
             } else {
                 LimitEnforcement::NONE
             },
+            runtime_version: None,
+            runtime_sha256: None,
+            rootfs_sha256: None,
+            config_sha256: None,
         }
     }
 
@@ -321,6 +348,7 @@ pub struct ExecTelemetry {
 pub enum SandboxMode {
     Off,
     Namespaces,
+    Gvisor,
 }
 
 impl SandboxMode {
@@ -328,6 +356,7 @@ impl SandboxMode {
         match s.to_ascii_lowercase().as_str() {
             "off" | "none" | "naive" => Ok(SandboxMode::Off),
             "ns" | "namespaces" | "sandbox" => Ok(SandboxMode::Namespaces),
+            "gvisor" | "runsc" => Ok(SandboxMode::Gvisor),
             other => Err(format!("unknown sandbox mode {other:?}")),
         }
     }
@@ -336,7 +365,184 @@ impl SandboxMode {
         match self {
             SandboxMode::Off => "off",
             SandboxMode::Namespaces => "namespaces+cgroups-v2+private-rootfs",
+            SandboxMode::Gvisor => "gvisor-oci",
         }
+    }
+
+    pub const fn isolation_class(self) -> IsolationClass {
+        match self {
+            SandboxMode::Off => IsolationClass::None,
+            SandboxMode::Namespaces => IsolationClass::LinuxSharedKernel,
+            SandboxMode::Gvisor => IsolationClass::GvisorApplicationKernel,
+        }
+    }
+}
+
+pub type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub async fn quiesce_stale_gvisor_workloads(jobs_root: &Path) -> io::Result<usize> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        gvisor::quiesce_stale_workloads(jobs_root).await
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    {
+        let _ = jobs_root;
+        Ok(0)
+    }
+}
+
+/// Detect provider-owned gVisor recovery state before provider selection.
+///
+/// Callers use this to force strict jobs-root validation and cgroup
+/// quiescence even when the newly requested provider is Off. Otherwise an
+/// operator switching providers after a launcher crash could leave the old
+/// tenant workload running while startup merely reports the foreign state.
+pub fn stale_gvisor_state_present(jobs_root: &Path) -> io::Result<bool> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        gvisor::stale_state_present(jobs_root)
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    {
+        let _ = jobs_root;
+        Ok(false)
+    }
+}
+
+async fn reject_foreign_gvisor_state(jobs_root: &Path) -> io::Result<()> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        if gvisor::stale_state_present(jobs_root)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "stale gVisor state was quiesced; restart once with the matching reviewed gVisor provider to delete its runtime state before selecting another provider",
+            ));
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = jobs_root;
+    Ok(())
+}
+
+/// Inputs used by a provider's fail-closed startup execution gate.
+#[derive(Debug, Clone)]
+pub struct ProviderPreflight {
+    pub jobs_root: PathBuf,
+    pub rootfs: Option<PathBuf>,
+    pub helper: Option<PathBuf>,
+    pub seccomp: bool,
+    pub interpreter_overrides: Vec<(String, Option<String>)>,
+}
+
+/// Runtime-provider boundary shared by built-in and external executors.
+///
+/// Implementations own execution, cleanup, crash reconciliation, and the
+/// provenance that crosses their actual workload-ready boundary. Selection is
+/// explicit at process startup; providers must never fall back to another
+/// implementation after a launch failure.
+pub trait ExecutionProvider: Send + Sync {
+    fn mode(&self) -> SandboxMode;
+
+    fn isolation_class(&self) -> IsolationClass {
+        self.mode().isolation_class()
+    }
+
+    fn not_ready_provenance(&self) -> ExecutionProvenance {
+        ExecutionProvenance::not_ready(self.mode())
+    }
+
+    fn execute<'a>(
+        &'a self,
+        ctx: ExecContext,
+        sink: Arc<dyn Sink>,
+    ) -> ProviderFuture<'a, ExecutionReport>;
+
+    fn preflight<'a>(&'a self, input: ProviderPreflight) -> ProviderFuture<'a, io::Result<()>>;
+
+    fn reconcile<'a>(&'a self, jobs_root: &'a Path) -> ProviderFuture<'a, io::Result<()>>;
+
+    /// True when a failed execution left provider-owned recovery metadata in
+    /// the job directory. The scheduler must preserve that directory for the
+    /// next startup reconciliation instead of erasing the only cleanup handle.
+    fn has_recovery_state(&self, _workdir: &Path) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct OffProvider;
+
+impl ExecutionProvider for OffProvider {
+    fn mode(&self) -> SandboxMode {
+        SandboxMode::Off
+    }
+
+    fn execute<'a>(
+        &'a self,
+        ctx: ExecContext,
+        sink: Arc<dyn Sink>,
+    ) -> ProviderFuture<'a, ExecutionReport> {
+        Box::pin(execute_reported(ctx, sink, SandboxMode::Off))
+    }
+
+    fn preflight<'a>(&'a self, _input: ProviderPreflight) -> ProviderFuture<'a, io::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn reconcile<'a>(&'a self, jobs_root: &'a Path) -> ProviderFuture<'a, io::Result<()>> {
+        Box::pin(reject_foreign_gvisor_state(jobs_root))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct NamespaceProvider;
+
+impl ExecutionProvider for NamespaceProvider {
+    fn mode(&self) -> SandboxMode {
+        SandboxMode::Namespaces
+    }
+
+    fn execute<'a>(
+        &'a self,
+        ctx: ExecContext,
+        sink: Arc<dyn Sink>,
+    ) -> ProviderFuture<'a, ExecutionReport> {
+        Box::pin(execute_reported(ctx, sink, SandboxMode::Namespaces))
+    }
+
+    fn preflight<'a>(&'a self, input: ProviderPreflight) -> ProviderFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            let rootfs = input.rootfs.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "namespace preflight requires rootfs",
+                )
+            })?;
+            let helper = input.helper.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "namespace preflight requires helper",
+                )
+            })?;
+            let overrides = input
+                .interpreter_overrides
+                .iter()
+                .map(|(language, executable)| (language.as_str(), executable.as_deref()))
+                .collect::<Vec<_>>();
+            namespace_sandbox_execution_preflight(
+                rootfs,
+                helper,
+                &input.jobs_root,
+                input.seccomp,
+                &overrides,
+            )
+            .await
+        })
+    }
+
+    fn reconcile<'a>(&'a self, jobs_root: &'a Path) -> ProviderFuture<'a, io::Result<()>> {
+        Box::pin(reject_foreign_gvisor_state(jobs_root))
     }
 }
 
@@ -552,6 +758,15 @@ pub async fn execute_reported(
     sink: Arc<dyn Sink>,
     mode: SandboxMode,
 ) -> ExecutionReport {
+    if mode == SandboxMode::Gvisor {
+        return ExecutionReport {
+            outcome: Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "gVisor execution requires an explicitly configured GvisorProvider; refusing subprocess fallback",
+            )),
+            provenance: ExecutionProvenance::not_ready(mode),
+        };
+    }
     let seccomp_requested = ctx.seccomp;
     let observer = ExecutionObserver::default();
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

@@ -33,6 +33,16 @@ pub struct Config {
     pub rootfs: Option<String>,
     /// Dedicated single-threaded bootstrap executable for namespace setup.
     pub sandbox_helper: Option<String>,
+    /// Absolute path to the reviewed, operator-installed runsc binary.
+    pub gvisor_runsc: Option<String>,
+    /// Operator-generated content digest of the immutable trusted rootfs.
+    pub gvisor_rootfs_sha256: Option<String>,
+    /// gVisor syscall interception platform: systrap in a VM, or KVM on a
+    /// suitably isolated bare-metal host.
+    pub gvisor_platform: String,
+    /// Non-root identity used by the OCI init and workload inside gVisor.
+    pub gvisor_uid: u32,
+    pub gvisor_gid: u32,
     /// Whether production policy is active. Kept in the parsed configuration
     /// so embedded servers cannot accidentally use the caller process' env.
     pub production: bool,
@@ -79,6 +89,11 @@ impl std::fmt::Debug for Config {
             .field("jobs_root", &self.jobs_root)
             .field("rootfs", &self.rootfs)
             .field("sandbox_helper", &self.sandbox_helper)
+            .field("gvisor_runsc", &self.gvisor_runsc)
+            .field("gvisor_rootfs_sha256", &self.gvisor_rootfs_sha256)
+            .field("gvisor_platform", &self.gvisor_platform)
+            .field("gvisor_uid", &self.gvisor_uid)
+            .field("gvisor_gid", &self.gvisor_gid)
             .field("production", &self.production)
             .field("unsafe_allow_naive", &self.unsafe_allow_naive)
             .field("unsafe_allow_public_dev", &self.unsafe_allow_public_dev)
@@ -643,6 +658,15 @@ impl Config {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .or_else(default_sandbox_helper),
+            gvisor_runsc: getenv("COOP_GVISOR_RUNSC")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            gvisor_rootfs_sha256: getenv("COOP_GVISOR_ROOTFS_SHA256")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty()),
+            gvisor_platform: env_or(getenv, "COOP_GVISOR_PLATFORM", "systrap"),
+            gvisor_uid: parse_number(getenv, "COOP_GVISOR_UID", "65534", 1u32, 4_294_967_294u32)?,
+            gvisor_gid: parse_number(getenv, "COOP_GVISOR_GID", "65534", 1u32, 4_294_967_294u32)?,
             production,
             unsafe_allow_naive,
             unsafe_allow_public_dev,

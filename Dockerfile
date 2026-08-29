@@ -30,6 +30,9 @@ RUN install -d -m 0755 /.pivot_old /proc /dev /work \
     && install -d -m 1777 /tmp \
     && install -d -m 0755 /tmp/home
 
+FROM sandbox-rootfs AS complete-sandbox-rootfs
+COPY --from=build /src/target/release/coop-oci-init /usr/local/bin/coop-oci-init
+
 FROM runtime-base AS runtime
 
 # The namespace bootstrap and seccomp policy are x86_64-only. Refuse to
@@ -51,7 +54,10 @@ LABEL org.opencontainers.image.title="Coop" \
 RUN install -d -o root -g root -m 0700 /data /var/lib/coop/jobs /opt/coop \
     && install -d -o root -g root -m 0755 /opt/coop/rootfs
 
-COPY --from=sandbox-rootfs / /opt/coop/rootfs
+COPY --from=complete-sandbox-rootfs / /opt/coop/rootfs
+COPY scripts/build-rootfs-manifest.py /tmp/build-rootfs-manifest.py
+RUN python3 /tmp/build-rootfs-manifest.py /opt/coop/rootfs >/dev/null \
+    && rm /tmp/build-rootfs-manifest.py
 COPY --from=build /src/target/release/coop /usr/local/bin/coop
 COPY --from=build /src/target/release/coop-sandbox-init /usr/local/bin/coop-sandbox-init
 

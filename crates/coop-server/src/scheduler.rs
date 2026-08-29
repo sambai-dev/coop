@@ -748,6 +748,21 @@ async fn handle_job(
         return;
     }
 
+    if !state
+        .execution_provider
+        .isolation_class()
+        .satisfies(spec.requirements.minimum_isolation)
+    {
+        tracing::error!(
+            requested = ?spec.requirements.minimum_isolation,
+            available = ?state.execution_provider.isolation_class(),
+            "queued job isolation requirement cannot be satisfied"
+        );
+        finalize_without_execution_retrying(&state, &job_id, "minimum_isolation_unsatisfied").await;
+        queued.release_admission();
+        return;
+    }
+
     if matches!(state.sandbox_mode, coop_exec::SandboxMode::Off)
         && !state
             .resolved_naive_interpreters
@@ -768,7 +783,7 @@ async fn handle_job(
     // tightens it during recovery; increasing the server ceiling never grants
     // an already-accepted queued job more memory than it originally received.
     execution_spec.limits.mem_mb = queued.mem_mb;
-    let isolated = matches!(state.sandbox_mode, coop_exec::SandboxMode::Namespaces);
+    let isolated = state.execution_provider.isolation_class() != coop_types::IsolationClass::None;
     // The request flag is not an egress grant. In the development subprocess
     // backend, however, host networking still exists and must be represented
     // truthfully in the effective spec and evidence receipt.
@@ -783,6 +798,8 @@ async fn handle_job(
             &LimitEnforcement::NONE,
             None,
         ),
+        "requirements": execution_spec.requirements.clone(),
+        "isolation_class": serde_json::Value::Null,
     });
 
     // Register cancellation ownership before the guarded durable start. This
@@ -870,9 +887,7 @@ async fn handle_job(
             0,
             None,
             None,
-            Some(coop_exec::ExecutionProvenance::not_ready(
-                state.sandbox_mode,
-            )),
+            Some(state.execution_provider.not_ready_provenance()),
         )
         .await;
         await_event_pump(&state, &job_id, pump).await;
@@ -888,9 +903,7 @@ async fn handle_job(
             0,
             Some(reason.to_string()),
             None,
-            Some(coop_exec::ExecutionProvenance::not_ready(
-                state.sandbox_mode,
-            )),
+            Some(state.execution_provider.not_ready_provenance()),
         )
         .await;
         await_event_pump(&state, &job_id, pump).await;
@@ -943,18 +956,19 @@ async fn handle_job(
     let coop_exec::ExecutionReport {
         outcome: result,
         provenance,
-    } = coop_exec::execute_reported(
-        ctx,
-        Arc::new(JobSink {
-            tx: op_tx.clone(),
-            metrics: Arc::clone(&state.metrics),
-            stdout_dropped: Arc::clone(&stdout_dropped),
-            stderr_dropped: Arc::clone(&stderr_dropped),
-            deferred_controls: Arc::clone(&deferred_controls),
-        }),
-        state.sandbox_mode,
-    )
-    .await;
+    } = state
+        .execution_provider
+        .execute(
+            ctx,
+            Arc::new(JobSink {
+                tx: op_tx.clone(),
+                metrics: Arc::clone(&state.metrics),
+                stdout_dropped: Arc::clone(&stdout_dropped),
+                stderr_dropped: Arc::clone(&stderr_dropped),
+                deferred_controls: Arc::clone(&deferred_controls),
+            }),
+        )
+        .await;
 
     let controls = {
         let mut queue = deferred_controls
@@ -1020,7 +1034,14 @@ async fn handle_job(
         }
     }
 
-    let _ = tokio::fs::remove_dir_all(&workdir).await;
+    if state.execution_provider.has_recovery_state(&workdir) {
+        tracing::error!(
+            path = %workdir.display(),
+            "preserving provider recovery state after incomplete cleanup"
+        );
+    } else {
+        let _ = tokio::fs::remove_dir_all(&workdir).await;
+    }
     await_event_pump(&state, &job_id, pump).await;
     state.cancels.remove(&job_id);
 }
@@ -1155,7 +1176,7 @@ async fn finalize_cancelled_without_execution_retrying(
     reason: &str,
 ) {
     let output = OutputEvidence::default();
-    let provenance = coop_exec::ExecutionProvenance::not_ready(state.sandbox_mode);
+    let provenance = state.execution_provider.not_ready_provenance();
     finalize_job(
         state,
         job_id,
@@ -1728,6 +1749,7 @@ async fn try_build_receipt(
         "duration_ms": terminal.duration_ms.max(0),
         "evidence_complete": terminal.output.persistence_complete,
         "requested_limits": requested.get("limits").cloned().unwrap_or(Value::Null),
+        "requirements": requested.get("requirements").cloned().unwrap_or_else(|| json!({"minimum_isolation": "none"})),
         "code_sha256": format!("{:x}", Sha256::digest(code.as_bytes())),
         "stdin_sha256": format!("{:x}", Sha256::digest(stdin.as_bytes())),
         "resource_usage": terminal.telemetry.map(|telemetry| json!({
@@ -1765,6 +1787,8 @@ async fn try_build_receipt(
         let effective_limits = provenance.effective_limits(&limits);
         let policy = json!({
             "backend": provenance.backend,
+            "minimum_isolation": spec.requirements.minimum_isolation,
+            "isolation_class": provenance.isolation_class,
             "bootstrap_ready": provenance.bootstrap_ready,
             "isolated": provenance.isolated,
             "seccomp": provenance.seccomp,
@@ -1774,6 +1798,10 @@ async fn try_build_receipt(
             "dedicated_bootstrap": provenance.dedicated_bootstrap,
             "effective_limits": effective_limits,
             "limit_enforcement": provenance.limit_enforcement,
+            "runtime_version": provenance.runtime_version,
+            "runtime_sha256": provenance.runtime_sha256,
+            "rootfs_sha256": provenance.rootfs_sha256,
+            "config_sha256": provenance.config_sha256,
         });
         let Some(policy_bytes) = serde_json::to_vec(&policy).ok() else {
             return Ok(BuiltTerminalEvidence::default());
@@ -1781,11 +1809,17 @@ async fn try_build_receipt(
         observed_effective_spec = Some(json!({
             "storage_version": 2,
             "limits": effective_limits.clone(),
+            "requirements": spec.requirements.clone(),
+            "isolation_class": provenance
+                .bootstrap_ready
+                .then_some(provenance.isolation_class),
         }));
         if observed_effective_spec.is_none() {
             return Ok(BuiltTerminalEvidence::default());
         }
         receipt["backend"] = json!(provenance.backend);
+        receipt["minimum_isolation"] = json!(spec.requirements.minimum_isolation);
+        receipt["isolation_class"] = json!(provenance.isolation_class);
         receipt["bootstrap_ready"] = json!(provenance.bootstrap_ready);
         receipt["isolated"] = json!(provenance.isolated);
         receipt["seccomp"] = json!(provenance.seccomp);
@@ -1795,6 +1829,10 @@ async fn try_build_receipt(
         receipt["dedicated_bootstrap"] = json!(provenance.dedicated_bootstrap);
         receipt["effective_limits"] = json!(effective_limits);
         receipt["limit_enforcement"] = json!(provenance.limit_enforcement);
+        receipt["runtime_version"] = json!(provenance.runtime_version);
+        receipt["runtime_sha256"] = json!(provenance.runtime_sha256);
+        receipt["rootfs_sha256"] = json!(provenance.rootfs_sha256);
+        receipt["config_sha256"] = json!(provenance.config_sha256);
         receipt["policy_sha256"] = json!(format!("{:x}", Sha256::digest(&policy_bytes)));
     }
     Ok(BuiltTerminalEvidence {
@@ -1872,6 +1910,11 @@ mod admission_tests {
             jobs_root: jobs_root.to_string_lossy().into_owned(),
             rootfs: None,
             sandbox_helper: None,
+            gvisor_runsc: None,
+            gvisor_rootfs_sha256: None,
+            gvisor_platform: "systrap".to_string(),
+            gvisor_uid: 65_534,
+            gvisor_gid: 65_534,
             production: false,
             unsafe_allow_naive: false,
             unsafe_allow_public_dev: false,
@@ -2150,6 +2193,7 @@ mod admission_tests {
             code: "print('never ready')".to_string(),
             stdin: None,
             limits: coop_types::Limits::default(),
+            requirements: coop_types::JobRequirements::default(),
         };
         state
             .store
@@ -2172,6 +2216,8 @@ mod admission_tests {
                         &LimitEnforcement::NAMESPACE_SANDBOX,
                         Some(false),
                     ),
+                    "requirements": coop_types::JobRequirements::default(),
+                    "isolation_class": serde_json::Value::Null,
                 }),
             )
             .await
@@ -2288,6 +2334,7 @@ mod admission_tests {
             code: "raise SystemExit('must not execute')".to_string(),
             stdin: None,
             limits: coop_types::Limits::default(),
+            requirements: coop_types::JobRequirements::default(),
         };
         state
             .store

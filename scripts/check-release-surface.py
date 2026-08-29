@@ -228,6 +228,7 @@ def check_pins_and_packaging() -> int:
         "cargo build --locked --release -p coop-server -p coop-exec --bins",
         'COOP_GIT_REVISION="${VCS_REF}" cargo build',
         "coop-sandbox-init /usr/local/bin/coop-sandbox-init",
+        "coop-oci-init /usr/local/bin/coop-oci-init",
         "COOP_ROOTFS=/opt/coop/rootfs",
         "COOP_SANDBOX_HELPER=/usr/local/bin/coop-sandbox-init",
         "install -d -o root -g root -m 0700 /data /var/lib/coop/jobs /opt/coop",
@@ -349,6 +350,16 @@ def check_pins_and_packaging() -> int:
         "release workflow publishes an unsupported Linux architecture",
     )
     require("coop-sandbox-init" in release, "Linux release artifact omits the sandbox helper")
+    require("coop-oci-init" in release, "Linux release artifact omits the gVisor OCI init")
+    gvisor_smoke = read("scripts/smoke-gvisor.sh")
+    for required in [
+        "release-20260817.0",
+        "048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c",
+        "gvisor-application-kernel",
+        "NETWORK_BLOCKED",
+        "crash reconciliation passed",
+    ]:
+        require(required in gvisor_smoke, f"gVisor release gate missing contract: {required}")
     python_manifest = read("sdks/python/pyproject.toml")
     for required in [
         'coop-mcp = "coop_mcp:main"',

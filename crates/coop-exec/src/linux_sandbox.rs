@@ -341,9 +341,7 @@ pub(crate) async fn run_observed(
     })?;
     fs::set_permissions(&mount_point, fs::Permissions::from_mode(0o700))?;
 
-    let base = prepare_cgroup_base()?;
-    let lease = CgroupLease::new(create_cgroup_dir(&base, &ctx.job_key)?);
-    write_cgroup_limits(lease.path(), &ctx.limits)?;
+    let lease = create_job_cgroup(&ctx.job_key, &ctx.limits)?;
     let oom_before = read_named_counter_checked(lease.path().join("memory.events"), "oom_kill")?;
     let cpu_before = read_named_counter(lease.path().join("cpu.stat"), "usage_usec");
     let started = Instant::now();
@@ -986,7 +984,7 @@ fn validate_job_key(job_key: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_rootfs(rootfs: &Path, workdir: &Path) -> io::Result<PathBuf> {
+pub(crate) fn validate_rootfs(rootfs: &Path, workdir: &Path) -> io::Result<PathBuf> {
     ensure_absolute_no_symlinks(rootfs, "COOP_ROOTFS")?;
     let rootfs = fs::canonicalize(rootfs)?;
     if rootfs == Path::new("/") {
@@ -1101,7 +1099,7 @@ fn validate_helper(helper: PathBuf) -> io::Result<PathBuf> {
     fs::canonicalize(helper)
 }
 
-fn resolve_rootfs_interpreter(rootfs: &Path, configured: &str) -> io::Result<String> {
+pub(crate) fn resolve_rootfs_interpreter(rootfs: &Path, configured: &str) -> io::Result<String> {
     let requested = Path::new(configured);
     if requested
         .components()
@@ -1418,6 +1416,14 @@ fn create_cgroup_dir(base: &Path, job_key: &str) -> io::Result<PathBuf> {
 }
 
 fn write_cgroup_limits(group: &Path, limits: &Limits) -> io::Result<()> {
+    write_cgroup_limits_with_pids_overhead(group, limits, 1)
+}
+
+fn write_cgroup_limits_with_pids_overhead(
+    group: &Path,
+    limits: &Limits,
+    pids_overhead: u32,
+) -> io::Result<()> {
     let memory = u64::from(limits.mem_mb) * 1024 * 1024;
     write_cgroup(group, "memory.max", memory)?;
     write_cgroup(group, "memory.swap.max", 0)?;
@@ -1428,7 +1434,7 @@ fn write_cgroup_limits(group: &Path, limits: &Limits) -> io::Result<()> {
     write_cgroup(
         group,
         "pids.max",
-        u64::from(limits.max_pids).saturating_add(1),
+        u64::from(limits.max_pids).saturating_add(u64::from(pids_overhead)),
     )?;
     Ok(())
 }
@@ -1466,30 +1472,37 @@ fn cleanup_cgroup_sync(group: &Path, grace: Duration) -> io::Result<()> {
         .map_err(|error| io::Error::other(format!("remove cgroup {}: {error}", group.display())))
 }
 
-fn cgroup_populated(group: &Path) -> bool {
-    fs::read_to_string(group.join("cgroup.events"))
-        .ok()
-        .and_then(|value| {
-            value.lines().find_map(|line| {
-                line.strip_prefix("populated ")
-                    .and_then(|number| number.trim().parse::<u8>().ok())
-            })
-        })
-        .map_or_else(
-            || {
-                fs::read_to_string(group.join("cgroup.procs"))
-                    .map(|value| !value.trim().is_empty())
-                    .unwrap_or(true)
-            },
-            |value| value != 0,
-        )
+pub(crate) fn cgroup_populated(group: &Path) -> bool {
+    cgroup_populated_checked(group).unwrap_or(true)
 }
 
-fn read_named_counter(path: PathBuf, name: &str) -> u64 {
+pub(crate) fn cgroup_populated_checked(group: &Path) -> io::Result<bool> {
+    fs::read_to_string(group.join("cgroup.events"))
+        .and_then(|value| {
+            value
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("populated ")
+                        .and_then(|number| number.trim().parse::<u8>().ok())
+                })
+                .map(|value| value != 0)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "cgroup.events omitted the populated counter",
+                    )
+                })
+        })
+        .or_else(|_| {
+            fs::read_to_string(group.join("cgroup.procs")).map(|value| !value.trim().is_empty())
+        })
+}
+
+pub(crate) fn read_named_counter(path: PathBuf, name: &str) -> u64 {
     read_named_counter_checked(path, name).unwrap_or(0)
 }
 
-fn read_named_counter_checked(path: PathBuf, name: &str) -> io::Result<u64> {
+pub(crate) fn read_named_counter_checked(path: PathBuf, name: &str) -> io::Result<u64> {
     let text = fs::read_to_string(&path).map_err(|error| {
         io::Error::other(format!("read cgroup counter {}: {error}", path.display()))
     })?;
@@ -1511,7 +1524,7 @@ fn read_named_counter_checked(path: PathBuf, name: &str) -> io::Result<u64> {
         })
 }
 
-fn read_scalar(path: PathBuf) -> Option<u64> {
+pub(crate) fn read_scalar(path: PathBuf) -> Option<u64> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
@@ -1519,7 +1532,7 @@ fn cpu_budget_exceeded(group: &Path, before: u64, budget: u64) -> bool {
     read_named_counter(group.join("cpu.stat"), "usage_usec").saturating_sub(before) >= budget
 }
 
-struct CgroupLease {
+pub(crate) struct CgroupLease {
     path: Option<PathBuf>,
 }
 
@@ -1528,13 +1541,48 @@ impl CgroupLease {
         Self { path: Some(path) }
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         self.path.as_deref().expect("cgroup lease is active")
     }
 
-    fn release(mut self) -> PathBuf {
+    pub(crate) fn release(mut self) -> PathBuf {
         self.path.take().expect("cgroup lease is active")
     }
+}
+
+pub(crate) fn create_job_cgroup(job_key: &str, limits: &Limits) -> io::Result<CgroupLease> {
+    create_job_cgroup_with_pids_overhead(job_key, limits, 1)
+}
+
+pub(crate) fn create_job_cgroup_with_pids_overhead(
+    job_key: &str,
+    limits: &Limits,
+    pids_overhead: u32,
+) -> io::Result<CgroupLease> {
+    let base = prepare_cgroup_base()?;
+    let lease = CgroupLease::new(create_cgroup_dir(&base, job_key)?);
+    if let Err(error) = write_cgroup_limits_with_pids_overhead(lease.path(), limits, pids_overhead)
+    {
+        drop(lease);
+        return Err(error);
+    }
+    Ok(lease)
+}
+
+pub(crate) async fn cleanup_job_cgroup(lease: CgroupLease) -> io::Result<()> {
+    let path = lease.release();
+    tokio::task::spawn_blocking(move || cleanup_cgroup_sync(&path, CLEANUP_GRACE))
+        .await
+        .map_err(|error| io::Error::other(format!("cgroup cleanup task failed: {error}")))?
+}
+
+pub(crate) async fn cleanup_job_cgroup_by_key(job_key: &str) -> io::Result<()> {
+    validate_job_key(job_key)?;
+    let base = prepare_cgroup_base()?;
+    let path = base.join(format!("job-{job_key}"));
+    tokio::task::spawn_blocking(move || cleanup_cgroup_sync(&path, CLEANUP_GRACE))
+        .await
+        .map_err(|error| io::Error::other(format!("cgroup cleanup task failed: {error}")))?
 }
 
 impl Drop for CgroupLease {

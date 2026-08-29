@@ -20,6 +20,50 @@ pub const MEM_MAX_MB: u32 = 4096;
 pub const PIDS_MAX: u32 = 1024;
 pub const FILE_MAX_MB: u32 = 512;
 
+/// The runtime boundary a job requires or actually reached.
+///
+/// Most process-style providers form a monotonic chain from no isolation to
+/// confidential hardware. `wasm-capability` is deliberately a separate
+/// branch: a VM does not silently satisfy a caller that explicitly requested
+/// a capability-oriented Wasm host interface, and vice versa.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum IsolationClass {
+    #[default]
+    None,
+    LinuxSharedKernel,
+    GvisorApplicationKernel,
+    WasmCapability,
+    HardwareVm,
+    ConfidentialVm,
+}
+
+impl IsolationClass {
+    /// Whether this observed provider class satisfies a requested minimum.
+    pub const fn satisfies(self, minimum: Self) -> bool {
+        use IsolationClass::*;
+        match minimum {
+            None => true,
+            WasmCapability => matches!(self, WasmCapability),
+            LinuxSharedKernel => matches!(
+                self,
+                LinuxSharedKernel | GvisorApplicationKernel | HardwareVm | ConfidentialVm
+            ),
+            GvisorApplicationKernel => {
+                matches!(self, GvisorApplicationKernel | HardwareVm | ConfidentialVm)
+            }
+            HardwareVm => matches!(self, HardwareVm | ConfidentialVm),
+            ConfidentialVm => matches!(self, ConfidentialVm),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct JobRequirements {
+    pub minimum_isolation: IsolationClass,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct Limits {
@@ -137,6 +181,8 @@ pub struct JobSpec {
     pub stdin: Option<String>,
     #[serde(default)]
     pub limits: Limits,
+    #[serde(default)]
+    pub requirements: JobRequirements,
 }
 
 /// An execution spec whose controls describe effective, not merely requested,
@@ -148,6 +194,12 @@ pub struct EffectiveJobSpec {
     pub code: String,
     pub stdin: Option<String>,
     pub limits: EffectiveLimits,
+    #[serde(default)]
+    pub requirements: JobRequirements,
+    /// Null until a provider crosses its runtime-observed workload-ready
+    /// boundary. A configured provider is not execution evidence.
+    #[serde(default)]
+    pub isolation_class: Option<IsolationClass>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -219,4 +271,39 @@ impl From<OutcomeStatus> for JobStatus {
 
 pub fn is_supported_language(language: &str) -> bool {
     SUPPORTED_LANGUAGES.contains(&language)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn isolation_satisfaction_is_monotonic_except_for_wasm_branch() {
+        assert!(
+            IsolationClass::GvisorApplicationKernel.satisfies(IsolationClass::LinuxSharedKernel)
+        );
+        assert!(IsolationClass::ConfidentialVm.satisfies(IsolationClass::HardwareVm));
+        assert!(
+            !IsolationClass::LinuxSharedKernel.satisfies(IsolationClass::GvisorApplicationKernel)
+        );
+        assert!(IsolationClass::WasmCapability.satisfies(IsolationClass::WasmCapability));
+        assert!(!IsolationClass::HardwareVm.satisfies(IsolationClass::WasmCapability));
+        assert!(!IsolationClass::WasmCapability.satisfies(IsolationClass::LinuxSharedKernel));
+    }
+
+    #[test]
+    fn requirements_are_additive_and_default_to_none() {
+        let spec: JobSpec = serde_json::from_value(serde_json::json!({
+            "language": "python",
+            "code": "print(1)"
+        }))
+        .unwrap();
+        assert_eq!(spec.requirements.minimum_isolation, IsolationClass::None);
+
+        let encoded = serde_json::to_value(JobRequirements {
+            minimum_isolation: IsolationClass::GvisorApplicationKernel,
+        })
+        .unwrap();
+        assert_eq!(encoded["minimum_isolation"], "gvisor-application-kernel");
+    }
 }

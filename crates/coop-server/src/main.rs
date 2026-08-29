@@ -107,6 +107,24 @@ async fn run() -> Result<(), String> {
     // or workers concurrently. Keep the file handle alive for this run.
     let _instance_lock = acquire_instance_lock(Path::new(&cfg.db_path))?;
     let store_limits = cfg.storage_limits();
+    let requested = cfg.sandbox.trim().to_ascii_lowercase();
+    let explicitly_isolated = matches!(
+        requested.as_str(),
+        "ns" | "namespaces" | "sandbox" | "gvisor" | "runsc"
+    );
+    let jobs_root = Path::new(&cfg.jobs_root);
+    // Always validate the private leaf before looking for provider-owned
+    // state. A previous gVisor crash must be quiesced even when the operator
+    // now requests Off; provider selection alone is not a cleanup boundary.
+    coop_server::config::prepare_jobs_root(jobs_root, false)?;
+    let stale_gvisor = coop_exec::stale_gvisor_state_present(jobs_root)
+        .map_err(|error| format!("could not inspect stale gVisor state: {error}"))?;
+    if cfg.production || explicitly_isolated || stale_gvisor {
+        coop_server::config::prepare_jobs_root(jobs_root, true)?;
+        coop_exec::quiesce_stale_gvisor_workloads(jobs_root)
+            .await
+            .map_err(|error| format!("could not quiesce stale gVisor workloads: {error}"))?;
+    }
     let store = Arc::new(
         Store::open_with_limits(Path::new(&cfg.db_path), store_limits)
             .await
@@ -123,31 +141,26 @@ async fn run() -> Result<(), String> {
         .startup_ready
         .store(false, std::sync::atomic::Ordering::Release);
 
-    if matches!(state.sandbox_mode, coop_exec::SandboxMode::Namespaces) {
-        let rootfs = state
-            .cfg
-            .rootfs
-            .as_deref()
-            .ok_or_else(|| "namespace preflight requires COOP_ROOTFS".to_string())?;
-        let helper = state
-            .cfg
-            .sandbox_helper
-            .as_deref()
-            .ok_or_else(|| "namespace preflight requires COOP_SANDBOX_HELPER".to_string())?;
-        coop_exec::namespace_sandbox_execution_preflight(
-            Path::new(rootfs),
-            Path::new(helper),
-            Path::new(&state.cfg.jobs_root),
-            state.seccomp,
-            &[
-                ("python", state.cfg.python_bin.as_deref()),
-                ("node", state.cfg.node_bin.as_deref()),
-                ("bash", state.cfg.bash_bin.as_deref()),
-            ],
-        )
+    state
+        .execution_provider
+        .reconcile(Path::new(&state.cfg.jobs_root))
         .await
-        .map_err(|error| format!("namespace execution preflight failed: {error}"))?;
-    }
+        .map_err(|error| format!("execution-provider crash reconciliation failed: {error}"))?;
+    state
+        .execution_provider
+        .preflight(coop_exec::ProviderPreflight {
+            jobs_root: PathBuf::from(&state.cfg.jobs_root),
+            rootfs: state.cfg.rootfs.as_ref().map(PathBuf::from),
+            helper: state.cfg.sandbox_helper.as_ref().map(PathBuf::from),
+            seccomp: state.seccomp,
+            interpreter_overrides: vec![
+                ("python".to_string(), state.cfg.python_bin.clone()),
+                ("node".to_string(), state.cfg.node_bin.clone()),
+                ("bash".to_string(), state.cfg.bash_bin.clone()),
+            ],
+        })
+        .await
+        .map_err(|error| format!("execution-provider preflight failed: {error}"))?;
 
     // Boot recovery: a process that was running when the previous server
     // stopped cannot be resumed, so finalize it with restart evidence. Queued

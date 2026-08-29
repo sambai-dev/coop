@@ -10,8 +10,8 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use coop_store::{JobCursor, JobRow, JobSummary, ListJobsQuery};
 use coop_types::{
-    EffectiveJobSpec, JobSpec, JobStatus, LimitEnforcement, CPU_MAX_SECONDS, FILE_MAX_MB, PIDS_MAX,
-    SUPPORTED_LANGUAGES, WALL_MAX_SECONDS,
+    EffectiveJobSpec, IsolationClass, JobSpec, JobStatus, LimitEnforcement, CPU_MAX_SECONDS,
+    FILE_MAX_MB, PIDS_MAX, SUPPORTED_LANGUAGES, WALL_MAX_SECONDS,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
@@ -104,6 +104,7 @@ pub struct JobDetail {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ExecutionPolicy {
     pub sandbox: Option<String>,
+    pub isolation_class: Option<IsolationClass>,
     pub bootstrap_ready: Option<bool>,
     pub isolated: Option<bool>,
     pub seccomp: Option<bool>,
@@ -112,6 +113,10 @@ pub struct ExecutionPolicy {
     pub private_rootfs: Option<bool>,
     pub dedicated_bootstrap: Option<bool>,
     pub limit_enforcement: Option<LimitEnforcement>,
+    pub runtime_version: Option<String>,
+    pub runtime_sha256: Option<String>,
+    pub rootfs_sha256: Option<String>,
+    pub config_sha256: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -150,6 +155,7 @@ pub struct CapabilitiesResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ExecutionCapabilities {
     pub backend: String,
+    pub isolation_class: IsolationClass,
     pub isolated: bool,
     pub private_rootfs: bool,
     pub dedicated_bootstrap: bool,
@@ -1028,6 +1034,22 @@ pub async fn submit(
             Some(1),
         );
     }
+    if !state
+        .execution_provider
+        .isolation_class()
+        .satisfies(spec.requirements.minimum_isolation)
+    {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "minimum_isolation_unsatisfied",
+            format!(
+                "the configured provider {:?} cannot satisfy requested minimum isolation {:?}",
+                state.execution_provider.isolation_class(),
+                spec.requirements.minimum_isolation
+            ),
+            false,
+        );
+    }
     if !coop_types::is_supported_language(&spec.language) {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1406,11 +1428,25 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
                         .cloned()
                         .unwrap_or(serde_json::Value::Null),
                 )?;
+                let requirements = value
+                    .get("requirements")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .unwrap_or_else(|| requested_spec.requirements.clone());
+                let isolation_class = value
+                    .get("isolation_class")
+                    .cloned()
+                    .map(serde_json::from_value::<Option<IsolationClass>>)
+                    .transpose()?
+                    .flatten();
                 Ok(EffectiveJobSpec {
                     language: requested_spec.language.clone(),
                     code: requested_spec.code.clone(),
                     stdin: requested_spec.stdin.clone(),
                     limits,
+                    requirements,
+                    isolation_class,
                 })
             } else {
                 serde_json::from_value(value)
@@ -1433,6 +1469,11 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
     let isolated = observed_receipt
         .and_then(|value| value.get("isolated"))
         .and_then(serde_json::Value::as_bool);
+    let isolation_class = observed_receipt
+        .and_then(|value| value.get("isolation_class"))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?;
     let network_allowed = observed_receipt
         .and_then(|value| value.get("network_allowed"))
         .and_then(serde_json::Value::as_bool);
@@ -1454,6 +1495,12 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
         .cloned()
         .map(serde_json::from_value)
         .transpose()?;
+    let receipt_string = |name: &str| {
+        observed_receipt
+            .and_then(|value| value.get(name))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
     let effective_limits = observed_receipt
         .and_then(|value| value.get("effective_limits"))
         .cloned()
@@ -1483,6 +1530,7 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
         effective_spec,
         execution_policy: ExecutionPolicy {
             sandbox,
+            isolation_class,
             bootstrap_ready: observed,
             isolated,
             seccomp,
@@ -1491,6 +1539,10 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
             private_rootfs,
             dedicated_bootstrap,
             limit_enforcement,
+            runtime_version: receipt_string("runtime_version"),
+            runtime_sha256: receipt_string("runtime_sha256"),
+            rootfs_sha256: receipt_string("rootfs_sha256"),
+            config_sha256: receipt_string("config_sha256"),
         },
         receipt,
         receipt_sha256,
@@ -2543,13 +2595,17 @@ fn no_store(mut response: Response) -> Response {
 }
 
 fn execution_capabilities(state: &AppState) -> ExecutionCapabilities {
-    let isolated = matches!(state.sandbox_mode, coop_exec::SandboxMode::Namespaces);
+    let isolation_class = state.execution_provider.isolation_class();
+    let isolated = isolation_class != IsolationClass::None;
     ExecutionCapabilities {
         backend: state.sandbox_mode.as_str().to_string(),
+        isolation_class,
         isolated,
         private_rootfs: isolated && state.cfg.rootfs.is_some(),
-        dedicated_bootstrap: isolated && state.cfg.sandbox_helper.is_some(),
-        seccomp: isolated && state.seccomp,
+        dedicated_bootstrap: isolated
+            && (state.cfg.sandbox_helper.is_some()
+                || matches!(state.sandbox_mode, coop_exec::SandboxMode::Gvisor)),
+        seccomp: matches!(state.sandbox_mode, coop_exec::SandboxMode::Namespaces) && state.seccomp,
         networking: if isolated { "disabled" } else { "host" }.to_string(),
         limit_enforcement: if isolated {
             LimitEnforcement::NAMESPACE_SANDBOX

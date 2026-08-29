@@ -43,6 +43,11 @@ fn test_config(db: &std::path::Path) -> Config {
             .into_owned(),
         rootfs: None,
         sandbox_helper: None,
+        gvisor_runsc: None,
+        gvisor_rootfs_sha256: None,
+        gvisor_platform: "systrap".to_string(),
+        gvisor_uid: 65_534,
+        gvisor_gid: 65_534,
         production: false,
         unsafe_allow_naive: false,
         unsafe_allow_public_dev: false,
@@ -722,6 +727,32 @@ async fn rejects_unknown_language() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn minimum_isolation_is_checked_atomically_before_persistence() {
+    let app = spawn_app().await;
+    let payload = serde_json::json!({
+        "language": "python",
+        "code": "print('must not queue')",
+        "requirements": {"minimum_isolation": "gvisor-application-kernel"}
+    })
+    .to_string();
+    let (status, body) = send(
+        &app,
+        request("POST", "/v1/jobs", Some("test-key"), Some(payload)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "minimum_isolation_unsatisfied");
+
+    let (status, jobs) = send(
+        &app,
+        request("GET", "/v1/jobs?limit=100", Some("test-key"), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(jobs["items"].as_array().unwrap().is_empty(), "{jobs}");
 }
 
 #[tokio::test]

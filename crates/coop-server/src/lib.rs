@@ -147,6 +147,7 @@ pub struct AppState {
     /// O(1) readiness snapshot fed by one bounded background store probe.
     pub readiness: Arc<readiness::ReadinessCache>,
     pub sandbox_mode: coop_exec::SandboxMode,
+    pub execution_provider: Arc<dyn coop_exec::ExecutionProvider>,
     /// F-005: install a seccomp-BPF allowlist in sandboxed jobs (see Config).
     pub seccomp: bool,
     /// Exact host executables that passed the development executor's bounded
@@ -218,20 +219,43 @@ pub async fn build_app(
     let memory_budget_mb = cfg.memory_budget_mb;
     let (admission, queue_rx) =
         scheduler::Admission::channel(QUEUE_CAPACITY, cfg.tenant_queue_capacity);
-    let sandbox_mode = resolve_sandbox(&cfg)?;
-    cfg.validate_resolved_listener_security(sandbox_mode)?;
-    // F-005: only meaningful when kernel isolation is actually in play; the
-    // naive backend has no exec boundary to put a filter in front of.
-    let seccomp_enabled = cfg.seccomp && matches!(sandbox_mode, coop_exec::SandboxMode::Namespaces);
 
     // N-1: tenant isolation requires the jobs root to be server-private
     // (0700). The binary path enforces this in main(), but any embedder that
     // calls build_app directly must get the same guarantee, or the default-
     // mode parent lets sandboxed jobs enumerate sibling workdir names.
-    crate::config::prepare_jobs_root(
-        Path::new(&cfg.jobs_root),
-        cfg.production || matches!(sandbox_mode, coop_exec::SandboxMode::Namespaces),
-    )?;
+    let requested = cfg.sandbox.trim().to_ascii_lowercase();
+    let explicitly_isolated = matches!(
+        requested.as_str(),
+        "ns" | "namespaces" | "sandbox" | "gvisor" | "runsc"
+    );
+    let jobs_root = Path::new(&cfg.jobs_root);
+    crate::config::prepare_jobs_root(jobs_root, false)?;
+    let stale_gvisor = coop_exec::stale_gvisor_state_present(jobs_root)
+        .map_err(|error| format!("could not inspect stale gVisor state: {error}"))?;
+    let early_strict = cfg.production || explicitly_isolated || stale_gvisor;
+    if early_strict {
+        crate::config::prepare_jobs_root(jobs_root, true)?;
+        coop_exec::quiesce_stale_gvisor_workloads(jobs_root)
+            .await
+            .map_err(|error| format!("could not quiesce stale gVisor workloads: {error}"))?;
+    }
+    let sandbox_mode = resolve_sandbox(&cfg)?;
+    cfg.validate_resolved_listener_security(sandbox_mode)?;
+    if !early_strict && !matches!(sandbox_mode, coop_exec::SandboxMode::Off) {
+        crate::config::prepare_jobs_root(jobs_root, true)?;
+        coop_exec::quiesce_stale_gvisor_workloads(jobs_root)
+            .await
+            .map_err(|error| format!("could not quiesce stale gVisor workloads: {error}"))?;
+    }
+    let execution_provider = build_execution_provider(&cfg, sandbox_mode).await?;
+    execution_provider
+        .reconcile(Path::new(&cfg.jobs_root))
+        .await
+        .map_err(|error| format!("execution-provider crash reconciliation failed: {error}"))?;
+    // F-005: only meaningful when kernel isolation is actually in play; the
+    // naive backend has no exec boundary to put a filter in front of.
+    let seccomp_enabled = cfg.seccomp && matches!(sandbox_mode, coop_exec::SandboxMode::Namespaces);
 
     let mut resolved_naive_interpreters = HashMap::new();
     let available_languages = if matches!(sandbox_mode, coop_exec::SandboxMode::Off) {
@@ -294,6 +318,7 @@ pub async fn build_app(
         metrics_token_digest,
         readiness: Arc::new(readiness::ReadinessCache::new()),
         sandbox_mode,
+        execution_provider,
         seccomp: seccomp_enabled,
         resolved_naive_interpreters: Arc::new(resolved_naive_interpreters),
         available_languages: Arc::new(available_languages),
@@ -331,10 +356,79 @@ pub async fn build_app(
     Ok((app, state, queue_rx))
 }
 
+async fn build_execution_provider(
+    _cfg: &Config,
+    mode: coop_exec::SandboxMode,
+) -> Result<Arc<dyn coop_exec::ExecutionProvider>, String> {
+    match mode {
+        coop_exec::SandboxMode::Off => Ok(Arc::new(coop_exec::OffProvider)),
+        coop_exec::SandboxMode::Namespaces => Ok(Arc::new(coop_exec::NamespaceProvider)),
+        coop_exec::SandboxMode::Gvisor => {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            {
+                let runsc = _cfg.gvisor_runsc.as_deref().ok_or_else(|| {
+                    "COOP_GVISOR_RUNSC is required for COOP_SANDBOX=gvisor".to_string()
+                })?;
+                let rootfs = _cfg
+                    .rootfs
+                    .as_deref()
+                    .ok_or_else(|| "COOP_ROOTFS is required for COOP_SANDBOX=gvisor".to_string())?;
+                let platform = coop_exec::gvisor::GvisorPlatform::parse(&_cfg.gvisor_platform)
+                    .map_err(|error| error.to_string())?;
+                let rootfs_sha256 = _cfg.gvisor_rootfs_sha256.clone().ok_or_else(|| {
+                    "COOP_GVISOR_ROOTFS_SHA256 is required for COOP_SANDBOX=gvisor".to_string()
+                })?;
+                let provider = coop_exec::gvisor::GvisorProvider::new(
+                    std::path::PathBuf::from(runsc),
+                    std::path::PathBuf::from(rootfs),
+                    platform,
+                    Some(_cfg.gvisor_uid),
+                    Some(_cfg.gvisor_gid),
+                    rootfs_sha256,
+                )
+                .await
+                .map_err(|error| format!("gVisor provider configuration failed: {error}"))?;
+                Ok(Arc::new(provider))
+            }
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            {
+                Err("gVisor execution is supported only on Linux x86_64".to_string())
+            }
+        }
+    }
+}
+
 /// F8: sandbox selection never silently degrades. Explicit namespace requests
 /// are validated against the host; auto/unknown configurations fail closed in
 /// production instead of falling back to unprotected execution.
 pub fn resolve_sandbox(cfg: &Config) -> Result<coop_exec::SandboxMode, String> {
+    if matches!(
+        cfg.sandbox.trim().to_ascii_lowercase().as_str(),
+        "gvisor" | "runsc"
+    ) {
+        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            return Err("COOP_SANDBOX=gvisor requires Linux x86_64".to_string());
+        }
+        let rootfs = cfg
+            .rootfs
+            .as_deref()
+            .ok_or_else(|| "COOP_ROOTFS is required for COOP_SANDBOX=gvisor".to_string())?;
+        validate_rootfs(Path::new(rootfs))?;
+        let runsc = cfg
+            .gvisor_runsc
+            .as_deref()
+            .ok_or_else(|| "COOP_GVISOR_RUNSC is required for COOP_SANDBOX=gvisor".to_string())?;
+        if !Path::new(runsc).is_absolute() {
+            return Err("COOP_GVISOR_RUNSC must be an absolute path".to_string());
+        }
+        let digest = cfg.gvisor_rootfs_sha256.as_deref().ok_or_else(|| {
+            "COOP_GVISOR_ROOTFS_SHA256 is required for COOP_SANDBOX=gvisor".to_string()
+        })?;
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("COOP_GVISOR_ROOTFS_SHA256 must be 64 hexadecimal characters".to_string());
+        }
+        return Ok(coop_exec::SandboxMode::Gvisor);
+    }
     if matches!(
         cfg.sandbox.trim().to_ascii_lowercase().as_str(),
         "off" | "none" | "naive"

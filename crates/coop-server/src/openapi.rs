@@ -6,7 +6,10 @@ use crate::routes::{
     SubmitResponse, WhoAmIResponse,
 };
 use axum::Json;
-use coop_types::{EffectiveJobSpec, EffectiveLimits, JobSpec, LimitEnforcement, Limits};
+use coop_types::{
+    EffectiveJobSpec, EffectiveLimits, IsolationClass, JobRequirements, JobSpec, LimitEnforcement,
+    Limits,
+};
 use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
@@ -35,6 +38,8 @@ use utoipa::{Modify, OpenApi};
     ),
     components(schemas(
         JobSpec,
+        JobRequirements,
+        IsolationClass,
         Limits,
         EffectiveJobSpec,
         EffectiveLimits,
