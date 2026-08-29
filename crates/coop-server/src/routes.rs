@@ -2815,7 +2815,7 @@ pub async fn status(
     .into_response()
 }
 
-const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-KVafjTK4lFLCbjRA/jx7F306ETWMA6ae8J0QF+R7xpE='; style-src 'sha256-OnkbHLJCao4lUInrIixJS5R6vH5qJxZa5q7aCWDVZGs='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-52+6ciKeVgrKBMP2mSN2eiJex2A7gZVbQllG+GKKBds='; style-src 'sha256-OnkbHLJCao4lUInrIixJS5R6vH5qJxZa5q7aCWDVZGs='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 async fn dashboard() -> Response {
     let mut response = Html(include_str!("dashboard.html")).into_response();
@@ -2931,8 +2931,12 @@ mod tests {
             .await
             .expect("dashboard body");
         let html = std::str::from_utf8(&body).expect("UTF-8 dashboard");
-        assert!(!html.contains("localStorage"));
-        assert!(!html.contains("sessionStorage"));
+        assert!(html.contains("localStorage.removeItem(\"coop_api_key\")"));
+        assert!(html.contains("localStorage.removeItem(\"coop_key\")"));
+        assert!(html.contains("sessionStorage.removeItem(\"coop_api_key\")"));
+        assert!(html.contains("sessionStorage.removeItem(\"coop_key\")"));
+        assert!(!html.contains(".getItem("));
+        assert!(!html.contains("storageGet"));
         assert!(!html.contains("rememberKey"));
         let style = inline_block(html, "<style>", "</style>");
         let script = inline_block(html, "<script>", "</script>");

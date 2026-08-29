@@ -162,6 +162,18 @@ impl AuthContext {
     }
 }
 
+fn earliest_authority_end_ms(
+    expires_at_ms: Option<i64>,
+    revoked_at_ms: Option<i64>,
+) -> Option<i64> {
+    match (expires_at_ms, revoked_at_ms) {
+        (Some(expires), Some(revoked)) => Some(expires.min(revoked)),
+        (Some(expires), None) => Some(expires),
+        (None, Some(revoked)) => Some(revoked),
+        (None, None) => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StreamTicket {
     pub job_id: String,
@@ -170,6 +182,11 @@ pub struct StreamTicket {
 }
 
 pub const STREAM_TICKET_TTL_MS: i64 = 30_000;
+
+fn stream_ticket_expiry_ms(issued_at_ms: i64, authority_end_ms: Option<i64>) -> i64 {
+    let ttl_end_ms = issued_at_ms.saturating_add(STREAM_TICKET_TTL_MS);
+    authority_end_ms.map_or(ttl_end_ms, |authority_end| ttl_end_ms.min(authority_end))
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -349,14 +366,9 @@ impl CredentialStore {
             .map_or(&inner.dummy_digest, |credential| &credential.digest);
         let digest_matches = bool::from(candidate_digest.ct_eq(expected));
         let credential = key_id.and_then(|key_id| inner.by_id.get(key_id))?;
-        if !digest_matches
-            || credential
-                .expires_at_ms
-                .is_some_and(|expires| expires <= at_ms)
-            || credential
-                .revoked_at_ms
-                .is_some_and(|revoked| revoked <= at_ms)
-        {
+        let authority_end_ms =
+            earliest_authority_end_ms(credential.expires_at_ms, credential.revoked_at_ms);
+        if !digest_matches || authority_end_ms.is_some_and(|end| end <= at_ms) {
             return None;
         }
         Some(AuthContext {
@@ -365,7 +377,7 @@ impl CredentialStore {
             credential_id: Some(credential.key_id.clone()),
             method: AuthMethod::ApiKey,
             scopes: credential.scopes,
-            expires_at_ms: credential.expires_at_ms,
+            expires_at_ms: authority_end_ms,
         })
     }
 }
@@ -1018,7 +1030,8 @@ pub fn issue_stream_ticket(
     job_id: &str,
     auth: &AuthContext,
 ) -> (String, i64) {
-    let expires_at_ms = now_ms() + STREAM_TICKET_TTL_MS;
+    let issued_at_ms = now_ms();
+    let expires_at_ms = stream_ticket_expiry_ms(issued_at_ms, auth.expires_at_ms);
     let token = format!(
         "{}{}",
         uuid::Uuid::now_v7().simple(),
@@ -1026,7 +1039,7 @@ pub fn issue_stream_ticket(
     );
     state
         .stream_tickets
-        .retain(|_, ticket| ticket.expires_at_ms > now_ms());
+        .retain(|_, ticket| ticket.expires_at_ms > issued_at_ms);
     state.stream_tickets.insert(
         token.clone(),
         StreamTicket {
@@ -1564,12 +1577,51 @@ GcZ0izY/30012ajdHY+/QK5lsMoxTnn0skdS+spLxaS5ZEO4qvPVb8RAoCkWMMal
         assert!(expired.authenticate(&expired_key, 20).is_none());
 
         let (revoked, revoked_key) = credential_store("revoked", &["jobs:read"], None, Some(20));
-        assert!(revoked.authenticate(&revoked_key, 19).is_some());
+        let before_revocation = revoked.authenticate(&revoked_key, 19).unwrap();
+        assert_eq!(before_revocation.expires_at_ms, Some(20));
         assert!(revoked.authenticate(&revoked_key, 20).is_none());
         let legacy = HashMap::from([(revoked_key.clone(), "legacy-tenant".to_string())]);
         assert!(
             authenticate_local(&revoked, &legacy, &revoked_key, 20).is_none(),
             "a structured credential must not bypass revocation through legacy fallback"
+        );
+
+        let (expiry_first, expiry_first_key) =
+            credential_store("expiry-first", &["jobs:read"], Some(20), Some(30));
+        assert_eq!(
+            expiry_first
+                .authenticate(&expiry_first_key, 19)
+                .unwrap()
+                .expires_at_ms,
+            Some(20)
+        );
+        let (revocation_first, revocation_first_key) =
+            credential_store("revocation-first", &["jobs:read"], Some(30), Some(20));
+        assert_eq!(
+            revocation_first
+                .authenticate(&revocation_first_key, 19)
+                .unwrap()
+                .expires_at_ms,
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn stream_ticket_expiry_is_bounded_by_authority_end() {
+        let issued_at_ms = 1_000;
+        let ttl_end_ms = issued_at_ms + STREAM_TICKET_TTL_MS;
+        assert_eq!(stream_ticket_expiry_ms(issued_at_ms, None), ttl_end_ms);
+        assert_eq!(
+            stream_ticket_expiry_ms(issued_at_ms, Some(ttl_end_ms + 1)),
+            ttl_end_ms
+        );
+        assert_eq!(
+            stream_ticket_expiry_ms(issued_at_ms, Some(issued_at_ms + 10)),
+            issued_at_ms + 10
+        );
+        assert_eq!(
+            stream_ticket_expiry_ms(issued_at_ms, Some(issued_at_ms)),
+            issued_at_ms
         );
     }
 

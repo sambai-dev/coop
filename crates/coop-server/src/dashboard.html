@@ -582,6 +582,11 @@ print("done")</textarea>
     constructor(message, options) { super(message); this.name = "ApiError"; Object.assign(this, options || {}); }
   }
 
+  function purgeLegacyApiKeyStorage() {
+    try { localStorage.removeItem("coop_api_key"); localStorage.removeItem("coop_key"); } catch (_) {}
+    try { sessionStorage.removeItem("coop_api_key"); sessionStorage.removeItem("coop_key"); } catch (_) {}
+  }
+
   function normalizeError(payload, response) {
     const nested = payload && typeof payload === "object" ? payload.error : null;
     let message = "Request failed", code = null, requestId = null, retryable = false;
@@ -1070,7 +1075,7 @@ print("done")</textarea>
   });
   window.addEventListener("resize", () => scheduleFeedRender(false));
 
-  renderStats(); renderRunList(); renderSelection(); renderFeeds();
+  purgeLegacyApiKeyStorage(); renderStats(); renderRunList(); renderSelection(); renderFeeds();
   setApiState("", "key required"); showNotice("Enter an API key to load this tenant's execution ledger. The key is kept only in this page's memory.", "warning");
 })();
 </script>
