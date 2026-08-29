@@ -1,5 +1,7 @@
 use coop_store::{
-    canonical_json, compute_receipt_sha256, JobCursor, ListJobsQuery, Store, MAX_EVENT_BATCH_SIZE,
+    canonical_json, capacity_error_kind, compute_receipt_sha256, is_idempotency_conflict,
+    CapacityErrorKind, CreateJobOutcome, IdempotencyLookup, IdempotencyRequest, JobCursor,
+    ListJobsQuery, StorageLimits, Store, JOB_COMPLETION_RESERVE_BYTES, MAX_EVENT_BATCH_SIZE,
     MAX_RETENTION_EVENTS_PER_BATCH,
 };
 use serde_json::json;
@@ -153,7 +155,7 @@ fn migrates_v01_database_without_fabricating_event_hashes() {
         connection.close().await.unwrap();
 
         let store = Store::open(&db).await.unwrap();
-        assert_eq!(store.schema_version().await.unwrap(), 2);
+        assert_eq!(store.schema_version().await.unwrap(), 3);
         let legacy = store.get_job("legacy").await.unwrap().unwrap();
         assert_eq!(legacy.status, "succeeded");
         assert!(legacy.effective_spec_json.is_none());
@@ -819,13 +821,13 @@ fn current_markers_require_current_tables_and_missing_history_is_repaired() {
         drop(store);
 
         let repaired = Store::open(&missing_history).await.unwrap();
-        assert_eq!(repaired.schema_version().await.unwrap(), 2);
+        assert_eq!(repaired.schema_version().await.unwrap(), 3);
         let mut connection = raw_connection(&missing_history).await;
         let migration_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schema_migrations")
             .fetch_one(&mut connection)
             .await
             .unwrap();
-        assert_eq!(migration_count, 2);
+        assert_eq!(migration_count, 3);
         connection.close().await.unwrap();
 
         let lost_markers = test_db("lost-current-markers");
@@ -860,7 +862,7 @@ fn current_markers_require_current_tables_and_missing_history_is_repaired() {
             reopened.events_for("preserved").await.unwrap(),
             before_events
         );
-        assert_eq!(reopened.schema_version().await.unwrap(), 2);
+        assert_eq!(reopened.schema_version().await.unwrap(), 3);
     });
 }
 
@@ -1189,7 +1191,7 @@ fn validated_max_payload_writes_keep_healthy_reopen_on_the_bounded_fast_path() {
         .fetch_one(&mut connection)
         .await
         .unwrap();
-        assert_eq!(revision, 1);
+        assert_eq!(revision, 2);
         connection.close().await.unwrap();
         drop(store);
 
@@ -1697,6 +1699,234 @@ fn oversized_retention_history_is_drained_under_a_hard_event_budget() {
         );
         assert!(!second.more_remaining);
         assert!(store.get_job("heavy").await.unwrap().is_none());
+    });
+}
+
+#[test]
+fn logical_storage_quota_is_atomic_tenant_scoped_and_reopen_safe() {
+    sqlx::test_block_on(async {
+        let db = test_db("logical-quota");
+        let per_job = JOB_COMPLETION_RESERVE_BYTES + 16 * 1024;
+        let limits = StorageLimits::new(per_job * 3, per_job + 1024, 0);
+        let store = Store::open_with_limits(&db, limits).await.unwrap();
+        let spec = r#"{"language":"python","code":"print('é')","limits":{"mem_mb":64}}"#;
+        store
+            .create_job_with_event_idempotent("quota-one", "tenant-a", "python", spec, 64, None)
+            .await
+            .unwrap();
+        let error = store
+            .create_job_with_event_idempotent("quota-two", "tenant-a", "python", spec, 64, None)
+            .await
+            .unwrap_err();
+        assert_eq!(capacity_error_kind(&error), Some(CapacityErrorKind::Tenant));
+        assert!(store.get_job("quota-two").await.unwrap().is_none());
+
+        store
+            .create_job_with_event_idempotent("quota-other", "tenant-b", "python", spec, 64, None)
+            .await
+            .unwrap();
+        store
+            .create_job_with_event_idempotent("quota-third", "tenant-c", "python", spec, 64, None)
+            .await
+            .unwrap();
+        let error = store
+            .create_job_with_event_idempotent("quota-global", "tenant-d", "python", spec, 64, None)
+            .await
+            .unwrap_err();
+        assert_eq!(capacity_error_kind(&error), Some(CapacityErrorKind::Global));
+        drop(store);
+        let reopened = Store::open_with_limits(&db, limits).await.unwrap();
+        reopened.validate_integrity().await.unwrap();
+    });
+}
+
+#[test]
+fn concurrent_near_quota_creates_have_exactly_one_winner() {
+    sqlx::test_block_on(async {
+        let db = test_db("logical-quota-race");
+        let per_job = JOB_COMPLETION_RESERVE_BYTES + 16 * 1024;
+        let limits = StorageLimits::new(per_job * 2, per_job + 1024, 0);
+        let store = std::sync::Arc::new(Store::open_with_limits(&db, limits).await.unwrap());
+        let spec = r#"{"language":"python","code":"print(1)"}"#;
+        let left_store = std::sync::Arc::clone(&store);
+        let right_store = std::sync::Arc::clone(&store);
+        let (left, right) = futures_util::future::join(
+            async move {
+                left_store
+                    .create_job_with_event_idempotent(
+                        "race-left",
+                        "tenant-a",
+                        "python",
+                        spec,
+                        256,
+                        None,
+                    )
+                    .await
+            },
+            async move {
+                right_store
+                    .create_job_with_event_idempotent(
+                        "race-right",
+                        "tenant-a",
+                        "python",
+                        spec,
+                        256,
+                        None,
+                    )
+                    .await
+            },
+        )
+        .await;
+        assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+        let failure = left.err().or_else(|| right.err()).unwrap();
+        assert_eq!(
+            capacity_error_kind(&failure),
+            Some(CapacityErrorKind::Tenant)
+        );
+    });
+}
+
+#[test]
+fn idempotency_is_tenant_scoped_fingerprint_bound_and_retention_coupled() {
+    sqlx::test_block_on(async {
+        let db = test_db("idempotency");
+        let store = Store::open(&db).await.unwrap();
+        let request = IdempotencyRequest {
+            key: "opaque-key-1".to_string(),
+            request_sha256: "a".repeat(64),
+        };
+        let first = store
+            .create_job_with_event_idempotent(
+                "idem-job",
+                "tenant-a",
+                "python",
+                r#"{"language":"python","code":"print(1)"}"#,
+                256,
+                Some(&request),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(first, CreateJobOutcome::Created(_)));
+        drop(store);
+        let store = Store::open(&db).await.unwrap();
+        let replay = store
+            .create_job_with_event_idempotent(
+                "unused-generated-id",
+                "tenant-a",
+                "python",
+                r#"{"language":"python","code":"print(1)"}"#,
+                256,
+                Some(&request),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            replay,
+            CreateJobOutcome::Replayed {
+                job_id: "idem-job".to_string()
+            }
+        );
+        assert_eq!(store.events_for("idem-job").await.unwrap().len(), 1);
+        assert!(store
+            .get_job("unused-generated-id")
+            .await
+            .unwrap()
+            .is_none());
+
+        let conflict = IdempotencyRequest {
+            key: request.key.clone(),
+            request_sha256: "b".repeat(64),
+        };
+        let error = store
+            .create_job_with_event_idempotent(
+                "conflict-job",
+                "tenant-a",
+                "python",
+                r#"{"language":"python","code":"print(2)"}"#,
+                256,
+                Some(&conflict),
+            )
+            .await
+            .unwrap_err();
+        assert!(is_idempotency_conflict(&error));
+        assert_eq!(
+            store
+                .lookup_idempotency("tenant-b", &request)
+                .await
+                .unwrap(),
+            IdempotencyLookup::Miss
+        );
+
+        store
+            .finalize_with_event("idem-job", "succeeded", Some(0), 1, None)
+            .await
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store.prune_older_than_batch(0, 1).await.unwrap();
+        assert_eq!(
+            store
+                .lookup_idempotency("tenant-a", &request)
+                .await
+                .unwrap(),
+            IdempotencyLookup::Miss
+        );
+    });
+}
+
+#[test]
+fn current_schema_missing_idempotency_table_fails_closed() {
+    sqlx::test_block_on(async {
+        let db = test_db("missing-idempotency-table");
+        let store = Store::open(&db).await.unwrap();
+        let request = IdempotencyRequest {
+            key: "durable-key".to_string(),
+            request_sha256: "c".repeat(64),
+        };
+        store
+            .create_job_with_event_idempotent(
+                "durable-idempotent-job",
+                "tenant-a",
+                "python",
+                r#"{"language":"python","code":"print(1)"}"#,
+                256,
+                Some(&request),
+            )
+            .await
+            .unwrap();
+        drop(store);
+        let mut connection = raw_connection(&db).await;
+        sqlx::query("DROP TABLE idempotency_keys")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        let error = Store::open(&db)
+            .await
+            .expect_err("v3 mapping loss must not become an idempotency miss");
+        assert!(
+            error.to_string().contains("idempotency mappings"),
+            "{error}"
+        );
+    });
+}
+
+#[test]
+fn filesystem_reserve_rejects_growth_but_not_open_or_recovery() {
+    sqlx::test_block_on(async {
+        let db = test_db("filesystem-reserve");
+        let limits = StorageLimits::new(i64::MAX as u64, i64::MAX as u64, u64::MAX);
+        let store = Store::open_with_limits(&db, limits).await.unwrap();
+        let error = store
+            .create_job("blocked", "tenant-a", "python", r#"{"code":"print(1)"}"#)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            capacity_error_kind(&error),
+            Some(CapacityErrorKind::Filesystem)
+        );
+        assert!(store.get_job("blocked").await.unwrap().is_none());
+        drop(store);
+        Store::open_with_limits(&db, limits).await.unwrap();
     });
 }
 

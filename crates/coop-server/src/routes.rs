@@ -4,18 +4,20 @@ use crate::AppState;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, FromRequest, Path, Query, Request, State};
-use axum::http::{header, HeaderValue, StatusCode, Version};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Version};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use coop_store::{JobCursor, JobRow, JobSummary, ListJobsQuery};
 use coop_types::{
-    EffectiveJobSpec, JobSpec, JobStatus, LimitEnforcement, CPU_MAX_SECONDS, FILE_MAX_MB,
-    MEM_MAX_MB, PIDS_MAX, SUPPORTED_LANGUAGES, WALL_MAX_SECONDS,
+    EffectiveJobSpec, JobSpec, JobStatus, LimitEnforcement, CPU_MAX_SECONDS, FILE_MAX_MB, PIDS_MAX,
+    SUPPORTED_LANGUAGES, WALL_MAX_SECONDS,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+#[cfg(test)]
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -159,6 +161,7 @@ pub struct LimitCapabilities {
     pub wall_seconds_max: u32,
     pub cpu_seconds_max: u32,
     pub mem_mb_max: u32,
+    pub concurrent_mem_mb_max: u32,
     pub pids_max: u32,
     pub file_mb_max: u32,
     pub output_lines_max: usize,
@@ -208,6 +211,26 @@ pub struct JobView {
     pub started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
     pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CancellationResponse {
+    pub job: JobView,
+    pub cancellation_requested: bool,
+    pub already_terminal: bool,
+}
+
+fn cancellation_response(
+    row: &JobSummary,
+    cancellation_requested: bool,
+    already_terminal: bool,
+) -> Response {
+    Json(CancellationResponse {
+        job: JobView::from_summary(row),
+        cancellation_requested,
+        already_terminal,
+    })
+    .into_response()
 }
 
 impl JobView {
@@ -276,6 +299,7 @@ const MAX_STDIN_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1_048_576;
 const SUBMIT_BODY_READ_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_INBOUND_STREAM_MESSAGE_BYTES: usize = 1_024;
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
 const STREAM_SEND_DEADLINE: Duration = Duration::from_secs(5);
 const STREAM_CLOSE_DEADLINE: Duration = Duration::from_millis(250);
 const LARGE_RESPONSE_CHUNK_BYTES: usize = 64 * 1_024;
@@ -283,6 +307,82 @@ const LARGE_RESPONSE_CHUNK_BYTES: usize = 64 * 1_024;
 // never collide with a durable row. An indexed summary miss is a constant-work
 // SQLite liveness probe; readiness must not aggregate the retained jobs table.
 const STORAGE_LIVENESS_PROBE_JOB_ID: &str = "__coop_storage_liveness_probe__";
+
+fn idempotency_request(
+    headers: &HeaderMap,
+    spec: &JobSpec,
+) -> Result<Option<coop_store::IdempotencyRequest>, Box<Response>> {
+    let mut values = headers.get_all("idempotency-key").iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_idempotency_key",
+            "Idempotency-Key must appear exactly once",
+            false,
+        )));
+    }
+    let key = value.to_str().map_err(|_| {
+        Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_idempotency_key",
+            "Idempotency-Key must contain visible ASCII",
+            false,
+        ))
+    })?;
+    if key.is_empty()
+        || key.len() > MAX_IDEMPOTENCY_KEY_BYTES
+        || !key.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        return Err(Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_idempotency_key",
+            format!("Idempotency-Key must be 1-{MAX_IDEMPOTENCY_KEY_BYTES} visible ASCII bytes"),
+            false,
+        )));
+    }
+    let value = serde_json::to_value(spec)
+        .map_err(|error| Box::new(internal_error("canonicalize idempotent job spec", error)))?;
+    let canonical = coop_store::canonical_json(&value);
+    Ok(Some(coop_store::IdempotencyRequest {
+        key: key.to_string(),
+        request_sha256: format!("{:x}", Sha256::digest(canonical.as_bytes())),
+    }))
+}
+
+fn idempotency_conflict() -> Response {
+    api_error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "idempotency_key_reused",
+        "Idempotency-Key was already used for a different canonical job specification",
+        false,
+    )
+}
+
+fn submission_response(job_id: String, replayed: bool) -> Response {
+    let location = format!("/v1/jobs/{job_id}");
+    let mut response = (
+        StatusCode::CREATED,
+        Json(SubmitResponse {
+            stream_url: format!("/v1/jobs/{job_id}/stream"),
+            replay_url: format!("/v1/jobs/{job_id}/replay"),
+            stream_ticket_url: format!("/v1/jobs/{job_id}/stream-ticket"),
+            job_id,
+            status: "queued".to_string(),
+        }),
+    )
+        .into_response();
+    if let Ok(value) = HeaderValue::from_str(&location) {
+        response.headers_mut().insert(header::LOCATION, value);
+    }
+    response.headers_mut().insert(
+        "idempotency-replayed",
+        HeaderValue::from_static(if replayed { "true" } else { "false" }),
+    );
+    response
+}
 
 pub struct SubmitPayload {
     spec: JobSpec,
@@ -528,27 +628,28 @@ fn guarded_json_response<T: Serialize>(
 /// leases. The caller runs this future in a detached Tokio task before its
 /// next await, so dropping the HTTP request cannot cancel an in-flight SQLite
 /// COMMIT and strand a queued row without its scheduler envelope.
+#[cfg(test)]
 struct ReservedSubmissionCommit {
     reservation: crate::scheduler::AdmissionReservation,
     job_id: String,
-    tenant: String,
     event: Option<coop_store::EventRow>,
 }
 
+#[cfg(test)]
 impl ReservedSubmissionCommit {
     fn publish_and_handoff(self, publish: impl FnOnce(Option<coop_store::EventRow>)) {
         // Publishing the accepted event and committing the already-reserved
         // channel permit are synchronous. No cancellation point can split a
         // durable acceptance from its scheduler envelope.
         publish(self.event);
-        self.reservation.send(self.job_id, self.tenant);
+        self.reservation.send(self.job_id);
     }
 }
 
+#[cfg(test)]
 async fn commit_reserved_submission<P, PF, R, RF, E>(
     reservation: crate::scheduler::AdmissionReservation,
     job_id: String,
-    tenant: String,
     persist: P,
     mut reconcile: R,
 ) -> Result<ReservedSubmissionCommit, E>
@@ -563,7 +664,6 @@ where
         Ok(event) => Ok(ReservedSubmissionCommit {
             reservation,
             job_id,
-            tenant,
             event: Some(event),
         }),
         Err(commit_error) => {
@@ -578,7 +678,6 @@ where
                         return Ok(ReservedSubmissionCommit {
                             reservation,
                             job_id,
-                            tenant,
                             event: None,
                         });
                     }
@@ -598,76 +697,117 @@ where
     }
 }
 
-fn spawn_submission_commit(
-    state: AppState,
-    reservation: crate::scheduler::AdmissionReservation,
-    body_permit: crate::LifetimePermit,
+struct SubmissionAcceptance {
+    job_id: String,
+    replayed: bool,
+}
+
+struct PendingSubmission {
     job_id: String,
     tenant: String,
     language: String,
     spec_json: String,
-) -> tokio::task::JoinHandle<coop_store::StoreResult<()>> {
-    tokio::spawn(async move {
-        state.bus.register(&job_id);
-        let persist_store = Arc::clone(&state.store);
-        let persist_job_id = job_id.clone();
-        let persist_tenant = tenant.clone();
-        let persist_language = language.clone();
-        let reconcile_store = Arc::clone(&state.store);
-        let reconcile_job_id = job_id.clone();
-        let reconcile_tenant = tenant.clone();
-        let reconcile_language = language.clone();
-        let result = commit_reserved_submission(
-            reservation,
-            job_id.clone(),
-            tenant,
-            move || async move {
-                persist_store
-                    .create_job_with_event(
-                        &persist_job_id,
-                        &persist_tenant,
-                        &persist_language,
-                        &spec_json,
-                    )
-                    .await
-            },
-            move || {
-                let store = Arc::clone(&reconcile_store);
-                let job_id = reconcile_job_id.clone();
-                let tenant = reconcile_tenant.clone();
-                let language = reconcile_language.clone();
-                async move {
-                    store.get_job_summary(&job_id).await.map(|row| {
-                        row.is_some_and(|row| {
-                            row.tenant == tenant
-                                && row.language == language
-                                && row.status == "queued"
-                        })
-                    })
-                }
-            },
-        )
-        .await;
+    requested_mem_mb: u32,
+    idempotency: Option<coop_store::IdempotencyRequest>,
+}
 
-        let result = match result {
-            Ok(committed) => {
-                let reconciled = committed.event.is_none();
-                committed.publish_and_handoff(|event| {
-                    if let Some(event) = event {
-                        state.bus.send(&job_id, wire_event(event));
-                    }
-                });
-                if reconciled {
-                    tracing::warn!(
-                        %job_id,
-                        "reconciled an ambiguously acknowledged durable job acceptance"
-                    );
-                }
-                Ok(())
+fn spawn_submission_commit(
+    state: AppState,
+    reservation: crate::scheduler::AdmissionReservation,
+    body_permit: crate::LifetimePermit,
+    pending: PendingSubmission,
+) -> tokio::task::JoinHandle<coop_store::StoreResult<SubmissionAcceptance>> {
+    tokio::spawn(async move {
+        let PendingSubmission {
+            job_id,
+            tenant,
+            language,
+            spec_json,
+            requested_mem_mb,
+            idempotency,
+        } = pending;
+        let persisted = state
+            .store
+            .create_job_with_event_idempotent(
+                &job_id,
+                &tenant,
+                &language,
+                &spec_json,
+                requested_mem_mb,
+                idempotency.as_ref(),
+            )
+            .await;
+        let result = match persisted {
+            Ok(coop_store::CreateJobOutcome::Created(event)) => {
+                state.bus.register(&job_id);
+                state.bus.send(&job_id, wire_event(event));
+                reservation.send(job_id.clone());
+                Ok(SubmissionAcceptance {
+                    job_id,
+                    replayed: false,
+                })
             }
-            Err(error) => {
-                state.bus.remove(&job_id);
-                Err(error)
+            Ok(coop_store::CreateJobOutcome::Replayed { job_id }) => {
+                drop(reservation);
+                Ok(SubmissionAcceptance {
+                    job_id,
+                    replayed: true,
+                })
+            }
+            Err(commit_error) => {
+                // Distinguish a definitive capacity/validation rejection from
+                // a commit acknowledgement lost after the row became durable.
+                let mut delay = Duration::from_millis(10);
+                loop {
+                    match state.store.get_job_summary(&job_id).await {
+                        Ok(Some(row))
+                            if row.tenant == tenant
+                                && row.language == language
+                                && row.status == "queued" =>
+                        {
+                            tracing::warn!(%job_id, "reconciled an ambiguously acknowledged durable job acceptance");
+                            state.bus.register(&job_id);
+                            reservation.send(job_id.clone());
+                            break Ok(SubmissionAcceptance {
+                                job_id,
+                                replayed: false,
+                            });
+                        }
+                        Ok(_) => {
+                            let Some(request) = idempotency.as_ref() else {
+                                drop(reservation);
+                                break Err(commit_error);
+                            };
+                            match state.store.lookup_idempotency(&tenant, request).await {
+                                Ok(coop_store::IdempotencyLookup::Replay { job_id }) => {
+                                    drop(reservation);
+                                    break Ok(SubmissionAcceptance {
+                                        job_id,
+                                        replayed: true,
+                                    });
+                                }
+                                Ok(coop_store::IdempotencyLookup::Conflict)
+                                    if coop_store::is_idempotency_conflict(&commit_error) =>
+                                {
+                                    drop(reservation);
+                                    break Err(commit_error);
+                                }
+                                Ok(_) => {
+                                    drop(reservation);
+                                    break Err(commit_error);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(error = %error, job_id = %job_id, "could not reconcile idempotent job acceptance; retaining leases")
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, job_id = %job_id, "could not reconcile job acceptance; retaining leases")
+                        }
+                    }
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(1));
+                }
             }
         };
         // Keep parsed request memory and both submission capacity budgets
@@ -758,17 +898,33 @@ fn internal_error(context: &str, e: impl std::fmt::Display) -> Response {
         (status = 415, description = "JSON content type required", body = ErrorEnvelope),
         (status = 422, description = "Configured runtime is unavailable", body = ErrorEnvelope),
         (status = 429, description = "Rate or per-tenant body capacity exceeded", body = ErrorEnvelope),
-        (status = 503, description = "Queue, global body, startup, or shutdown capacity unavailable", body = ErrorEnvelope)
+        (status = 503, description = "Queue, global body, startup, shutdown, or logical storage capacity unavailable", body = ErrorEnvelope),
+        (status = 507, description = "Filesystem free-space reserve prevents admission", body = ErrorEnvelope)
     )
 )]
 pub async fn submit(
     State(state): State<AppState>,
     Extension(tenant): Extension<Tenant>,
+    headers: HeaderMap,
     SubmitPayload {
         spec,
         _permit: body_permit,
     }: SubmitPayload,
 ) -> Response {
+    let idempotency = match idempotency_request(&headers, &spec) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    if let Some(request) = idempotency.as_ref() {
+        match state.store.lookup_idempotency(&tenant.0, request).await {
+            Ok(coop_store::IdempotencyLookup::Replay { job_id }) => {
+                return submission_response(job_id, true)
+            }
+            Ok(coop_store::IdempotencyLookup::Conflict) => return idempotency_conflict(),
+            Ok(coop_store::IdempotencyLookup::Miss) => {}
+            Err(error) => return internal_error("lookup idempotent submission", error),
+        }
+    }
     if *state.shutdown.borrow() {
         return api_error_with_retry(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -850,13 +1006,23 @@ pub async fn submit(
     // Reserve capacity before creating durable state. This is non-blocking:
     // saturated admission returns 503 immediately and cannot leave a zombie
     // queued row behind.
-    let permit = match state.admission.try_reserve() {
+    let mem_mb = state.cfg.clamp_limits(spec.limits.clone()).mem_mb;
+    let permit = match state.admission.try_reserve(&tenant.0, mem_mb) {
         Ok(permit) => permit,
-        Err(crate::scheduler::TryAdmissionError::Full) => {
+        Err(crate::scheduler::TryAdmissionError::GlobalFull) => {
             return api_error_with_retry(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "queue_saturated",
                 "job queue is saturated; retry later",
+                true,
+                Some(1),
+            )
+        }
+        Err(crate::scheduler::TryAdmissionError::TenantFull) => {
+            return api_error_with_retry(
+                StatusCode::TOO_MANY_REQUESTS,
+                "tenant_queue_saturated",
+                "this tenant has reached its queued-job capacity",
                 true,
                 Some(1),
             )
@@ -886,33 +1052,58 @@ pub async fn submit(
         state.clone(),
         permit,
         body_permit,
-        job_id.clone(),
-        tenant.0.clone(),
-        spec.language.clone(),
-        spec_json,
+        PendingSubmission {
+            job_id: job_id.clone(),
+            tenant: tenant.0.clone(),
+            language: spec.language.clone(),
+            spec_json,
+            requested_mem_mb: mem_mb,
+            idempotency,
+        },
     );
-    match commit.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return internal_error("persist job", e),
+    let accepted = match commit.await {
+        Ok(Ok(accepted)) => accepted,
+        Ok(Err(e)) if coop_store::is_idempotency_conflict(&e) => return idempotency_conflict(),
+        Ok(Err(e)) => match coop_store::capacity_error_kind(&e) {
+            Some(coop_store::CapacityErrorKind::Tenant) => {
+                return api_error_with_retry(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "tenant_storage_quota",
+                    "this tenant has reached its retained storage quota",
+                    true,
+                    Some(1),
+                )
+            }
+            Some(coop_store::CapacityErrorKind::Global) => {
+                return api_error_with_retry(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "storage_capacity",
+                    "global retained storage capacity is exhausted",
+                    true,
+                    Some(1),
+                )
+            }
+            Some(coop_store::CapacityErrorKind::Filesystem) => {
+                return api_error_with_retry(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    "storage_reserve",
+                    "filesystem free-space reserve prevents accepting another job",
+                    true,
+                    Some(1),
+                )
+            }
+            None => return internal_error("persist job", e),
+        },
         Err(e) => {
             state.bus.remove(&job_id);
             return internal_error("join durable job acceptance", e);
         }
-    }
+    };
 
-    tracing::info!(job_id = %job_id, tenant = %tenant.0, language = %spec.language, "job submitted");
+    let accepted_job_id = &accepted.job_id;
+    tracing::info!(job_id = %accepted_job_id, replayed = accepted.replayed, tenant = tenant.0.as_str(), language = spec.language.as_str(), "job submitted");
 
-    (
-        StatusCode::CREATED,
-        Json(SubmitResponse {
-            stream_url: format!("/v1/jobs/{job_id}/stream"),
-            replay_url: format!("/v1/jobs/{job_id}/replay"),
-            stream_ticket_url: format!("/v1/jobs/{job_id}/stream-ticket"),
-            job_id,
-            status: "queued".to_string(),
-        }),
-    )
-        .into_response()
+    submission_response(accepted.job_id, accepted.replayed)
 }
 
 #[utoipa::path(
@@ -1100,6 +1291,29 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
         .effective_spec_json
         .as_deref()
         .map(serde_json::from_str)
+        .transpose()?
+        .map(|value: serde_json::Value| {
+            if value
+                .get("storage_version")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2)
+            {
+                let limits = serde_json::from_value(
+                    value
+                        .get("limits")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                )?;
+                Ok(EffectiveJobSpec {
+                    language: requested_spec.language.clone(),
+                    code: requested_spec.code.clone(),
+                    stdin: requested_spec.stdin.clone(),
+                    limits,
+                })
+            } else {
+                serde_json::from_value(value)
+            }
+        })
         .transpose()?;
     // Only receipts carrying the executor-observed readiness marker are
     // trusted as execution posture. Older receipts and in-flight rows cannot
@@ -1190,9 +1404,8 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
     path = "/v1/jobs/{id}",
     params(("id" = String, Path, description = "Job id")),
     responses(
-        (status = 200, description = "Cancellation accepted"),
+        (status = 200, description = "Cancellation state", body = CancellationResponse),
         (status = 404, description = "Unknown or foreign job", body = ErrorEnvelope),
-        (status = 409, description = "Job already in a terminal state", body = ErrorEnvelope),
         (status = 401, description = "Missing or invalid API key", body = ErrorEnvelope)
     )
 )]
@@ -1217,22 +1430,15 @@ pub async fn cancel_job(
 
     match JobStatus::parse(&row.status) {
         Some(status) if status.is_terminal() => {
-            // Idempotency guard: cancelling a finished job is a caller error,
-            // not a silent success.
-            return api_error(
-                StatusCode::CONFLICT,
-                "job_already_terminal",
-                format!("job already {}", row.status),
-                false,
-            );
+            return cancellation_response(&row, false, true);
         }
         _ => {}
     }
 
     if let Some(flag) = state.cancels.get(&id) {
         flag.cancel.cancel();
-        tracing::info!(job_id = %id, tenant = %tenant.0, "job cancellation requested (running)");
-        return StatusCode::OK.into_response();
+        tracing::info!(job_id = %id, tenant = tenant.0.as_str(), "job cancellation requested (running)");
+        return cancellation_response(&row, true, false);
     }
 
     // Queued (or just-started) path: conditional DB cancel. On success the
@@ -1249,8 +1455,19 @@ pub async fn cancel_job(
         Ok(Some(event)) => {
             state.bus.send(&id, wire_event(event));
             state.bus.complete(&id);
-            tracing::info!(job_id = %id, tenant = %tenant.0, "queued job cancelled");
-            return StatusCode::OK.into_response();
+            tracing::info!(job_id = %id, tenant = tenant.0.as_str(), "queued job cancelled");
+            return match state.store.get_job_summary(&id).await {
+                Ok(Some(current)) if current.tenant == tenant.0 => {
+                    cancellation_response(&current, true, false)
+                }
+                Ok(_) => api_error(
+                    StatusCode::NOT_FOUND,
+                    "job_not_found",
+                    "job not found",
+                    false,
+                ),
+                Err(error) => internal_error("reload cancelled job", error),
+            };
         }
         Ok(None) => {
             let running = state
@@ -1268,14 +1485,17 @@ pub async fn cancel_job(
                     if JobStatus::parse(&current.status).is_some_and(|s| s.is_terminal()) =>
                 {
                     state.cancels.remove(&id);
-                    return api_error(
-                        StatusCode::CONFLICT,
-                        "job_already_terminal",
-                        format!("job already {}", current.status),
-                        false,
-                    );
+                    return cancellation_response(&current, false, true);
                 }
-                Ok(Some(_)) => {}
+                Ok(Some(current)) => {
+                    running.cancel.cancel();
+                    tracing::info!(
+                        job_id = %id,
+                        tenant = tenant.0.as_str(),
+                        "job cancellation requested (race — flag installed)"
+                    );
+                    return cancellation_response(&current, true, false);
+                }
                 Ok(None) => {
                     state.cancels.remove(&id);
                     return api_error(
@@ -1290,13 +1510,6 @@ pub async fn cancel_job(
                     return internal_error("recheck job for cancel", e);
                 }
             }
-            running.cancel.cancel();
-            tracing::info!(
-                job_id = %id,
-                tenant = %tenant.0,
-                "job cancellation requested (race — flag installed)"
-            );
-            return StatusCode::OK.into_response();
         }
         Err(e) => return internal_error("cancel queued job", e),
     }
@@ -2145,7 +2358,8 @@ pub async fn capabilities(State(state): State<AppState>) -> Response {
         limits: LimitCapabilities {
             wall_seconds_max: WALL_MAX_SECONDS,
             cpu_seconds_max: CPU_MAX_SECONDS,
-            mem_mb_max: MEM_MAX_MB,
+            mem_mb_max: state.cfg.max_job_mem_mb,
+            concurrent_mem_mb_max: state.cfg.memory_budget_mb,
             pids_max: PIDS_MAX,
             file_mb_max: FILE_MAX_MB,
             output_lines_max: coop_types::MAX_OUTPUT_LINES,
@@ -2184,7 +2398,10 @@ pub async fn whoami(Extension(tenant): Extension<Tenant>) -> Response {
         (status = 401, description = "Missing or invalid API key", body = ErrorEnvelope)
     )
 )]
-pub async fn status(State(state): State<AppState>) -> Response {
+pub async fn status(
+    State(state): State<AppState>,
+    Extension(tenant): Extension<Tenant>,
+) -> Response {
     let storage_ready = state
         .store
         .get_job_summary(STORAGE_LIVENESS_PROBE_JOB_ID)
@@ -2202,9 +2419,13 @@ pub async fn status(State(state): State<AppState>) -> Response {
         execution: execution_capabilities(&state),
         scheduler: SchedulerStatus {
             workers: state.cfg.workers,
-            queue_capacity: state.admission.capacity(),
-            queue_depth: state.admission.depth(),
-            running: state.cancels.len(),
+            queue_capacity: state.admission.tenant_capacity(),
+            queue_depth: state.admission.tenant_depth(&tenant.0),
+            running: state
+                .cancels
+                .iter()
+                .filter(|entry| entry.tenant == tenant.0)
+                .count(),
             shutting_down: *state.shutdown.borrow(),
         },
         storage_ready,
@@ -2706,8 +2927,10 @@ mod tests {
 
     #[tokio::test]
     async fn aborted_submit_waiter_cannot_cancel_ambiguous_commit_or_release_lease() {
-        let (admission, mut queued_rx) = crate::scheduler::Admission::channel(1);
-        let reservation = admission.try_reserve().expect("queue reservation");
+        let (admission, mut queued_rx) = crate::scheduler::Admission::channel(1, 1);
+        let reservation = admission
+            .try_reserve("tenant-a", 256)
+            .expect("queue reservation");
         let body_admission = crate::LifetimeAdmission::new(1, 1);
         let body_permit = body_admission
             .try_acquire("tenant-a")
@@ -2725,7 +2948,6 @@ mod tests {
             let result = commit_reserved_submission(
                 reservation,
                 "committed-job".to_string(),
-                "tenant-a".to_string(),
                 move || async move {
                     let _ = commit_entered_tx.send(());
                     let _ = commit_release_rx.await;

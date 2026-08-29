@@ -119,6 +119,9 @@ pub struct AppState {
     pub bus: Bus,
     pub admission: scheduler::Admission,
     pub tenant_sems: Arc<DashMap<String, Arc<Semaphore>>>,
+    /// Weighted aggregate memory budget. Each dispatched job owns exactly its
+    /// server-clamped MiB request until execution/finalization returns.
+    pub memory_slots: Arc<Semaphore>,
     pub rate: Arc<ratelimit::RateLimiter>,
     pub sandbox_mode: coop_exec::SandboxMode,
     /// F-005: install a seccomp-BPF allowlist in sandboxed jobs (see Config).
@@ -175,10 +178,20 @@ pub async fn build_app(
     cfg: Config,
     store: Arc<Store>,
 ) -> Result<(axum::Router, AppState, mpsc::Receiver<scheduler::QueuedJob>), String> {
+    let expected_storage_limits = cfg.storage_limits();
+    if store.storage_limits() != expected_storage_limits {
+        return Err(
+            "Store policy does not match Config storage quotas; open it with Store::open_with_limits using the configured global, tenant, and free-space limits"
+                .to_string(),
+        );
+    }
     let rate_per_min = cfg.rate_per_min;
     let workers = cfg.workers;
-    let (admission, queue_rx) = scheduler::Admission::channel(QUEUE_CAPACITY);
+    let memory_budget_mb = cfg.memory_budget_mb;
+    let (admission, queue_rx) =
+        scheduler::Admission::channel(QUEUE_CAPACITY, cfg.tenant_queue_capacity);
     let sandbox_mode = resolve_sandbox(&cfg)?;
+    cfg.validate_resolved_listener_security(sandbox_mode)?;
     // F-005: only meaningful when kernel isolation is actually in play; the
     // naive backend has no exec boundary to put a filter in front of.
     let seccomp_enabled = cfg.seccomp && matches!(sandbox_mode, coop_exec::SandboxMode::Namespaces);
@@ -247,6 +260,7 @@ pub async fn build_app(
         bus: Bus::default(),
         admission,
         tenant_sems: Arc::new(DashMap::new()),
+        memory_slots: Arc::new(Semaphore::new(memory_budget_mb as usize)),
         rate: Arc::new(ratelimit::RateLimiter::new(rate_per_min)),
         sandbox_mode,
         seccomp: seccomp_enabled,
@@ -595,6 +609,32 @@ mod tests {
             resolve_sandbox_with("off", true, false, false, false, true).unwrap(),
             coop_exec::SandboxMode::Off
         );
+    }
+
+    #[tokio::test]
+    async fn build_app_rejects_store_policy_mismatch_even_in_development() {
+        let base = std::env::temp_dir().join(format!(
+            "coop-store-policy-mismatch-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let db = base.join("coop.db");
+        let jobs = base.join("jobs");
+        let source = |key: &str| match key {
+            "COOP_API_KEYS" => Some("tenant:a-long-development-key".to_string()),
+            "COOP_SANDBOX" => Some("off".to_string()),
+            "COOP_STORAGE_TENANT_MB" => Some("128".to_string()),
+            "COOP_STORAGE_GLOBAL_MB" => Some("256".to_string()),
+            "COOP_STORAGE_FREE_RESERVE_MB" => Some("0".to_string()),
+            "COOP_JOBS_ROOT" => Some(jobs.to_string_lossy().into_owned()),
+            _ => None,
+        };
+        let cfg = Config::from_sources(&source, false).unwrap();
+        let store = Arc::new(Store::open(&db).await.unwrap());
+        match build_app(cfg, store).await {
+            Err(error) => assert!(error.contains("Store policy does not match"), "{error}"),
+            Ok(_) => panic!("development embedder bypassed configured storage quotas"),
+        }
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

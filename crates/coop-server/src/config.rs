@@ -2,6 +2,12 @@ use std::collections::HashMap;
 use std::path::{Component, Path};
 
 pub const DEV_DEFAULT_API_KEY: &str = "local:coop-dev-key";
+pub const DEFAULT_TENANT_QUEUE_CAPACITY: usize = 64;
+pub const DEFAULT_MAX_JOB_MEM_MB: u32 = 1024;
+pub const DEFAULT_MEMORY_BUDGET_MB: u32 = 4096;
+pub const DEFAULT_STORAGE_GLOBAL_MB: u64 = 16 * 1024;
+pub const DEFAULT_STORAGE_TENANT_MB: u64 = 4 * 1024;
+pub const DEFAULT_STORAGE_FREE_RESERVE_MB: u64 = 1024;
 
 #[derive(Clone)]
 pub struct Config {
@@ -10,7 +16,13 @@ pub struct Config {
     pub api_keys: HashMap<String, String>,
     pub workers: usize,
     pub tenant_concurrency: usize,
+    pub tenant_queue_capacity: usize,
     pub rate_per_min: u32,
+    pub max_job_mem_mb: u32,
+    pub memory_budget_mb: u32,
+    pub storage_global_mb: u64,
+    pub storage_tenant_mb: u64,
+    pub storage_free_reserve_mb: u64,
     pub sandbox: String,
     pub jobs_root: String,
     /// A private, purpose-built root filesystem used by the namespace
@@ -24,6 +36,7 @@ pub struct Config {
     /// Conspicuous acknowledgement required for the unisolated executor in
     /// production. This is deliberately separate from `COOP_SANDBOX=off`.
     pub unsafe_allow_naive: bool,
+    pub unsafe_allow_public_dev: bool,
     pub python_bin: Option<String>,
     pub node_bin: Option<String>,
     pub bash_bin: Option<String>,
@@ -48,13 +61,20 @@ impl std::fmt::Debug for Config {
             )
             .field("workers", &self.workers)
             .field("tenant_concurrency", &self.tenant_concurrency)
+            .field("tenant_queue_capacity", &self.tenant_queue_capacity)
             .field("rate_per_min", &self.rate_per_min)
+            .field("max_job_mem_mb", &self.max_job_mem_mb)
+            .field("memory_budget_mb", &self.memory_budget_mb)
+            .field("storage_global_mb", &self.storage_global_mb)
+            .field("storage_tenant_mb", &self.storage_tenant_mb)
+            .field("storage_free_reserve_mb", &self.storage_free_reserve_mb)
             .field("sandbox", &self.sandbox)
             .field("jobs_root", &self.jobs_root)
             .field("rootfs", &self.rootfs)
             .field("sandbox_helper", &self.sandbox_helper)
             .field("production", &self.production)
             .field("unsafe_allow_naive", &self.unsafe_allow_naive)
+            .field("unsafe_allow_public_dev", &self.unsafe_allow_public_dev)
             .field("python_bin", &self.python_bin)
             .field("node_bin", &self.node_bin)
             .field("bash_bin", &self.bash_bin)
@@ -99,6 +119,14 @@ fn env_true(getenv: &dyn Fn(&str) -> Option<String>, key: &str) -> bool {
             .as_deref(),
         Some("1" | "true" | "yes" | "on")
     )
+}
+
+fn listener_is_loopback(addr: &str) -> bool {
+    let addr = addr.trim();
+    if let Ok(socket) = addr.parse::<std::net::SocketAddr>() {
+        return socket.ip().is_loopback();
+    }
+    false
 }
 
 /// Reject paths for which a permissions call could affect a broad or
@@ -496,6 +524,7 @@ impl Config {
 
         let sandbox = env_or(getenv, "COOP_SANDBOX", "auto");
         let unsafe_allow_naive = env_true(getenv, "COOP_UNSAFE_ALLOW_NAIVE");
+        let unsafe_allow_public_dev = env_true(getenv, "COOP_UNSAFE_ALLOW_PUBLIC_DEV");
         let seccomp = !matches!(
             env_or(getenv, "COOP_SECCOMP", "auto")
                 .trim()
@@ -507,7 +536,60 @@ impl Config {
             return Err("COOP_SECCOMP cannot be disabled in production".to_string());
         }
 
-        Ok(Self {
+        let tenant_queue_capacity = parse_number(
+            getenv,
+            "COOP_TENANT_QUEUE_CAPACITY",
+            &DEFAULT_TENANT_QUEUE_CAPACITY.to_string(),
+            1usize,
+            crate::QUEUE_CAPACITY,
+        )?;
+        let max_job_mem_mb = parse_number(
+            getenv,
+            "COOP_MAX_JOB_MEM_MB",
+            &DEFAULT_MAX_JOB_MEM_MB.to_string(),
+            16u32,
+            coop_types::MEM_MAX_MB,
+        )?;
+        let memory_budget_mb = parse_number(
+            getenv,
+            "COOP_MEMORY_BUDGET_MB",
+            &DEFAULT_MEMORY_BUDGET_MB.to_string(),
+            16u32,
+            1_048_576u32,
+        )?;
+        if max_job_mem_mb > memory_budget_mb {
+            return Err(format!(
+                "COOP_MAX_JOB_MEM_MB ({max_job_mem_mb}) must not exceed COOP_MEMORY_BUDGET_MB ({memory_budget_mb})"
+            ));
+        }
+        let storage_global_mb = parse_number(
+            getenv,
+            "COOP_STORAGE_GLOBAL_MB",
+            &DEFAULT_STORAGE_GLOBAL_MB.to_string(),
+            128u64,
+            1_048_576u64,
+        )?;
+        let storage_tenant_mb = parse_number(
+            getenv,
+            "COOP_STORAGE_TENANT_MB",
+            &DEFAULT_STORAGE_TENANT_MB.to_string(),
+            64u64,
+            1_048_576u64,
+        )?;
+        if storage_tenant_mb > storage_global_mb {
+            return Err(format!(
+                "COOP_STORAGE_TENANT_MB ({storage_tenant_mb}) must not exceed COOP_STORAGE_GLOBAL_MB ({storage_global_mb})"
+            ));
+        }
+        let storage_free_reserve_mb = parse_number(
+            getenv,
+            "COOP_STORAGE_FREE_RESERVE_MB",
+            &DEFAULT_STORAGE_FREE_RESERVE_MB.to_string(),
+            0u64,
+            1_048_576u64,
+        )?;
+
+        let config = Self {
             addr: env_or(getenv, "COOP_ADDR", "127.0.0.1:7300"),
             db_path: env_or(getenv, "COOP_DB", "coop.db"),
             api_keys,
@@ -519,7 +601,13 @@ impl Config {
                 1usize,
                 256usize,
             )?,
+            tenant_queue_capacity,
             rate_per_min: parse_number(getenv, "COOP_RATE_PER_MIN", "120", 1u32, 1_000_000u32)?,
+            max_job_mem_mb,
+            memory_budget_mb,
+            storage_global_mb,
+            storage_tenant_mb,
+            storage_free_reserve_mb,
             sandbox,
             jobs_root: env_or(getenv, "COOP_JOBS_ROOT", &default_jobs_root()),
             rootfs: getenv("COOP_ROOTFS")
@@ -531,6 +619,7 @@ impl Config {
                 .or_else(default_sandbox_helper),
             production,
             unsafe_allow_naive,
+            unsafe_allow_public_dev,
             python_bin: getenv("COOP_PYTHON"),
             node_bin: getenv("COOP_NODE"),
             bash_bin: getenv("COOP_BASH"),
@@ -543,7 +632,64 @@ impl Config {
                 86_400u64,
             )?,
             seccomp,
-        })
+        };
+        config.validate_declared_listener_security()?;
+        Ok(config)
+    }
+
+    pub fn validate_declared_listener_security(&self) -> Result<(), String> {
+        if listener_is_loopback(&self.addr) || self.unsafe_allow_public_dev {
+            return Ok(());
+        }
+        if self.api_keys.contains_key("coop-dev-key") {
+            return Err(
+                "a non-loopback COOP_ADDR cannot use the public development API key; configure COOP_API_KEYS or set COOP_UNSAFE_ALLOW_PUBLIC_DEV=true to acknowledge the unsafe development exposure"
+                    .to_string(),
+            );
+        }
+        if matches!(
+            self.sandbox.trim().to_ascii_lowercase().as_str(),
+            "off" | "none" | "naive"
+        ) {
+            return Err(
+                "a non-loopback COOP_ADDR cannot use the unisolated subprocess backend unless COOP_UNSAFE_ALLOW_PUBLIC_DEV=true is set"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn validate_resolved_listener_security(
+        &self,
+        mode: coop_exec::SandboxMode,
+    ) -> Result<(), String> {
+        self.validate_declared_listener_security()?;
+        if !listener_is_loopback(&self.addr)
+            && mode == coop_exec::SandboxMode::Off
+            && !self.unsafe_allow_public_dev
+        {
+            return Err(
+                "COOP_SANDBOX=auto resolved to the unisolated subprocess backend on a non-loopback listener; configure namespace isolation or set COOP_UNSAFE_ALLOW_PUBLIC_DEV=true to acknowledge the unsafe development exposure"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn validate_bound_listener_security(
+        &self,
+        bound: std::net::SocketAddr,
+        mode: coop_exec::SandboxMode,
+    ) -> Result<(), String> {
+        if bound.ip().is_loopback() || self.unsafe_allow_public_dev {
+            return Ok(());
+        }
+        if self.api_keys.contains_key("coop-dev-key") || mode == coop_exec::SandboxMode::Off {
+            return Err(format!(
+                "listener resolved to non-loopback address {bound} with an unsafe development credential or executor; configure production keys and namespace isolation, or explicitly set COOP_UNSAFE_ALLOW_PUBLIC_DEV=true"
+            ));
+        }
+        Ok(())
     }
 
     pub fn interpreter_override(&self, language: &str) -> Option<String> {
@@ -552,6 +698,27 @@ impl Config {
             "node" => self.node_bin.clone(),
             _ => self.bash_bin.clone(),
         }
+    }
+
+    pub fn clamp_limits(&self, limits: coop_types::Limits) -> coop_types::Limits {
+        let mut limits = limits.clamped();
+        limits.mem_mb = self.clamp_mem_mb(limits.mem_mb);
+        limits
+    }
+
+    pub fn clamp_mem_mb(&self, mem_mb: u32) -> u32 {
+        mem_mb
+            .clamp(16, coop_types::MEM_MAX_MB)
+            .min(self.max_job_mem_mb)
+    }
+
+    pub fn storage_limits(&self) -> coop_store::StorageLimits {
+        let mib = 1024_u64 * 1024;
+        coop_store::StorageLimits::new(
+            self.storage_global_mb.saturating_mul(mib),
+            self.storage_tenant_mb.saturating_mul(mib),
+            self.storage_free_reserve_mb.saturating_mul(mib),
+        )
     }
 }
 
@@ -826,5 +993,72 @@ mod tests {
             assert!(!is_production_env(Some(v.to_string())), "{v}");
         }
         assert!(!is_production_env(None));
+    }
+
+    #[test]
+    fn non_loopback_development_listener_fails_closed_without_acknowledgement() {
+        let error = Config::from_sources(&source(&[("COOP_ADDR", "0.0.0.0:7300")]), false)
+            .expect_err("public fallback key must not bind publicly");
+        assert!(error.contains("public development API key"), "{error}");
+
+        let error = Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "0.0.0.0:7300"),
+                ("COOP_API_KEYS", "local:coop-dev-key"),
+                ("COOP_SANDBOX", "namespaces"),
+            ]),
+            false,
+        )
+        .expect_err("explicit public key must be detected semantically");
+        assert!(error.contains("public development API key"), "{error}");
+
+        let error = Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "[::]:7300"),
+                ("COOP_API_KEYS", "tenant:a-long-development-key"),
+                ("COOP_SANDBOX", "off"),
+            ]),
+            false,
+        )
+        .expect_err("public subprocess backend must not start");
+        assert!(error.contains("unisolated subprocess"), "{error}");
+
+        Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "0.0.0.0:7300"),
+                ("COOP_UNSAFE_ALLOW_PUBLIC_DEV", "true"),
+            ]),
+            false,
+        )
+        .expect("conspicuous acknowledgement is explicit");
+    }
+
+    #[test]
+    fn configured_resource_ceilings_are_coherent_and_clamp_memory() {
+        let cfg = Config::from_sources(
+            &source(&[
+                ("COOP_MAX_JOB_MEM_MB", "512"),
+                ("COOP_MEMORY_BUDGET_MB", "1024"),
+                ("COOP_STORAGE_TENANT_MB", "128"),
+                ("COOP_STORAGE_GLOBAL_MB", "256"),
+            ]),
+            false,
+        )
+        .unwrap();
+        let limits = coop_types::Limits {
+            mem_mb: 4096,
+            ..coop_types::Limits::default()
+        };
+        assert_eq!(cfg.clamp_limits(limits).mem_mb, 512);
+
+        let error = Config::from_sources(
+            &source(&[
+                ("COOP_MAX_JOB_MEM_MB", "2048"),
+                ("COOP_MEMORY_BUDGET_MB", "1024"),
+            ]),
+            false,
+        )
+        .expect_err("one job cannot exceed aggregate memory");
+        assert!(error.contains("must not exceed"), "{error}");
     }
 }

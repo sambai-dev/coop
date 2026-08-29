@@ -47,14 +47,18 @@ async fn run() -> Result<(), String> {
     let listener = TcpListener::bind(&addr)
         .await
         .map_err(|error| format!("failed to bind {addr}: {error}"))?;
+    let bound_addr = listener
+        .local_addr()
+        .map_err(|error| format!("failed to inspect bound listener {addr}: {error}"))?;
     let listener = WriteTimeoutListener::new(listener, HTTP_WRITE_PROGRESS_TIMEOUT);
 
     // The adjacent OS lock covers the stronger case: another process using a
     // different port but the same canonical SQLite state cannot run recovery
     // or workers concurrently. Keep the file handle alive for this run.
     let _instance_lock = acquire_instance_lock(Path::new(&cfg.db_path))?;
+    let store_limits = cfg.storage_limits();
     let store = Arc::new(
-        Store::open(Path::new(&cfg.db_path))
+        Store::open_with_limits(Path::new(&cfg.db_path), store_limits)
             .await
             .map_err(|error| format!("failed to open sqlite event store: {error}"))?,
     );
@@ -62,6 +66,9 @@ async fn run() -> Result<(), String> {
     // F8: an unsatisfiable sandbox configuration is a startup error, not a
     // silent downgrade to unprotected execution.
     let (app, state, queue_rx) = build_app(cfg, store).await?;
+    state
+        .cfg
+        .validate_bound_listener_security(bound_addr, state.sandbox_mode)?;
     state
         .startup_ready
         .store(false, std::sync::atomic::Ordering::Release);
@@ -328,7 +335,7 @@ async fn recover_queued_jobs(state: coop_server::AppState) -> Result<usize, Stri
             }
             let reservation = state
                 .admission
-                .reserve()
+                .reserve_recovery(&row.tenant, state.cfg.clamp_mem_mb(row.requested_mem_mb))
                 .await
                 // Admission is closed only by AppState::begin_shutdown. The
                 // sticky watch publication follows immediately, but reserve
@@ -336,7 +343,7 @@ async fn recover_queued_jobs(state: coop_server::AppState) -> Result<usize, Stri
                 // same expected recovery stop rather than a fatal boot error.
                 .map_err(|_| "shutdown requested".to_string())?;
             state.bus.register(&row.job_id);
-            reservation.send(row.job_id.clone(), row.tenant.clone());
+            reservation.send(row.job_id.clone());
             restored += 1;
         }
         cursor = page.last().map(JobCursor::from);

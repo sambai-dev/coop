@@ -1,9 +1,9 @@
 use crate::bus::WireEvent;
 use crate::routes::{
-    CapabilitiesResponse, ErrorBody, ErrorEnvelope, ExecutionCapabilities, ExecutionPolicy,
-    FeatureCapabilities, JobDetail, JobView, LimitCapabilities, ListJobsResponse, ReplayResponse,
-    ResultView, SchedulerStatus, StatusResponse, StreamTicketResponse, SubmitResponse,
-    WhoAmIResponse,
+    CancellationResponse, CapabilitiesResponse, ErrorBody, ErrorEnvelope, ExecutionCapabilities,
+    ExecutionPolicy, FeatureCapabilities, JobDetail, JobView, LimitCapabilities, ListJobsResponse,
+    ReplayResponse, ResultView, SchedulerStatus, StatusResponse, StreamTicketResponse,
+    SubmitResponse, WhoAmIResponse,
 };
 use axum::Json;
 use coop_types::{EffectiveJobSpec, EffectiveLimits, JobSpec, LimitEnforcement, Limits};
@@ -40,6 +40,7 @@ use utoipa::{Modify, OpenApi};
         EffectiveLimits,
         LimitEnforcement,
         JobView,
+        CancellationResponse,
         JobDetail,
         ExecutionPolicy,
         ResultView,
@@ -112,7 +113,7 @@ mod tests {
             serde_json::json!([])
         );
         let submit_responses = &value["paths"]["/v1/jobs"]["post"]["responses"];
-        for status in ["408", "415", "422", "429", "503"] {
+        for status in ["408", "415", "422", "429", "503", "507"] {
             assert!(
                 submit_responses.get(status).is_some(),
                 "submit OpenAPI missing {status} response"

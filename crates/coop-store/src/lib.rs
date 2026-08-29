@@ -9,14 +9,82 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub type StoreResult<T> = Result<T, sqlx::Error>;
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
-const ROW_VALIDATION_REVISION: i64 = 1;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageLimits {
+    pub global_bytes: u64,
+    pub tenant_bytes: u64,
+    pub free_reserve_bytes: u64,
+}
+
+impl StorageLimits {
+    pub const fn new(global_bytes: u64, tenant_bytes: u64, free_reserve_bytes: u64) -> Self {
+        Self {
+            global_bytes,
+            tenant_bytes,
+            free_reserve_bytes,
+        }
+    }
+
+    pub const fn unlimited() -> Self {
+        Self::new(i64::MAX as u64, i64::MAX as u64, 0)
+    }
+
+    pub const fn local_default() -> Self {
+        Self::new(16 * 1024 * 1024 * 1024, 4 * 1024 * 1024 * 1024, 0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityErrorKind {
+    Tenant,
+    Global,
+    Filesystem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotencyRequest {
+    pub key: String,
+    pub request_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdempotencyLookup {
+    Miss,
+    Replay { job_id: String },
+    Conflict,
+}
+
+const CURRENT_SCHEMA_VERSION: i64 = 3;
+const ROW_VALIDATION_REVISION: i64 = 2;
 // Transaction-local durable sentinel used to distinguish Coop-owned writes
 // from offline/raw SQL changes in the validation-dirty triggers. SQLite's
 // immediate writer lock prevents another connection from observing or using
 // the sentinel until the transaction commits (which Coop never does).
 const OWNED_ROW_WRITE_REVISION: i64 = ROW_VALIDATION_REVISION + 1;
-const STORAGE_GUARD_REVISION_MARKER: &str = "coop-storage-guard-r1";
+const STORAGE_GUARD_REVISION_MARKER: &str = "coop-storage-guard-r2";
+pub const JOB_COMPLETION_RESERVE_BYTES: u64 = 32 * 1024 * 1024;
+const LOGICAL_ROW_OVERHEAD_BYTES: u64 = 64;
+const TERMINAL_RESERVE_BYTES: u64 = 64 * 1024;
+const TENANT_QUOTA_MARKER: &str = "coop-capacity:tenant-logical-bytes";
+const GLOBAL_QUOTA_MARKER: &str = "coop-capacity:global-logical-bytes";
+const FREE_SPACE_MARKER: &str = "coop-capacity:filesystem-reserve";
+const IDEMPOTENCY_CONFLICT_MARKER: &str = "coop-idempotency:fingerprint-conflict";
+
+pub fn capacity_error_kind(error: &sqlx::Error) -> Option<CapacityErrorKind> {
+    let text = error.to_string();
+    if text.contains(TENANT_QUOTA_MARKER) {
+        Some(CapacityErrorKind::Tenant)
+    } else if text.contains(GLOBAL_QUOTA_MARKER) {
+        Some(CapacityErrorKind::Global)
+    } else if text.contains(FREE_SPACE_MARKER)
+        || text.contains("database or disk is full")
+        || text.contains("SQLITE_FULL")
+    {
+        Some(CapacityErrorKind::Filesystem)
+    } else {
+        None
+    }
+}
 const STORAGE_GUARD_NAMES: [&str; 13] = [
     "coop_schema_migrations_storage_guard_insert",
     "coop_schema_migrations_storage_guard_update",
@@ -100,6 +168,12 @@ pub struct EventRow {
     pub hash_version: i64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum CreateJobOutcome {
+    Created(EventRow),
+    Replayed { job_id: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobCursor {
     pub created_at_ms: i64,
@@ -111,6 +185,7 @@ pub struct QueuedJobRow {
     pub job_id: String,
     pub tenant: String,
     pub created_at_ms: i64,
+    pub requested_mem_mb: u32,
 }
 
 impl From<&QueuedJobRow> for JobCursor {
@@ -178,6 +253,7 @@ pub struct RetentionReport {
 pub struct Store {
     pool: SqlitePool,
     db_path: PathBuf,
+    limits: StorageLimits,
 }
 
 fn now_ms() -> i64 {
@@ -185,6 +261,307 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn validate_storage_limits(limits: StorageLimits) -> StoreResult<()> {
+    if limits.global_bytes == 0
+        || limits.tenant_bytes == 0
+        || limits.tenant_bytes > limits.global_bytes
+        || limits.global_bytes > i64::MAX as u64
+        || limits.tenant_bytes > i64::MAX as u64
+    {
+        return Err(sqlx::Error::InvalidArgument(
+            "logical storage limits must be positive, fit i64, and keep tenant <= global"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn requested_mem_mb_from_json(spec_json: &str) -> StoreResult<u32> {
+    let value: Value = serde_json::from_str(spec_json)
+        .map_err(|error| sqlx::Error::InvalidArgument(error.to_string()))?;
+    let raw = value
+        .get("limits")
+        .and_then(|limits| limits.get("mem_mb"))
+        .and_then(Value::as_u64)
+        .unwrap_or(256)
+        .clamp(1, 4096);
+    Ok(raw as u32)
+}
+
+fn logical_job_base_bytes(
+    job_id: &str,
+    tenant: &str,
+    language: &str,
+    status: &str,
+    spec_json: &str,
+) -> u64 {
+    LOGICAL_ROW_OVERHEAD_BYTES
+        .saturating_add(job_id.len() as u64)
+        .saturating_add(tenant.len() as u64)
+        .saturating_add(language.len() as u64)
+        .saturating_add(status.len() as u64)
+        .saturating_add(spec_json.len() as u64)
+}
+
+fn logical_event_bytes(event: &EventRow) -> u64 {
+    LOGICAL_ROW_OVERHEAD_BYTES
+        .saturating_add(event.kind.len() as u64)
+        .saturating_add(canonical_json(&event.data).len() as u64)
+        .saturating_add(event.prev_hash.len() as u64)
+        .saturating_add(event.event_hash.len() as u64)
+}
+
+fn to_i64_bytes(value: u64) -> StoreResult<i64> {
+    i64::try_from(value)
+        .map_err(|_| sqlx::Error::Protocol("logical byte count exceeded i64".to_string()))
+}
+
+async fn ensure_storage_quota_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    tenant: &str,
+    additional: u64,
+    limits: StorageLimits,
+) -> StoreResult<()> {
+    if additional == 0 {
+        return Ok(());
+    }
+    let global: i64 =
+        sqlx::query("SELECT charged_bytes FROM storage_usage_total WHERE singleton = 1")
+            .fetch_one(&mut **tx)
+            .await?
+            .try_get("charged_bytes")?;
+    let tenant_used: i64 = sqlx::query(
+        "SELECT COALESCE((
+             SELECT charged_bytes FROM tenant_storage_usage WHERE tenant = ?1
+         ), 0) AS charged_bytes",
+    )
+    .bind(tenant)
+    .fetch_one(&mut **tx)
+    .await?
+    .try_get("charged_bytes")?;
+    let additional = to_i64_bytes(additional)?;
+    if tenant_used.saturating_add(additional) > limits.tenant_bytes as i64 {
+        return Err(sqlx::Error::Protocol(TENANT_QUOTA_MARKER.to_string()));
+    }
+    if global.saturating_add(additional) > limits.global_bytes as i64 {
+        return Err(sqlx::Error::Protocol(GLOBAL_QUOTA_MARKER.to_string()));
+    }
+    Ok(())
+}
+
+async fn actual_job_logical_bytes_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    job_id: &str,
+) -> StoreResult<Option<(String, u64)>> {
+    let row = sqlx::query(
+        "SELECT job.tenant,
+                64
+                  + length(CAST(job.job_id AS BLOB))
+                  + length(CAST(job.tenant AS BLOB))
+                  + length(CAST(job.language AS BLOB))
+                  + length(CAST(job.status AS BLOB))
+                  + length(CAST(job.spec_json AS BLOB))
+                  + COALESCE(length(CAST(job.effective_spec_json AS BLOB)), 0)
+                  + COALESCE(length(CAST(job.receipt_json AS BLOB)), 0)
+                  + COALESCE((
+                      SELECT SUM(
+                          64
+                          + length(CAST(event.kind AS BLOB))
+                          + length(CAST(event.data_json AS BLOB))
+                          + length(CAST(event.prev_hash AS BLOB))
+                          + length(CAST(event.event_hash AS BLOB))
+                      ) FROM events AS event WHERE event.job_id = job.job_id
+                    ), 0) AS retained_bytes
+         FROM jobs AS job WHERE job.job_id = ?1",
+    )
+    .bind(job_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.map(|row| {
+        let retained: i64 = row.try_get("retained_bytes")?;
+        Ok((
+            row.try_get("tenant")?,
+            u64::try_from(retained).map_err(|_| {
+                sqlx::Error::Protocol("logical retained bytes became negative".to_string())
+            })?,
+        ))
+    })
+    .transpose()
+}
+
+async fn reconcile_job_storage_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    job_id: &str,
+    release_reservation: bool,
+    db_path: &Path,
+    limits: StorageLimits,
+) -> StoreResult<()> {
+    let Some((tenant, actual)) = actual_job_logical_bytes_tx(tx, job_id).await? else {
+        return Ok(());
+    };
+    let row = sqlx::query(
+        "SELECT retained_bytes, reserved_bytes FROM job_storage_usage WHERE job_id = ?1",
+    )
+    .bind(job_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let old_retained = u64::try_from(row.try_get::<i64, _>("retained_bytes")?)
+        .map_err(|_| sqlx::Error::Protocol("logical retained bytes became negative".to_string()))?;
+    let old_reserved = u64::try_from(row.try_get::<i64, _>("reserved_bytes")?)
+        .map_err(|_| sqlx::Error::Protocol("logical reserved bytes became negative".to_string()))?;
+    let mut new_reserved = old_reserved;
+    if actual > old_retained {
+        let growth = actual - old_retained;
+        let protected = if release_reservation {
+            0
+        } else {
+            old_reserved.min(TERMINAL_RESERVE_BYTES)
+        };
+        let consumable = old_reserved.saturating_sub(protected);
+        let consumed = growth.min(consumable);
+        new_reserved = old_reserved - consumed;
+        let overage = growth - consumed;
+        if overage != 0 {
+            ensure_storage_quota_tx(tx, &tenant, overage, limits).await?;
+            ensure_filesystem_reserve_tx(tx, db_path, limits.free_reserve_bytes, overage).await?;
+        }
+    }
+    if release_reservation {
+        new_reserved = 0;
+    }
+    sqlx::query(
+        "UPDATE job_storage_usage
+         SET retained_bytes = ?2, reserved_bytes = ?3
+         WHERE job_id = ?1",
+    )
+    .bind(job_id)
+    .bind(to_i64_bytes(actual)?)
+    .bind(to_i64_bytes(new_reserved)?)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn lookup_idempotency_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    tenant: &str,
+    request: &IdempotencyRequest,
+) -> StoreResult<IdempotencyLookup> {
+    let row = sqlx::query(
+        "SELECT request_sha256, job_id FROM idempotency_keys
+         WHERE tenant = ?1 AND idempotency_key = ?2",
+    )
+    .bind(tenant)
+    .bind(&request.key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(match row {
+        None => IdempotencyLookup::Miss,
+        Some(row) if row.get::<String, _>("request_sha256") == request.request_sha256 => {
+            IdempotencyLookup::Replay {
+                job_id: row.get("job_id"),
+            }
+        }
+        Some(_) => IdempotencyLookup::Conflict,
+    })
+}
+
+pub fn is_idempotency_conflict(error: &sqlx::Error) -> bool {
+    error.to_string().contains(IDEMPOTENCY_CONFLICT_MARKER)
+}
+
+fn ensure_filesystem_reserve(path: &Path, reserve: u64, additional: u64) -> StoreResult<()> {
+    if reserve == 0 {
+        return Ok(());
+    }
+    let available = filesystem_available_bytes(path)?;
+    if available < reserve.saturating_add(additional) {
+        return Err(sqlx::Error::Protocol(FREE_SPACE_MARKER.to_string()));
+    }
+    Ok(())
+}
+
+async fn ensure_filesystem_reserve_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    path: &Path,
+    reserve: u64,
+    additional: u64,
+) -> StoreResult<()> {
+    if reserve == 0 {
+        return Ok(());
+    }
+    let outstanding: i64 = sqlx::query(
+        "SELECT COALESCE(SUM(reserved_bytes), 0) AS reserved_bytes
+         FROM job_storage_usage",
+    )
+    .fetch_one(&mut **tx)
+    .await?
+    .try_get("reserved_bytes")?;
+    let outstanding = u64::try_from(outstanding).map_err(|_| {
+        sqlx::Error::Protocol("global logical storage reservation became negative".to_string())
+    })?;
+    ensure_filesystem_reserve(path, reserve, outstanding.saturating_add(additional))
+}
+
+fn filesystem_probe_path(path: &Path) -> StoreResult<PathBuf> {
+    match path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => Ok(parent.to_path_buf()),
+        None => std::env::current_dir().map_err(Into::into),
+    }
+}
+
+#[cfg(unix)]
+fn filesystem_available_bytes(path: &Path) -> StoreResult<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let probe = filesystem_probe_path(path)?;
+    let encoded = std::ffi::CString::new(probe.as_os_str().as_bytes())
+        .map_err(|error| sqlx::Error::InvalidArgument(error.to_string()))?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    if unsafe { libc::statvfs(encoded.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let stats = unsafe { stats.assume_init() };
+    Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
+}
+
+#[cfg(windows)]
+fn filesystem_available_bytes(path: &Path) -> StoreResult<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            directory: *const u16,
+            available: *mut u64,
+            total: *mut u64,
+            free: *mut u64,
+        ) -> i32;
+    }
+    let probe = filesystem_probe_path(path)?;
+    let mut encoded = probe.as_os_str().encode_wide().collect::<Vec<_>>();
+    encoded.push(0);
+    let mut available = 0_u64;
+    if unsafe {
+        GetDiskFreeSpaceExW(
+            encoded.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(available)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn filesystem_available_bytes(_path: &Path) -> StoreResult<u64> {
+    Ok(u64::MAX)
 }
 
 fn build_job_list_query<'args>(
@@ -230,9 +607,11 @@ fn build_queued_jobs_query<'args>(
 ) -> QueryBuilder<'args, Sqlite> {
     let mut statement = QueryBuilder::<Sqlite>::new(prefix);
     statement.push(
-        "SELECT job_id, tenant, created_at_ms
-         FROM jobs
-         WHERE status = 'queued'
+        "SELECT jobs.job_id, jobs.tenant, jobs.created_at_ms,
+                job_storage_usage.requested_mem_mb
+         FROM jobs INDEXED BY idx_jobs_status_created_recovery
+         INNER JOIN job_storage_usage ON job_storage_usage.job_id = jobs.job_id
+         WHERE jobs.status = 'queued'
            AND NOT EXISTS (
                 SELECT 1 FROM retention_tombstones
                 WHERE retention_tombstones.job_id = jobs.job_id
@@ -240,20 +619,25 @@ fn build_queued_jobs_query<'args>(
     );
     if let Some(after) = after {
         statement
-            .push(" AND (created_at_ms, job_id) > (")
+            .push(" AND (jobs.created_at_ms, jobs.job_id) > (")
             .push_bind(after.created_at_ms)
             .push(", ")
             .push_bind(after.job_id.as_str())
             .push(")");
     }
     statement
-        .push(" ORDER BY created_at_ms ASC, job_id ASC LIMIT ")
+        .push(" ORDER BY jobs.created_at_ms ASC, jobs.job_id ASC LIMIT ")
         .push_bind(limit.clamp(1, MAX_RECOVERY_PAGE));
     statement
 }
 
 impl Store {
     pub async fn open(path: &Path) -> StoreResult<Self> {
+        Self::open_with_limits(path, StorageLimits::local_default()).await
+    }
+
+    pub async fn open_with_limits(path: &Path, limits: StorageLimits) -> StoreResult<Self> {
+        validate_storage_limits(limits)?;
         prepare_storage_path(path)?;
 
         let opts = SqliteConnectOptions::new()
@@ -275,6 +659,7 @@ impl Store {
         let store = Self {
             pool,
             db_path: path.to_path_buf(),
+            limits,
         };
 
         if let Err(error) = store.migrate().await {
@@ -287,6 +672,10 @@ impl Store {
         // WAL/SHM files created by an older Coop version.
         harden_storage_files(path)?;
         Ok(store)
+    }
+
+    pub fn storage_limits(&self) -> StorageLimits {
+        self.limits
     }
 
     async fn migrate(&self) -> StoreResult<()> {
@@ -349,6 +738,7 @@ impl Store {
             (0, false) => {
                 Self::create_current_schema(conn).await?;
                 record_migration(conn, 1).await?;
+                record_migration(conn, 2).await?;
                 record_migration(conn, CURRENT_SCHEMA_VERSION).await?;
             }
             (0, true) | (1, true) => {
@@ -363,6 +753,7 @@ impl Store {
                     if history_version == 0 {
                         record_migration(conn, 1).await?;
                     }
+                    record_migration(conn, 2).await?;
                     record_migration(conn, CURRENT_SCHEMA_VERSION).await?;
                 }
             }
@@ -371,7 +762,7 @@ impl Store {
                     "schema migration history exists but the jobs table is missing".to_string(),
                 ));
             }
-            (CURRENT_SCHEMA_VERSION, true) => {}
+            (2, true) | (CURRENT_SCHEMA_VERSION, true) => {}
             (CURRENT_SCHEMA_VERSION, false) => {
                 return Err(sqlx::Error::Protocol(
                     "current schema migration is recorded but the jobs table is missing"
@@ -415,6 +806,7 @@ impl Store {
             Self::record_row_validation(conn).await?;
         }
         record_migration(conn, 1).await?;
+        record_migration(conn, 2).await?;
         record_migration(conn, CURRENT_SCHEMA_VERSION).await?;
 
         sqlx::query(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"))
@@ -550,6 +942,8 @@ impl Store {
     async fn create_indexes(conn: &mut SqliteConnection) -> StoreResult<()> {
         Self::ensure_integrity_state(conn).await?;
         Self::ensure_retention_tombstones(conn).await?;
+        Self::ensure_storage_accounting(conn).await?;
+        Self::ensure_idempotency_keys(conn).await?;
         // These non-covering v2-development indexes can force SQLite to walk
         // large table-record overflow chains for lifecycle columns stored
         // after the JSON payloads. Replace them transactionally with indexes
@@ -594,6 +988,319 @@ impl Store {
             sqlx::query(statement).execute(&mut *conn).await?;
         }
         create_storage_guard_triggers(conn).await?;
+        Ok(())
+    }
+
+    async fn ensure_storage_accounting(conn: &mut SqliteConnection) -> StoreResult<()> {
+        let existed = table_exists(conn, "job_storage_usage").await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS job_storage_usage (
+                 job_id TEXT PRIMARY KEY NOT NULL
+                     REFERENCES jobs(job_id) ON DELETE CASCADE,
+                 tenant TEXT NOT NULL
+                     CHECK (typeof(tenant) = 'text' AND length(trim(tenant)) > 0),
+                 retained_bytes INTEGER NOT NULL
+                     CHECK (typeof(retained_bytes) = 'integer' AND retained_bytes >= 0),
+                 reserved_bytes INTEGER NOT NULL
+                     CHECK (typeof(reserved_bytes) = 'integer' AND reserved_bytes >= 0),
+                 requested_mem_mb INTEGER NOT NULL
+                     CHECK (typeof(requested_mem_mb) = 'integer'
+                            AND requested_mem_mb BETWEEN 1 AND 4096)
+             )",
+        )
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS storage_usage_total (
+                 singleton INTEGER PRIMARY KEY
+                     CHECK (typeof(singleton) = 'integer' AND singleton = 1),
+                 charged_bytes INTEGER NOT NULL
+                     CHECK (typeof(charged_bytes) = 'integer' AND charged_bytes >= 0)
+             )",
+        )
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tenant_storage_usage (
+                 tenant TEXT PRIMARY KEY NOT NULL
+                     CHECK (typeof(tenant) = 'text' AND length(trim(tenant)) > 0),
+                 charged_bytes INTEGER NOT NULL
+                     CHECK (typeof(charged_bytes) = 'integer' AND charged_bytes >= 0)
+             )",
+        )
+        .execute(&mut *conn)
+        .await?;
+        validate_required_columns(
+            conn,
+            "job_storage_usage",
+            &[
+                RequiredColumn::primary_key("job_id", "TEXT"),
+                RequiredColumn::not_null("tenant", "TEXT"),
+                RequiredColumn::not_null("retained_bytes", "INTEGER"),
+                RequiredColumn::not_null("reserved_bytes", "INTEGER"),
+                RequiredColumn::not_null("requested_mem_mb", "INTEGER"),
+            ],
+        )
+        .await?;
+        validate_required_columns(
+            conn,
+            "storage_usage_total",
+            &[
+                RequiredColumn::primary_key("singleton", "INTEGER"),
+                RequiredColumn::not_null("charged_bytes", "INTEGER"),
+            ],
+        )
+        .await?;
+        validate_required_columns(
+            conn,
+            "tenant_storage_usage",
+            &[
+                RequiredColumn::primary_key("tenant", "TEXT"),
+                RequiredColumn::not_null("charged_bytes", "INTEGER"),
+            ],
+        )
+        .await?;
+
+        let authoritative_rows_changed = !Self::row_validation_current(conn).await?;
+        if !existed || authoritative_rows_changed {
+            sqlx::query("DELETE FROM job_storage_usage")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "INSERT INTO job_storage_usage(
+                     job_id, tenant, retained_bytes, reserved_bytes, requested_mem_mb
+                 )
+                 SELECT job.job_id,
+                        job.tenant,
+                        64
+                          + length(CAST(job.job_id AS BLOB))
+                          + length(CAST(job.tenant AS BLOB))
+                          + length(CAST(job.language AS BLOB))
+                          + length(CAST(job.status AS BLOB))
+                          + length(CAST(job.spec_json AS BLOB))
+                          + COALESCE(length(CAST(job.effective_spec_json AS BLOB)), 0)
+                          + COALESCE(length(CAST(job.receipt_json AS BLOB)), 0)
+                          + COALESCE((
+                              SELECT SUM(
+                                  64
+                                  + length(CAST(event.kind AS BLOB))
+                                  + length(CAST(event.data_json AS BLOB))
+                                  + length(CAST(event.prev_hash AS BLOB))
+                                  + length(CAST(event.event_hash AS BLOB))
+                              )
+                              FROM events AS event WHERE event.job_id = job.job_id
+                            ), 0),
+                        CASE WHEN job.status IN ('queued','running') THEN ?1 ELSE 0 END,
+                        CASE
+                            WHEN json_type(job.spec_json, '$.limits.mem_mb') = 'integer'
+                            THEN MIN(MAX(CAST(json_extract(job.spec_json, '$.limits.mem_mb') AS INTEGER), 1), 4096)
+                            ELSE 256
+                        END
+                 FROM jobs AS job",
+            )
+            .bind(JOB_COMPLETION_RESERVE_BYTES as i64)
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query("DELETE FROM storage_usage_total")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "INSERT INTO storage_usage_total(singleton, charged_bytes)
+                 SELECT 1, COALESCE(SUM(retained_bytes + reserved_bytes), 0)
+                 FROM job_storage_usage",
+            )
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query("DELETE FROM tenant_storage_usage")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "INSERT INTO tenant_storage_usage(tenant, charged_bytes)
+                 SELECT tenant, SUM(retained_bytes + reserved_bytes)
+                 FROM job_storage_usage GROUP BY tenant",
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO storage_usage_total(singleton, charged_bytes) VALUES (1, 0)",
+        )
+        .execute(&mut *conn)
+        .await?;
+        for trigger in [
+            "coop_usage_aggregate_insert",
+            "coop_usage_aggregate_update",
+            "coop_usage_aggregate_delete",
+        ] {
+            sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger}"))
+                .execute(&mut *conn)
+                .await?;
+        }
+        for statement in [
+            "CREATE TRIGGER coop_usage_aggregate_insert
+             AFTER INSERT ON job_storage_usage BEGIN
+                 UPDATE storage_usage_total
+                 SET charged_bytes = charged_bytes + NEW.retained_bytes + NEW.reserved_bytes
+                 WHERE singleton = 1;
+                 INSERT INTO tenant_storage_usage(tenant, charged_bytes)
+                 VALUES (NEW.tenant, NEW.retained_bytes + NEW.reserved_bytes)
+                 ON CONFLICT(tenant) DO UPDATE SET
+                     charged_bytes = charged_bytes + excluded.charged_bytes;
+             END",
+            "CREATE TRIGGER coop_usage_aggregate_update
+             AFTER UPDATE OF retained_bytes, reserved_bytes ON job_storage_usage BEGIN
+                 UPDATE storage_usage_total
+                 SET charged_bytes = charged_bytes
+                     + (NEW.retained_bytes + NEW.reserved_bytes)
+                     - (OLD.retained_bytes + OLD.reserved_bytes)
+                 WHERE singleton = 1;
+                 UPDATE tenant_storage_usage
+                 SET charged_bytes = charged_bytes
+                     + (NEW.retained_bytes + NEW.reserved_bytes)
+                     - (OLD.retained_bytes + OLD.reserved_bytes)
+                 WHERE tenant = NEW.tenant;
+             END",
+            "CREATE TRIGGER coop_usage_aggregate_delete
+             AFTER DELETE ON job_storage_usage BEGIN
+                 UPDATE storage_usage_total
+                 SET charged_bytes = charged_bytes - OLD.retained_bytes - OLD.reserved_bytes
+                 WHERE singleton = 1;
+                 UPDATE tenant_storage_usage
+                 SET charged_bytes = charged_bytes - OLD.retained_bytes - OLD.reserved_bytes
+                 WHERE tenant = OLD.tenant;
+                 DELETE FROM tenant_storage_usage
+                 WHERE tenant = OLD.tenant AND charged_bytes = 0;
+             END",
+        ] {
+            sqlx::query(statement).execute(&mut *conn).await?;
+        }
+        Self::validate_storage_accounting(conn).await
+    }
+
+    async fn ensure_idempotency_keys(conn: &mut SqliteConnection) -> StoreResult<()> {
+        let existed = table_exists(conn, "idempotency_keys").await?;
+        let history_version: i64 =
+            sqlx::query("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations")
+                .fetch_one(&mut *conn)
+                .await?
+                .try_get("version")?;
+        let user_version: i64 = sqlx::query("PRAGMA user_version")
+            .fetch_one(&mut *conn)
+            .await?
+            .try_get("user_version")?;
+        if !existed && (history_version >= 3 || user_version >= 3) {
+            return Err(sqlx::Error::Protocol(
+                "v3 database is missing durable idempotency mappings".to_string(),
+            ));
+        }
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS idempotency_keys (
+                 tenant TEXT NOT NULL
+                     CHECK (typeof(tenant) = 'text' AND length(trim(tenant)) > 0),
+                 idempotency_key TEXT NOT NULL
+                     CHECK (typeof(idempotency_key) = 'text'
+                            AND length(idempotency_key) BETWEEN 1 AND 128),
+                 request_sha256 TEXT NOT NULL
+                     CHECK (typeof(request_sha256) = 'text' AND length(request_sha256) = 64),
+                 job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+                 created_at_ms INTEGER NOT NULL
+                     CHECK (typeof(created_at_ms) = 'integer' AND created_at_ms >= 0),
+                 PRIMARY KEY(tenant, idempotency_key)
+             ) WITHOUT ROWID",
+        )
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_idempotency_job ON idempotency_keys(job_id)")
+            .execute(&mut *conn)
+            .await?;
+        validate_required_columns(
+            conn,
+            "idempotency_keys",
+            &[
+                RequiredColumn::primary_key("tenant", "TEXT"),
+                RequiredColumn::primary_key("idempotency_key", "TEXT"),
+                RequiredColumn::not_null("request_sha256", "TEXT"),
+                RequiredColumn::not_null("job_id", "TEXT"),
+                RequiredColumn::not_null("created_at_ms", "INTEGER"),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn validate_storage_accounting(conn: &mut SqliteConnection) -> StoreResult<()> {
+        let invalid: i64 = sqlx::query(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM jobs AS job
+                 LEFT JOIN job_storage_usage AS usage ON usage.job_id = job.job_id
+                 WHERE usage.job_id IS NULL OR usage.tenant != job.tenant
+                    OR usage.retained_bytes != (
+                        64
+                        + length(CAST(job.job_id AS BLOB))
+                        + length(CAST(job.tenant AS BLOB))
+                        + length(CAST(job.language AS BLOB))
+                        + length(CAST(job.status AS BLOB))
+                        + length(CAST(job.spec_json AS BLOB))
+                        + COALESCE(length(CAST(job.effective_spec_json AS BLOB)), 0)
+                        + COALESCE(length(CAST(job.receipt_json AS BLOB)), 0)
+                        + COALESCE((
+                            SELECT SUM(
+                                64
+                                + length(CAST(event.kind AS BLOB))
+                                + length(CAST(event.data_json AS BLOB))
+                                + length(CAST(event.prev_hash AS BLOB))
+                                + length(CAST(event.event_hash AS BLOB))
+                            ) FROM events AS event WHERE event.job_id = job.job_id
+                          ), 0)
+                    )
+                    OR (job.status NOT IN ('queued','running') AND usage.reserved_bytes != 0)
+             )
+             OR EXISTS(
+                 SELECT 1 FROM job_storage_usage AS usage
+                 LEFT JOIN jobs AS job ON job.job_id = usage.job_id
+                 WHERE job.job_id IS NULL
+             ) AS invalid",
+        )
+        .fetch_one(&mut *conn)
+        .await?
+        .try_get("invalid")?;
+        if invalid != 0 {
+            return Err(sqlx::Error::Protocol(
+                "logical storage accounting disagrees with retained rows".to_string(),
+            ));
+        }
+        let global_valid: i64 = sqlx::query(
+            "SELECT charged_bytes = (
+                 SELECT COALESCE(SUM(retained_bytes + reserved_bytes), 0)
+                 FROM job_storage_usage
+             ) AS valid
+             FROM storage_usage_total WHERE singleton = 1",
+        )
+        .fetch_one(&mut *conn)
+        .await?
+        .try_get("valid")?;
+        let tenants_invalid: i64 = sqlx::query(
+            "SELECT EXISTS(
+                 SELECT tenant, charged_bytes FROM tenant_storage_usage
+                 EXCEPT
+                 SELECT tenant, SUM(retained_bytes + reserved_bytes)
+                 FROM job_storage_usage GROUP BY tenant
+             ) OR EXISTS(
+                 SELECT tenant, SUM(retained_bytes + reserved_bytes)
+                 FROM job_storage_usage GROUP BY tenant
+                 EXCEPT
+                 SELECT tenant, charged_bytes FROM tenant_storage_usage
+             ) AS invalid",
+        )
+        .fetch_one(&mut *conn)
+        .await?
+        .try_get("invalid")?;
+        if global_valid == 0 || tenants_invalid != 0 {
+            return Err(sqlx::Error::Protocol(
+                "logical storage aggregate counters are inconsistent".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -1069,6 +1776,35 @@ impl Store {
         language: &str,
         spec_json: &str,
     ) -> StoreResult<EventRow> {
+        let requested_mem_mb = requested_mem_mb_from_json(spec_json)?;
+        match self
+            .create_job_with_event_idempotent(
+                job_id,
+                tenant,
+                language,
+                spec_json,
+                requested_mem_mb,
+                None,
+            )
+            .await?
+        {
+            CreateJobOutcome::Created(event) => Ok(event),
+            CreateJobOutcome::Replayed { .. } => Err(sqlx::Error::Protocol(
+                "non-idempotent job creation unexpectedly replayed".to_string(),
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_job_with_event_idempotent(
+        &self,
+        job_id: &str,
+        tenant: &str,
+        language: &str,
+        spec_json: &str,
+        requested_mem_mb: u32,
+        idempotency: Option<&IdempotencyRequest>,
+    ) -> StoreResult<CreateJobOutcome> {
         if job_id.trim().is_empty() || tenant.trim().is_empty() || language.trim().is_empty() {
             return Err(sqlx::Error::InvalidArgument(
                 "job_id, tenant, and language must be non-empty".to_string(),
@@ -1077,10 +1813,73 @@ impl Store {
         let requested_spec: Value = serde_json::from_str(spec_json)
             .map_err(|error| sqlx::Error::InvalidArgument(error.to_string()))?;
         let requested_spec_sha256 = sha256_hex(canonical_json(&requested_spec).as_bytes());
+        let accepted_data = json!({
+            "status": "queued",
+            "tenant": tenant,
+            "language": language,
+            "requested_spec_sha256": requested_spec_sha256,
+        });
+        if !(1..=4096).contains(&requested_mem_mb) {
+            return Err(sqlx::Error::InvalidArgument(
+                "requested_mem_mb must be between 1 and 4096".to_string(),
+            ));
+        }
+        if let Some(request) = idempotency {
+            if request.key.is_empty()
+                || request.key.len() > 128
+                || !request
+                    .key
+                    .bytes()
+                    .all(|byte| (0x21..=0x7e).contains(&byte))
+                || request.request_sha256.len() != 64
+                || !request
+                    .request_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(sqlx::Error::InvalidArgument(
+                    "invalid idempotency key or canonical request fingerprint".to_string(),
+                ));
+            }
+        }
 
+        let initial_charge = logical_job_base_bytes(job_id, tenant, language, "queued", spec_json)
+            .checked_add(JOB_COMPLETION_RESERVE_BYTES)
+            .and_then(|value| {
+                value.checked_add(
+                    LOGICAL_ROW_OVERHEAD_BYTES
+                        + job_id.len() as u64
+                        + "accepted".len() as u64
+                        + canonical_json(&accepted_data).len() as u64
+                        + 64,
+                )
+            })
+            .ok_or_else(|| sqlx::Error::Protocol("logical job charge overflowed".to_string()))?;
         let created_at = now_ms();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         Self::begin_row_writes(&mut tx).await?;
+        if let Some(idempotency) = idempotency {
+            match lookup_idempotency_tx(&mut tx, tenant, idempotency).await? {
+                IdempotencyLookup::Miss => {}
+                IdempotencyLookup::Replay { job_id } => {
+                    tx.rollback().await?;
+                    return Ok(CreateJobOutcome::Replayed { job_id });
+                }
+                IdempotencyLookup::Conflict => {
+                    tx.rollback().await?;
+                    return Err(sqlx::Error::InvalidArgument(
+                        IDEMPOTENCY_CONFLICT_MARKER.to_string(),
+                    ));
+                }
+            }
+        }
+        ensure_filesystem_reserve_tx(
+            &mut tx,
+            &self.db_path,
+            self.limits.free_reserve_bytes,
+            initial_charge,
+        )
+        .await?;
         sqlx::query(
             "INSERT INTO jobs (
                 job_id, tenant, language, status, spec_json, created_at_ms
@@ -1093,22 +1892,57 @@ impl Store {
         .bind(created_at)
         .execute(&mut *tx)
         .await?;
-        let event = append_event_tx(
-            &mut tx,
-            job_id,
-            "accepted",
-            &json!({
-                "status": "queued",
-                "tenant": tenant,
-                "language": language,
-                "requested_spec_sha256": requested_spec_sha256,
-            }),
-            created_at,
+        let event =
+            append_event_tx(&mut tx, job_id, "accepted", &accepted_data, created_at).await?;
+        let retained_bytes = logical_job_base_bytes(job_id, tenant, language, "queued", spec_json)
+            .checked_add(logical_event_bytes(&event))
+            .ok_or_else(|| {
+                sqlx::Error::Protocol("logical retained bytes overflowed".to_string())
+            })?;
+        let charged_bytes = retained_bytes
+            .checked_add(JOB_COMPLETION_RESERVE_BYTES)
+            .ok_or_else(|| sqlx::Error::Protocol("logical job charge overflowed".to_string()))?;
+        ensure_storage_quota_tx(&mut tx, tenant, charged_bytes, self.limits).await?;
+        sqlx::query(
+            "INSERT INTO job_storage_usage(
+                 job_id, tenant, retained_bytes, reserved_bytes, requested_mem_mb
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
         )
+        .bind(job_id)
+        .bind(tenant)
+        .bind(to_i64_bytes(retained_bytes)?)
+        .bind(JOB_COMPLETION_RESERVE_BYTES as i64)
+        .bind(i64::from(requested_mem_mb))
+        .execute(&mut *tx)
         .await?;
+        if let Some(idempotency) = idempotency {
+            sqlx::query(
+                "INSERT INTO idempotency_keys(
+                     tenant, idempotency_key, request_sha256, job_id, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(tenant)
+            .bind(&idempotency.key)
+            .bind(&idempotency.request_sha256)
+            .bind(job_id)
+            .bind(created_at)
+            .execute(&mut *tx)
+            .await?;
+        }
         Self::mark_row_writes_validated(&mut tx).await?;
         tx.commit().await?;
-        Ok(event)
+        Ok(CreateJobOutcome::Created(event))
+    }
+
+    pub async fn lookup_idempotency(
+        &self,
+        tenant: &str,
+        request: &IdempotencyRequest,
+    ) -> StoreResult<IdempotencyLookup> {
+        let mut tx = self.pool.begin().await?;
+        let lookup = lookup_idempotency_tx(&mut tx, tenant, request).await?;
+        tx.commit().await?;
+        Ok(lookup)
     }
 
     /// Compatibility transition which does not append a `started` event.
@@ -1152,6 +1986,7 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         }
+        reconcile_job_storage_tx(&mut tx, job_id, false, &self.db_path, self.limits).await?;
         Self::mark_row_writes_validated(&mut tx).await?;
         tx.commit().await?;
         Ok(true)
@@ -1195,6 +2030,7 @@ impl Store {
             started_at,
         )
         .await?;
+        reconcile_job_storage_tx(&mut tx, job_id, false, &self.db_path, self.limits).await?;
         Self::mark_row_writes_validated(&mut tx).await?;
         tx.commit().await?;
         Ok(Some(event))
@@ -1395,6 +2231,7 @@ impl Store {
             .bind(receipt_json)
             .execute(&mut *tx)
             .await?;
+        reconcile_job_storage_tx(&mut tx, job_id, true, &self.db_path, self.limits).await?;
         Self::mark_row_writes_validated(&mut tx).await?;
         tx.commit().await?;
         Ok(Some(event))
@@ -1499,6 +2336,7 @@ impl Store {
             prev_hash.clone_from(&event.event_hash);
             appended.push(event);
         }
+        reconcile_job_storage_tx(&mut tx, job_id, false, &self.db_path, self.limits).await?;
         Self::mark_row_writes_validated(&mut tx).await?;
         tx.commit().await?;
         Ok(appended)
@@ -1661,6 +2499,24 @@ impl Store {
         row.map(Self::row_to_job_summary).transpose()
     }
 
+    pub async fn job_requested_mem_mb(&self, job_id: &str) -> StoreResult<Option<u32>> {
+        let value = sqlx::query_scalar::<_, i64>(
+            "SELECT requested_mem_mb FROM job_storage_usage WHERE job_id = ?1",
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        value
+            .map(|value| {
+                u32::try_from(value).map_err(|_| {
+                    sqlx::Error::Protocol(
+                        "stored requested_mem_mb is outside the u32 range".to_string(),
+                    )
+                })
+            })
+            .transpose()
+    }
+
     pub async fn list_jobs(&self, tenant: Option<&str>, limit: i64) -> StoreResult<Vec<JobRow>> {
         self.list_jobs_page(ListJobsQuery {
             tenant: tenant.map(ToOwned::to_owned),
@@ -1775,6 +2631,12 @@ impl Store {
                     job_id: row.try_get("job_id")?,
                     tenant: row.try_get("tenant")?,
                     created_at_ms: row.try_get("created_at_ms")?,
+                    requested_mem_mb: u32::try_from(row.try_get::<i64, _>("requested_mem_mb")?)
+                        .map_err(|_| {
+                            sqlx::Error::Protocol(
+                                "queued requested_mem_mb is outside the u32 range".to_string(),
+                            )
+                        })?,
                 })
             })
             .collect()
@@ -1860,6 +2722,13 @@ impl Store {
             .bind(now_ms())
             .execute(&mut *tx)
             .await?;
+            // A key must expire no later than logical job retention. The
+            // oversized job row can remain temporarily while its events are
+            // drained, so remove the replay mapping at tombstone time.
+            sqlx::query("DELETE FROM idempotency_keys WHERE job_id = ?1")
+                .bind(&job_id)
+                .execute(&mut *tx)
+                .await?;
             let deleted = sqlx::query(
                 "DELETE FROM events
                  WHERE seq IN (
@@ -1879,6 +2748,7 @@ impl Store {
                 .bind(&job_id)
                 .execute(&mut *tx)
                 .await?;
+            reconcile_job_storage_tx(&mut tx, &job_id, true, &self.db_path, self.limits).await?;
             break;
         }
 
@@ -2044,6 +2914,7 @@ impl Store {
             .bind(receipt)
             .execute(&mut *tx)
             .await?;
+        reconcile_job_storage_tx(&mut tx, job_id, true, &self.db_path, self.limits).await?;
         Self::mark_row_writes_validated(&mut tx).await?;
         tx.commit().await?;
         Ok(true)
@@ -2375,14 +3246,14 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
          WHEN typeof(NEW.version) != 'integer' OR NEW.version <= 0
            OR typeof(NEW.applied_at_ms) != 'integer' OR NEW.applied_at_ms < 0
          BEGIN
-             SELECT RAISE(ABORT, 'invalid schema_migrations storage class [coop-storage-guard-r1]');
+             SELECT RAISE(ABORT, 'invalid schema_migrations storage class [coop-storage-guard-r2]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_schema_migrations_storage_guard_update
          BEFORE UPDATE ON schema_migrations
          WHEN typeof(NEW.version) != 'integer' OR NEW.version <= 0
            OR typeof(NEW.applied_at_ms) != 'integer' OR NEW.applied_at_ms < 0
          BEGIN
-             SELECT RAISE(ABORT, 'invalid schema_migrations storage class [coop-storage-guard-r1]');
+             SELECT RAISE(ABORT, 'invalid schema_migrations storage class [coop-storage-guard-r2]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_storage_guard_insert
          BEFORE INSERT ON jobs
@@ -2410,7 +3281,7 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
                (NEW.started_at_ms IS NULL OR NEW.finished_at_ms IS NOT NULL))
            OR (NEW.status NOT IN ('queued','running') AND NEW.finished_at_ms IS NULL)
          BEGIN
-             SELECT RAISE(ABORT, 'invalid jobs storage class [coop-storage-guard-r1]');
+             SELECT RAISE(ABORT, 'invalid jobs storage class [coop-storage-guard-r2]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_storage_guard_update
          BEFORE UPDATE ON jobs
@@ -2438,7 +3309,7 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
                (NEW.started_at_ms IS NULL OR NEW.finished_at_ms IS NOT NULL))
            OR (NEW.status NOT IN ('queued','running') AND NEW.finished_at_ms IS NULL)
          BEGIN
-             SELECT RAISE(ABORT, 'invalid jobs storage class [coop-storage-guard-r1]');
+             SELECT RAISE(ABORT, 'invalid jobs storage class [coop-storage-guard-r2]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_storage_guard_insert
          BEFORE INSERT ON events
@@ -2451,7 +3322,7 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
            OR typeof(NEW.hash_version) != 'integer' OR NEW.hash_version NOT IN (0, 1)
            OR (NEW.hash_version = 1 AND length(NEW.event_hash) != 64)
          BEGIN
-             SELECT RAISE(ABORT, 'invalid events storage class [coop-storage-guard-r1]');
+             SELECT RAISE(ABORT, 'invalid events storage class [coop-storage-guard-r2]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_storage_guard_update
          BEFORE UPDATE ON events
@@ -2466,56 +3337,56 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
            OR typeof(NEW.hash_version) != 'integer' OR NEW.hash_version NOT IN (0, 1)
            OR (NEW.hash_version = 1 AND length(NEW.event_hash) != 64)
          BEGIN
-             SELECT RAISE(ABORT, 'invalid events storage class [coop-storage-guard-r1]');
+             SELECT RAISE(ABORT, 'invalid events storage class [coop-storage-guard-r2]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_sequence_guard_insert
          AFTER INSERT ON events
          WHEN typeof(NEW.seq) != 'integer'
            OR NEW.seq <= 0 OR NEW.seq >= 9223372036854775807
          BEGIN
-             SELECT RAISE(ABORT, 'invalid event sequence [coop-storage-guard-r1]');
+             SELECT RAISE(ABORT, 'invalid event sequence [coop-storage-guard-r2]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_validation_dirty_insert
          AFTER INSERT ON jobs BEGIN
              UPDATE store_integrity SET row_validation_revision = 0
              WHERE singleton = 1
-               AND row_validation_revision != 2
-               AND 'coop-storage-guard-r1' = 'coop-storage-guard-r1';
+               AND row_validation_revision != 3
+               AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_validation_dirty_update
          AFTER UPDATE ON jobs BEGIN
              UPDATE store_integrity SET row_validation_revision = 0
              WHERE singleton = 1
-               AND row_validation_revision != 2
-               AND 'coop-storage-guard-r1' = 'coop-storage-guard-r1';
+               AND row_validation_revision != 3
+               AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_validation_dirty_delete
          AFTER DELETE ON jobs BEGIN
              UPDATE store_integrity SET row_validation_revision = 0
              WHERE singleton = 1
-               AND row_validation_revision != 2
-               AND 'coop-storage-guard-r1' = 'coop-storage-guard-r1';
+               AND row_validation_revision != 3
+               AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_validation_dirty_insert
          AFTER INSERT ON events BEGIN
              UPDATE store_integrity SET row_validation_revision = 0
              WHERE singleton = 1
-               AND row_validation_revision != 2
-               AND 'coop-storage-guard-r1' = 'coop-storage-guard-r1';
+               AND row_validation_revision != 3
+               AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_validation_dirty_update
          AFTER UPDATE ON events BEGIN
              UPDATE store_integrity SET row_validation_revision = 0
              WHERE singleton = 1
-               AND row_validation_revision != 2
-               AND 'coop-storage-guard-r1' = 'coop-storage-guard-r1';
+               AND row_validation_revision != 3
+               AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_validation_dirty_delete
          AFTER DELETE ON events BEGIN
              UPDATE store_integrity SET row_validation_revision = 0
              WHERE singleton = 1
-               AND row_validation_revision != 2
-               AND 'coop-storage-guard-r1' = 'coop-storage-guard-r1';
+               AND row_validation_revision != 3
+               AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
          END",
     ] {
         sqlx::query(statement).execute(&mut *conn).await?;
@@ -3415,6 +4286,14 @@ mod query_plan_tests {
         assert_eq!(
             storage_parent_policy(&dedicated, Some(&canonical_temp)),
             StorageParentPolicy::HardenDedicated
+        );
+    }
+
+    #[test]
+    fn relative_database_free_space_probe_uses_current_directory() {
+        assert_eq!(
+            filesystem_probe_path(Path::new("coop.db")).unwrap(),
+            std::env::current_dir().unwrap()
         );
     }
 

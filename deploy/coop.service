@@ -23,6 +23,8 @@ Delegate=yes
 UMask=0077
 StateDirectory=coop
 StateDirectoryMode=0700
+MemoryHigh=6G
+MemoryMax=8G
 
 NoNewPrivileges=yes
 PrivateTmp=yes

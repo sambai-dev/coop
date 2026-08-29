@@ -28,7 +28,13 @@ fn test_config(db: &std::path::Path) -> Config {
         api_keys,
         workers: 2,
         tenant_concurrency: 4,
+        tenant_queue_capacity: 64,
         rate_per_min: 10_000,
+        max_job_mem_mb: 1024,
+        memory_budget_mb: 4096,
+        storage_global_mb: 16 * 1024,
+        storage_tenant_mb: 4 * 1024,
+        storage_free_reserve_mb: 0,
         sandbox: "off".to_string(),
         jobs_root: std::env::temp_dir()
             .join(format!("coop-jobs-test-{}", uuid::Uuid::now_v7()))
@@ -38,6 +44,7 @@ fn test_config(db: &std::path::Path) -> Config {
         sandbox_helper: None,
         production: false,
         unsafe_allow_naive: false,
+        unsafe_allow_public_dev: false,
         python_bin: None,
         node_bin: None,
         bash_bin: None,
@@ -326,9 +333,9 @@ async fn saturated_admission_is_nonblocking_and_retryable() {
     for n in 0..coop_server::QUEUE_CAPACITY {
         state
             .admission
-            .try_reserve()
+            .try_reserve(&format!("synthetic-tenant-{n}"), 256)
             .expect("reserve admission")
-            .send(format!("synthetic-{n}"), "t1".to_string());
+            .send(format!("synthetic-{n}"));
     }
 
     let started = std::time::Instant::now();
@@ -359,6 +366,127 @@ async fn saturated_admission_is_nonblocking_and_retryable() {
 }
 
 #[tokio::test]
+async fn tenant_queue_capacity_returns_429_without_blocking_another_tenant() {
+    let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
+    let mut cfg = test_config(&db);
+    cfg.tenant_queue_capacity = 2;
+    let store = Arc::new(Store::open(&db).await.expect("open store"));
+    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let body = r#"{"language":"python","code":"print(1)"}"#;
+    for _ in 0..2 {
+        let (status, value) = send(
+            &app,
+            request("POST", "/v1/jobs", Some("test-key"), Some(body.into())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{value}");
+    }
+    let (status, value) = send(
+        &app,
+        request("POST", "/v1/jobs", Some("test-key"), Some(body.into())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{value}");
+    assert_eq!(value["error"]["code"], "tenant_queue_saturated");
+
+    let (status, value) = send(
+        &app,
+        request("POST", "/v1/jobs", Some("other-key"), Some(body.into())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+}
+
+#[tokio::test]
+async fn retained_storage_quota_maps_tenant_capacity_without_charging_other_tenants() {
+    let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
+    let mut cfg = test_config(&db);
+    cfg.storage_tenant_mb = 64;
+    cfg.storage_global_mb = 128;
+    let store = Arc::new(
+        Store::open_with_limits(&db, cfg.storage_limits())
+            .await
+            .expect("open limited store"),
+    );
+    let (app, _state, _queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let body = r#"{"language":"python","code":"print(1)"}"#;
+    let (status, first) = send(
+        &app,
+        request("POST", "/v1/jobs", Some("test-key"), Some(body.into())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    let (status, rejected) = send(
+        &app,
+        request("POST", "/v1/jobs", Some("test-key"), Some(body.into())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{rejected}");
+    assert_eq!(rejected["error"]["code"], "tenant_storage_quota");
+
+    let (status, other) = send(
+        &app,
+        request("POST", "/v1/jobs", Some("other-key"), Some(body.into())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
+}
+
+#[tokio::test]
+async fn idempotency_replays_original_job_and_rejects_fingerprint_reuse() {
+    let app = spawn_app().await;
+    let make = |body: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/jobs")
+            .header(header::AUTHORIZATION, "Bearer test-key")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", "sdk-retry-1")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let first = app.clone().oneshot(make(
+        r#"{"language":"python","code":"print(42)","limits":{"mem_mb":128}}"#,
+    ));
+    let first = first.await.unwrap();
+    assert_eq!(first.status(), StatusCode::CREATED);
+    assert_eq!(first.headers()["idempotency-replayed"], "false");
+    let first_location = first.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let first_body = axum::body::to_bytes(first.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+
+    // Reordered object members canonicalize to the same parsed JobSpec.
+    let second = app
+        .clone()
+        .oneshot(make(
+            r#"{"limits":{"mem_mb":128},"code":"print(42)","language":"python"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::CREATED);
+    assert_eq!(second.headers()["idempotency-replayed"], "true");
+    assert_eq!(second.headers()[header::LOCATION], first_location);
+    let second_body = axum::body::to_bytes(second.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+    assert_eq!(second_json["job_id"], first_json["job_id"]);
+
+    let (status, conflict) = send(
+        &app,
+        make(r#"{"language":"python","code":"print(43)","limits":{"mem_mb":128}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{conflict}");
+    assert_eq!(conflict["error"]["code"], "idempotency_key_reused");
+}
+
+#[tokio::test]
 async fn shutdown_is_sticky_and_queued_work_does_not_start_after_it() {
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
@@ -376,9 +504,9 @@ async fn shutdown_is_sticky_and_queued_work_does_not_start_after_it() {
         .unwrap();
     state
         .admission
-        .try_reserve()
+        .try_reserve("t1", 256)
         .unwrap()
-        .send("shutdown-queued".to_string(), "t1".to_string());
+        .send("shutdown-queued".to_string());
 
     // No watch receiver existed when this was published. A late subscriber
     // must still observe shutdown, and newly spawned workers must not start.
@@ -516,9 +644,9 @@ async fn cancelled_envelope_reclaims_capacity_only_after_scheduler_dequeues_it()
         .unwrap();
     state
         .admission
-        .try_reserve()
+        .try_reserve("t1", 256)
         .unwrap()
-        .send("cancelled-envelope".to_string(), "t1".to_string());
+        .send("cancelled-envelope".to_string());
     assert_eq!(state.admission.depth(), 1);
     let workers = scheduler::spawn_workers(state.clone(), queue_rx);
     for _ in 0..100 {
@@ -714,11 +842,81 @@ async fn identity_capabilities_status_and_readiness_are_truthful() {
     assert_eq!(capabilities["execution"]["seccomp"], false);
     assert_eq!(capabilities["execution"]["networking"], "host");
     assert_eq!(capabilities["features"]["stream_tickets"], true);
+    assert_eq!(capabilities["limits"]["mem_mb_max"], 1024);
+    assert_eq!(capabilities["limits"]["concurrent_mem_mb_max"], 4096);
 
     let (status, service) = send(&app, request("GET", "/v1/status", Some("test-key"), None)).await;
     assert_eq!(status, StatusCode::OK, "{service}");
     assert_eq!(service["environment"], "development");
-    assert!(service["scheduler"]["queue_capacity"].is_u64());
+    assert_eq!(service["scheduler"]["queue_capacity"], 64);
+    assert_eq!(service["scheduler"]["queue_depth"], 0);
+}
+
+#[tokio::test]
+async fn status_queue_depth_is_tenant_scoped() {
+    let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
+    let cfg = test_config(&db);
+    let store = Arc::new(Store::open(&db).await.unwrap());
+    let (app, state, _queue_rx) = coop_server::build_app(cfg, store).await.unwrap();
+    state
+        .admission
+        .try_reserve("t2", 256)
+        .unwrap()
+        .send("status-t2".to_string());
+    let (_, t1) = send(&app, request("GET", "/v1/status", Some("test-key"), None)).await;
+    let (_, t2) = send(&app, request("GET", "/v1/status", Some("other-key"), None)).await;
+    assert_eq!(t1["scheduler"]["queue_depth"], 0);
+    assert_eq!(t2["scheduler"]["queue_depth"], 1);
+}
+
+#[tokio::test]
+async fn queued_job_keeps_acceptance_memory_ceiling_when_server_limit_increases() {
+    let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
+    let mut low = test_config(&db);
+    low.max_job_mem_mb = 512;
+    let store = Arc::new(Store::open(&db).await.unwrap());
+    let (first_app, first_state, first_queue) = coop_server::build_app(low, Arc::clone(&store))
+        .await
+        .unwrap();
+    let (status, submitted) = send(
+        &first_app,
+        request(
+            "POST",
+            "/v1/jobs",
+            Some("test-key"),
+            Some(
+                r#"{"language":"python","code":"print('memory-policy')","limits":{"mem_mb":1024}}"#
+                    .into(),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{submitted}");
+    let job_id = submitted["job_id"].as_str().unwrap().to_string();
+    drop((first_app, first_state, first_queue));
+
+    let mut high = test_config(&db);
+    high.max_job_mem_mb = 1024;
+    let (app, state, queue_rx) = coop_server::build_app(high, Arc::clone(&store))
+        .await
+        .unwrap();
+    let queued = store.queued_jobs_page(None, 10).await.unwrap();
+    let row = queued.iter().find(|row| row.job_id == job_id).unwrap();
+    assert_eq!(row.requested_mem_mb, 512);
+    state.bus.register(&job_id);
+    state
+        .admission
+        .reserve_recovery(&row.tenant, state.cfg.clamp_mem_mb(row.requested_mem_mb))
+        .await
+        .unwrap()
+        .send(job_id.clone());
+    scheduler::spawn_workers(state, queue_rx);
+    let detail = wait_terminal(&app, &job_id).await;
+    assert_eq!(detail["status"], "succeeded", "{detail}");
+    assert_eq!(
+        store.job_requested_mem_mb(&job_id).await.unwrap(),
+        Some(512)
+    );
 }
 
 #[tokio::test]
@@ -982,7 +1180,7 @@ async fn cancel_queued_job_finalizes_without_execution() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let job_id = body["job_id"].as_str().expect("job_id").to_string();
 
-    let (status, _) = send(
+    let (status, cancellation) = send(
         &app,
         request(
             "DELETE",
@@ -993,13 +1191,17 @@ async fn cancel_queued_job_finalizes_without_execution() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(cancellation["cancellation_requested"], true);
+    assert_eq!(cancellation["already_terminal"], false);
+    assert_eq!(cancellation["job"]["job_id"], job_id);
 
     // The job must reach a terminal `cancelled` state without running.
     let view = wait_terminal(&app, &job_id).await;
     assert_eq!(view["status"], "cancelled", "{view}");
 
-    // Cancelling again is a 409 (idempotency guard), not a silent success.
-    let (status, _) = send(
+    // Cancelling again is a typed idempotent observation and emits no second
+    // terminal transition.
+    let (status, cancellation) = send(
         &app,
         request(
             "DELETE",
@@ -1009,7 +1211,10 @@ async fn cancel_queued_job_finalizes_without_execution() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cancellation["cancellation_requested"], false);
+    assert_eq!(cancellation["already_terminal"], true);
+    assert_eq!(cancellation["job"]["status"], "cancelled");
 
     // Cleanup: cancel the blockers so the pool drains before the app drops.
     for id in &blockers {
