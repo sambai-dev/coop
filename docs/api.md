@@ -23,6 +23,9 @@ Coop uses plain HTTP/1.1. Put it behind a TLS proxy for any connection that leav
   "language": "python",
   "code": "print('hello')",
   "stdin": "optional input\n",
+  "requirements": {
+    "minimum_isolation": "linux-shared-kernel"
+  },
   "limits": {
     "wall_seconds": 15,
     "cpu_seconds": 10,
@@ -45,9 +48,26 @@ rather than granting egress. Namespace execution reports
 `networking: "disabled"`; a ready development subprocess truthfully reports
 its retained host networking as `networking: "host"`.
 
+`requirements.minimum_isolation` is checked atomically before a job is
+persisted and again before execution. The process-provider order is
+`none < linux-shared-kernel < gvisor-application-kernel < hardware-vm <
+confidential-vm`; a stronger observed class satisfies a weaker minimum. The
+`wasm-capability` class is a separate branch and satisfies only itself (or a
+minimum of `none`). An unsatisfied minimum returns
+`422 minimum_isolation_unsatisfied` without creating a job.
+
 Source and stdin are each capped at 1 MiB after JSON decoding. The encoded request body is capped at 16 MiB so worst-case valid JSON escaping still fits without allowing unbounded buffering. Body reads have a 30-second deadline and global/per-tenant active-read caps; capacity failures are structured retryable `429`/`503` responses. Stored/emitted stdout and stderr are independently capped at 1 MiB and 10,000 records, with any single record split at 16 KiB. The executor continues draining after the storage cap so a noisy child cannot block supervision; the event history and receipt record truncation and observed byte counts.
 
-A successful submission returns `201 Created` with the job ID, initial status, and relative stream/history URLs. Queue or global lifetime-capacity saturation returns `503`; tenant lifetime saturation returns `429`. Callers should honor `Retry-After` and use bounded exponential backoff with jitter rather than retrying immediately.
+A successful submission returns `201 Created` with the job ID, initial status,
+relative stream/history URLs, `Location: /v1/jobs/{id}`, and an
+`Idempotency-Replayed` response header. For safe reconciliation after an
+ambiguous transport failure, send exactly one `Idempotency-Key` containing
+1–128 visible ASCII bytes. Reusing that tenant-scoped key with the same
+canonical job spec returns the original job and `Idempotency-Replayed: true`;
+reusing it for a different spec returns `422 idempotency_key_reused`. Queue or
+global lifetime-capacity saturation returns `503`; tenant lifetime saturation
+returns `429`. Callers should honor `Retry-After` and use bounded exponential
+backoff with jitter rather than retrying immediately.
 
 ## Status and cancellation
 
@@ -77,7 +97,11 @@ are:
 - `cancelled`
 - `error`
 
-`DELETE /v1/jobs/{id}` requests cancellation. Cancellation is cooperative at the scheduler boundary and forceful at the executor boundary. Once terminal, a job does not return to a running state.
+`DELETE /v1/jobs/{id}` requests cancellation. It is idempotent and returns the
+current job projection plus `cancellation_requested` and `already_terminal`;
+repeating it for an already-terminal job remains `200`. Cancellation is
+cooperative at the scheduler boundary and forceful at the executor boundary.
+Once terminal, a job does not return to a running state.
 
 ## Waiting for a result
 
@@ -152,7 +176,13 @@ Clients must handle:
 
 `GET /v1/jobs?limit=N&cursor=CURSOR&status=STATUS&language=LANGUAGE` returns `{items,next_cursor}` for the authenticated tenant. Cursors are opaque; pass them through unchanged.
 
-`GET /v1/capabilities` describes supported languages, limits, and server features. `GET /v1/whoami` resolves the authenticated tenant. `GET /v1/metrics` is an operator surface; keep it private and do not assume its values are tenant-billing counters. `/healthz` is liveness and `/readyz` checks process/store readiness. Use authenticated `/v1/status` plus an actual canary job to verify containment.
+`GET /v1/capabilities` describes supported languages, the provider's
+`isolation_class`, per-job ceilings, the aggregate `concurrent_mem_mb_max`, and
+server features. `GET /v1/whoami` resolves the authenticated tenant and
+principal/scopes. `GET /v1/metrics` is an operator surface; keep it private and
+do not assume its values are tenant-billing counters. `/healthz` is liveness and
+`/readyz` checks process/store readiness. Use authenticated `/v1/status` plus an
+actual minimum-isolation canary to verify containment.
 
 ## Errors and rate limits
 
@@ -175,8 +205,11 @@ Treat HTTP status codes and error codes as authoritative. In particular:
 - `401` missing/invalid key
 - `404` missing job or foreign-tenant job
 - `409` invalid lifecycle operation
-- `422` a supported language whose configured runtime failed startup preflight
+- `422` unavailable runtime, unsatisfied minimum isolation, or an idempotency key reused for a different request
 - `429` tenant rate budget or per-tenant body/result-wait/stream/response lifetime capacity exhausted
 - `503` admission queue, bounded request/response lifetime capacity, shutdown, or worker service unavailable
+- `507` filesystem free-space reserve prevents durable admission
 
-Honor `Retry-After` when present. Retry only idempotent reads automatically; a timed-out submission may have been accepted, so production clients should attach their own correlation ID once the API supports idempotency keys.
+Honor `Retry-After` when present. Retry reads automatically only when their
+operation policy allows it. Retry an ambiguously acknowledged submission only
+when it carried an `Idempotency-Key`, and reuse the exact key and job spec.

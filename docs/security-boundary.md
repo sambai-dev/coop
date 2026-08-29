@@ -6,11 +6,12 @@ Coop runs code supplied by API clients. That makes containment configuration par
 
 | Tier | Intended use | Boundary | Current posture |
 |---|---|---|---|
-| External hardened runtime | Determined hostile multi-tenant code | gVisor/OCI, Kata, or microVM per workload | Recommended direction; not bundled or integrated |
+| gVisor application kernel | Determined hostile multi-tenant code | Reviewed `runsc` OCI workload and private rootfs per job | In tree; runtime/rootfs/config digests retained as evidence |
+| Hardware or confidential VM | Determined hostile multi-tenant code | MicroVM/VM per workload | API class reserved; provider not bundled |
 | Linux x86_64 namespace backend | Untrusted or accidentally dangerous agent code on a dedicated x86_64 VM | Private rootfs, Linux namespaces, cgroup v2, rlimits, x86_64 seccomp policy, privilege drop | In tree; shared-kernel defense in depth |
 | Plain subprocess | Local development and same-trust code only | Process group and wall-time supervision | Unisolated; never a sandbox |
 
-The namespace backend is not equivalent to a VM. A kernel vulnerability, side channel, interpreter vulnerability, or privileged-container escape can cross it. It is supported only on Linux x86_64. macOS, Windows, and other Linux architectures use the plain development subprocess backend and provide no containment. That backend supervises cancellation, bounded output, and wall time, but does not enforce the requested CPU, memory, process-count, or file-size controls. Those controls remain null/false in its effective policy and receipts. For code controlled by mutually hostile tenants, use a per-workload hardened runtime or VM boundary once an integration is available.
+The namespace backend is not equivalent to a VM. A kernel vulnerability, side channel, interpreter vulnerability, or privileged-container escape can cross it. It is supported only on Linux x86_64. The reviewed gVisor provider adds a per-job application-kernel boundary and records its exact runtime, rootfs, and OCI configuration digests. macOS, Windows, and other Linux architectures use the plain development subprocess backend unless a separately reviewed provider is configured, and therefore provide no default containment. That backend supervises cancellation, bounded output, and wall time, but does not enforce the requested CPU, memory, process-count, or file-size controls. Those controls remain null/false in its effective policy and receipts.
 
 ## Namespace-backend invariants
 
@@ -41,7 +42,7 @@ Do not put secrets, the Coop database, host sockets, cloud credentials, SSH mate
 
 ## Network model
 
-The supported Linux x86_64 namespace backend denies job network access. A submitted `allow_network: true` is rejected; it is not an egress grant. The unisolated development subprocess backend cannot enforce this boundary and retains the service account's host networking, reported as `networking: "host"`. The server itself may also reach the network, so firewall its egress and metadata-service access at the VM boundary.
+The Linux x86_64 namespace and gVisor providers deny job network access. A submitted `allow_network: true` is rejected; it is not an egress grant. The unisolated development subprocess backend cannot enforce this boundary and retains the service account's host networking, reported as `networking: "host"`. The server itself may also reach the network, so firewall its egress and metadata-service access at the VM boundary.
 
 A future egress feature should be a host-side policy proxy with explicit destination, DNS-rebinding, method, and credential-injection rules—not a general network namespace interface.
 

@@ -6,7 +6,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from coop import CoopError
+from coop import CoopError, isolation_satisfies
 from coop_mcp import (
     MODERN_PROTOCOL_VERSION,
     TASKS_EXTENSION,
@@ -16,7 +16,13 @@ from coop_mcp import (
 )
 
 
-def capabilities(isolated=True):
+def capabilities(
+    isolated=True,
+    isolation_class=None,
+    private_rootfs=None,
+    seccomp=None,
+):
+    resolved_class = isolation_class or ("linux-shared-kernel" if isolated else "none")
     return {
         "version": "0.2.0",
         "languages": ["python", "node", "bash"],
@@ -24,10 +30,11 @@ def capabilities(isolated=True):
             "backend": "namespaces+cgroups-v2+private-rootfs"
             if isolated
             else "subprocess",
+            "isolation_class": resolved_class,
             "isolated": isolated,
-            "private_rootfs": isolated,
+            "private_rootfs": isolated if private_rootfs is None else private_rootfs,
             "dedicated_bootstrap": isolated,
-            "seccomp": isolated,
+            "seccomp": isolated if seccomp is None else seccomp,
             "networking": "disabled" if isolated else "host",
             "limit_enforcement": {
                 "wall_seconds": True,
@@ -41,6 +48,7 @@ def capabilities(isolated=True):
             "wall_seconds_max": 300,
             "cpu_seconds_max": 240,
             "mem_mb_max": 4096,
+            "concurrent_mem_mb_max": 8192,
             "pids_max": 1024,
             "file_mb_max": 512,
             "output_lines_max": 10000,
@@ -60,18 +68,34 @@ def capabilities(isolated=True):
 
 
 class FakeCoop:
-    def __init__(self, *, isolated=True, result_error=None):
-        self.posture = capabilities(isolated)
+    def __init__(
+        self,
+        *,
+        isolated=True,
+        isolation_class=None,
+        private_rootfs=None,
+        seccomp=None,
+        result_error=None,
+    ):
+        self.posture = capabilities(
+            isolated,
+            isolation_class,
+            private_rootfs,
+            seccomp,
+        )
         self.result_error = result_error
         self.submissions = []
         self.requirements = []
+        self.idempotency_keys = []
         self.result_called = False
 
     def capabilities(self):
         return self.posture
 
     def submit(self, language, code, stdin=None, limits=None, requirements=None):
-        if requirements is not None and not self.posture["execution"]["isolated"]:
+        minimum = (requirements or {}).get("minimum_isolation", "none")
+        observed = self.posture["execution"]["isolation_class"]
+        if not isolation_satisfies(observed, minimum):
             raise ValueError("minimum isolation requirement was not satisfied")
         self.submissions.append((language, code, stdin, limits))
         self.requirements.append(requirements)
@@ -80,6 +104,24 @@ class FakeCoop:
             "status": "queued",
             "stream_url": "/stream",
             "replay_url": "/replay",
+        }
+
+    def submit_result(
+        self,
+        language,
+        code,
+        stdin=None,
+        limits=None,
+        requirements=None,
+        idempotency_key=None,
+        retry_ambiguous=False,
+    ):
+        self.idempotency_keys.append(idempotency_key)
+        job = self.submit(language, code, stdin, limits, requirements)
+        return {
+            "job": job,
+            "location": f"/v1/jobs/{job['job_id']}",
+            "idempotency_replayed": False,
         }
 
     def result(self, job_id, timeout=60):
@@ -102,8 +144,17 @@ class FakeCoop:
         return {
             "job_id": job_id,
             "status": "succeeded",
-            "effective_spec": {"language": "python"},
-            "execution_policy": {"isolated": True},
+            "effective_spec": {
+                "language": "python",
+                "requirements": self.requirements[-1]
+                if self.requirements
+                else {"minimum_isolation": "none"},
+                "isolation_class": self.posture["execution"]["isolation_class"],
+            },
+            "execution_policy": {
+                "isolated": self.posture["execution"]["isolated"],
+                "isolation_class": self.posture["execution"]["isolation_class"],
+            },
             "receipt": {"bootstrap_ready": True},
             "receipt_sha256": "a" * 64,
         }
@@ -116,6 +167,13 @@ class FakeCoop:
 
     def cancel(self, job_id):
         return {"job_id": job_id, "status": "cancelled"}
+
+    def cancel_result(self, job_id):
+        return {
+            "job": {"job_id": job_id, "status": "cancelled"},
+            "cancellation_requested": True,
+            "already_terminal": False,
+        }
 
 
 def initialized_server(fake=None, **config_overrides):
@@ -411,6 +469,9 @@ class McpTests(unittest.TestCase):
             fake.submissions,
             [("python", "print(6 * 7)", None, {"wall_seconds": 5})],
         )
+        self.assertEqual(fake.requirements, [{"minimum_isolation": "none"}])
+        self.assertEqual(len(fake.idempotency_keys), 1)
+        self.assertTrue(fake.idempotency_keys[0])
 
     def test_tasks_map_durably_to_coop_job_ids_when_both_sides_opt_in(self):
         fake = FakeCoop()
@@ -553,6 +614,85 @@ class McpTests(unittest.TestCase):
             [{"minimum_isolation": "linux-shared-kernel"}],
         )
 
+    def test_minimum_isolation_uses_class_satisfaction_not_namespace_flags(self):
+        gvisor = FakeCoop(
+            isolated=True,
+            isolation_class="gvisor-application-kernel",
+            private_rootfs=False,
+            seccomp=False,
+        )
+        accepted = tool_call(
+            initialized_server(gvisor, require_isolation=True),
+            "coop_run_code",
+            {"language": "python", "code": "print(1)"},
+        )
+        self.assertFalse(accepted["isError"])
+        self.assertEqual(
+            gvisor.requirements,
+            [{"minimum_isolation": "linux-shared-kernel"}],
+        )
+
+        hardware = FakeCoop(
+            isolated=True,
+            isolation_class="hardware-vm",
+            private_rootfs=False,
+            seccomp=False,
+        )
+        stronger = tool_call(
+            initialized_server(
+                hardware,
+                minimum_isolation="gvisor-application-kernel",
+            ),
+            "coop_run_code",
+            {"language": "python", "code": "print(1)"},
+        )
+        self.assertFalse(stronger["isError"])
+
+    def test_wasm_isolation_is_a_separate_fail_closed_branch(self):
+        hardware = tool_call(
+            initialized_server(
+                FakeCoop(isolated=True, isolation_class="hardware-vm"),
+                minimum_isolation="wasm-capability",
+            ),
+            "coop_run_code",
+            {"language": "python", "code": "print(1)"},
+        )
+        self.assertTrue(hardware["isError"])
+
+        wasm = FakeCoop(isolated=True, isolation_class="wasm-capability")
+        wasm_result = tool_call(
+            initialized_server(wasm, minimum_isolation="wasm-capability"),
+            "coop_run_code",
+            {"language": "python", "code": "print(1)"},
+        )
+        self.assertFalse(wasm_result["isError"])
+
+    def test_terminal_isolation_evidence_is_validated(self):
+        class MismatchedEvidenceFake(FakeCoop):
+            def get(self, job_id):
+                value = super().get(job_id)
+                if value.get("effective_spec") is not None:
+                    value["effective_spec"]["isolation_class"] = "none"
+                return value
+
+        result = tool_call(
+            initialized_server(
+                MismatchedEvidenceFake(
+                    isolated=True,
+                    isolation_class="gvisor-application-kernel",
+                ),
+                minimum_isolation="gvisor-application-kernel",
+            ),
+            "coop_run_code",
+            {"language": "python", "code": "print(1)"},
+        )
+        self.assertTrue(result["isError"])
+        self.assertEqual(
+            result["structuredContent"]["error_code"],
+            "isolation_evidence_unsatisfied",
+        )
+        self.assertEqual(result["structuredContent"]["job_id"], "job-1")
+
     def test_language_code_size_and_unknown_arguments_are_adapter_policy(self):
         server = initialized_server(
             allowed_languages=["python"], max_code_bytes=4, max_wait_seconds=5
@@ -590,11 +730,17 @@ class McpTests(unittest.TestCase):
         self.assertFalse(status["structuredContent"]["complete"])
         self.assertEqual(events["structuredContent"]["events"][0]["kind"], "started")
         self.assertTrue(cancelled["structuredContent"]["cancelled"])
+        self.assertTrue(cancelled["structuredContent"]["cancellation_requested"])
+        self.assertFalse(cancelled["structuredContent"]["already_terminal"])
 
     def test_empty_cancel_ack_is_reported_as_accepted(self):
         class EmptyCancelFake(FakeCoop):
-            def cancel(self, job_id):
-                return None
+            def cancel_result(self, job_id):
+                return {
+                    "job": None,
+                    "cancellation_requested": True,
+                    "already_terminal": False,
+                }
 
         result = tool_call(
             initialized_server(EmptyCancelFake()),
@@ -602,7 +748,27 @@ class McpTests(unittest.TestCase):
             {"job_id": "job-1"},
         )
         self.assertTrue(result["structuredContent"]["cancelled"])
+        self.assertTrue(result["structuredContent"]["cancellation_requested"])
+        self.assertFalse(result["structuredContent"]["already_terminal"])
         self.assertIsNone(result["structuredContent"]["job"])
+
+    def test_terminal_cancel_ack_preserves_typed_state(self):
+        class TerminalCancelFake(FakeCoop):
+            def cancel_result(self, job_id):
+                return {
+                    "job": {"job_id": job_id, "status": "succeeded"},
+                    "cancellation_requested": False,
+                    "already_terminal": True,
+                }
+
+        result = tool_call(
+            initialized_server(TerminalCancelFake()),
+            "coop_cancel_job",
+            {"job_id": "job-1"},
+        )
+        self.assertTrue(result["structuredContent"]["cancelled"])
+        self.assertFalse(result["structuredContent"]["cancellation_requested"])
+        self.assertTrue(result["structuredContent"]["already_terminal"])
 
     def test_invalid_ids_and_unknown_tools_are_protocol_errors(self):
         server = initialized_server()
@@ -711,6 +877,7 @@ class McpTests(unittest.TestCase):
                 "COOP_API_KEY": "key",
                 "COOP_MCP_ALLOWED_LANGUAGES": "python",
                 "COOP_MCP_REQUIRE_ISOLATION": "true",
+                "COOP_MCP_MINIMUM_ISOLATION": "gvisor-application-kernel",
                 "COOP_MCP_ENABLE_TASKS": "true",
                 "COOP_MCP_TASK_TTL_MS": "600000",
             },
@@ -719,6 +886,7 @@ class McpTests(unittest.TestCase):
             config = McpConfig.from_env()
         self.assertEqual(config.allowed_languages, frozenset({"python"}))
         self.assertTrue(config.require_isolation)
+        self.assertEqual(config.minimum_isolation, "gvisor-application-kernel")
         self.assertTrue(config.enable_tasks)
         self.assertEqual(config.task_ttl_ms, 600000)
 

@@ -15,6 +15,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import (
     Any,
@@ -28,7 +29,14 @@ from typing import (
     cast,
 )
 
-from coop import Capabilities, Coop, CoopError
+from coop import (
+    Capabilities,
+    Coop,
+    CoopError,
+    ExecutionRequirements,
+    IsolationClass,
+    isolation_satisfies,
+)
 
 __version__ = "0.3.0"
 
@@ -119,9 +127,17 @@ CANCEL_OUTPUT_SCHEMA: JsonObject = {
     "properties": {
         "job_id": {"type": "string"},
         "cancelled": {"type": "boolean"},
+        "cancellation_requested": {"type": "boolean"},
+        "already_terminal": {"type": "boolean"},
         "job": {"type": ["object", "null"]},
     },
-    "required": ["job_id", "cancelled", "job"],
+    "required": [
+        "job_id",
+        "cancelled",
+        "cancellation_requested",
+        "already_terminal",
+        "job",
+    ],
     "additionalProperties": False,
 }
 
@@ -251,6 +267,7 @@ class McpConfig:
         max_wait_seconds: int,
         max_code_bytes: int,
         require_isolation: bool,
+        minimum_isolation: Optional[IsolationClass] = None,
         enable_tasks: bool = False,
         task_ttl_ms: int = DEFAULT_TASK_TTL_MS,
     ) -> None:
@@ -268,12 +285,34 @@ class McpConfig:
             raise ValueError("COOP_MCP_MAX_CODE_BYTES must be between 1 and 1048576")
         if not 1 <= task_ttl_ms <= DEFAULT_TASK_TTL_MS:
             raise ValueError("COOP_MCP_TASK_TTL_MS must be between 1 and 3600000")
+        isolation_classes = {
+            "none",
+            "linux-shared-kernel",
+            "gvisor-application-kernel",
+            "wasm-capability",
+            "hardware-vm",
+            "confidential-vm",
+        }
+        if minimum_isolation is not None and minimum_isolation not in isolation_classes:
+            raise ValueError(
+                "COOP_MCP_MINIMUM_ISOLATION must be an exact Coop isolation class"
+            )
+        resolved_isolation: IsolationClass = minimum_isolation or "none"
+        if require_isolation:
+            if resolved_isolation == "none":
+                resolved_isolation = "linux-shared-kernel"
+            elif resolved_isolation == "wasm-capability":
+                raise ValueError(
+                    "COOP_MCP_REQUIRE_ISOLATION is incompatible with the separate "
+                    "wasm-capability isolation branch"
+                )
         self.base_url = base_url
         self.api_key = api_key
         self.allowed_languages = allowed
         self.max_wait_seconds = max_wait_seconds
         self.max_code_bytes = max_code_bytes
         self.require_isolation = require_isolation
+        self.minimum_isolation: IsolationClass = resolved_isolation
         self.enable_tasks = enable_tasks
         self.task_ttl_ms = task_ttl_ms
 
@@ -295,6 +334,10 @@ class McpConfig:
             ),
             max_code_bytes=_env_int("COOP_MCP_MAX_CODE_BYTES", DEFAULT_MAX_CODE_BYTES),
             require_isolation=_env_bool("COOP_MCP_REQUIRE_ISOLATION", False),
+            minimum_isolation=cast(
+                Optional[IsolationClass],
+                os.environ.get("COOP_MCP_MINIMUM_ISOLATION"),
+            ),
             enable_tasks=_env_bool("COOP_MCP_ENABLE_TASKS", False),
             task_ttl_ms=_env_int("COOP_MCP_TASK_TTL_MS", DEFAULT_TASK_TTL_MS),
         )
@@ -342,6 +385,7 @@ class _RequestContext:
         self._lock = threading.Lock()
         self._job_id: Optional[str] = None
         self._committed = False
+        self.idempotency_key = str(uuid.uuid4())
 
     def record_job(self, job_id: str) -> bool:
         with self._lock:
@@ -645,14 +689,11 @@ class CoopMcpServer:
             f"{limit_capabilities['stdin_bytes_max']} UTF-8 bytes."
         )
         execution = capabilities["execution"]
-        unsafe_host = not (
-            execution["isolated"]
-            and execution["private_rootfs"]
-            and execution["dedicated_bootstrap"]
-        )
+        isolation_class = execution["isolation_class"]
+        unsafe_host = isolation_class == "none"
         tools[0]["annotations"]["destructiveHint"] = unsafe_host
         tools[0]["annotations"]["openWorldHint"] = execution["networking"] != "disabled"
-        posture = "isolated" if not unsafe_host else "UNISOLATED host"
+        posture = isolation_class if not unsafe_host else "UNISOLATED host"
         tools[0]["description"] = (
             f"Run one short job on the {posture} Coop backend and return its bounded "
             "output, terminal status, job ID, and receipt. Jobs are stateless; files "
@@ -681,9 +722,17 @@ class CoopMcpServer:
             if name == "coop_run_code":
                 if modern and self._client_supports_tasks(client_capabilities):
                     return self._run_code(arguments, context=context, create_task=True)
-                return _tool_success(self._run_code(arguments, context=context))
+                run_result = self._run_code(arguments, context=context)
+                return _tool_result(
+                    run_result,
+                    is_error="isolation_validation_error" in run_result,
+                )
             if name == "coop_job_result":
-                return _tool_success(self._job_result(arguments, context=context))
+                job_result = self._job_result(arguments, context=context)
+                return _tool_result(
+                    job_result,
+                    is_error="isolation_validation_error" in job_result,
+                )
             if name == "coop_job_events":
                 return _tool_success(self._job_events(arguments))
             if name == "coop_cancel_job":
@@ -755,6 +804,55 @@ class CoopMcpServer:
             raise ValueError("allow_network=true is not supported by Coop policy")
         return cast(Mapping[str, Any], limits_value)
 
+    def _validate_terminal_isolation(self, result: JsonObject) -> Optional[str]:
+        status = str(result.get("status", ""))
+        if status not in {
+            "succeeded",
+            "failed",
+            "timed_out",
+            "oom_killed",
+            "error",
+        }:
+            return None
+        effective = result.get("effective_spec")
+        observed_value = (
+            effective.get("isolation_class") if isinstance(effective, dict) else None
+        )
+        minimum = self.config.minimum_isolation
+        if observed_value is None:
+            if minimum == "none":
+                return None
+            return (
+                "terminal evidence did not contain an observed isolation_class for "
+                f"required minimum {minimum}"
+            )
+        classes = {
+            "none",
+            "linux-shared-kernel",
+            "gvisor-application-kernel",
+            "wasm-capability",
+            "hardware-vm",
+            "confidential-vm",
+        }
+        if not isinstance(observed_value, str) or observed_value not in classes:
+            return f"terminal evidence contained unknown isolation_class {observed_value!r}"
+        observed = cast(IsolationClass, observed_value)
+        if not isolation_satisfies(observed, minimum):
+            return (
+                f"observed isolation_class {observed} does not satisfy required "
+                f"minimum {minimum}"
+            )
+        return None
+
+    def _mark_terminal_isolation(self, result: JsonObject) -> bool:
+        error = self._validate_terminal_isolation(result)
+        if error is None:
+            return True
+        result["isolation_validation_error"] = error
+        result["error_code"] = "isolation_evidence_unsatisfied"
+        result["retryable"] = False
+        return False
+
     def _run_code(
         self,
         arguments: JsonObject,
@@ -793,17 +891,21 @@ class CoopMcpServer:
         limits = self._validate_limits(limits_value, capabilities)
         wait_seconds = self._wait_seconds(arguments, default=60, allow_zero=False)
 
-        submitted = self.client.submit(
+        submission = self.client.submit_result(
             language,
             code,
             stdin=stdin_value,
             limits=limits,
-            requirements=(
-                {"minimum_isolation": "linux-shared-kernel"}
-                if self.config.require_isolation
-                else None
+            requirements=cast(
+                ExecutionRequirements,
+                {"minimum_isolation": self.config.minimum_isolation},
             ),
+            idempotency_key=(
+                context.idempotency_key if context is not None else str(uuid.uuid4())
+            ),
+            retry_ambiguous=True,
         )
+        submitted = submission["job"]
         job_id = submitted["job_id"]
         if context is not None and context.record_job(job_id):
             try:
@@ -855,6 +957,7 @@ class CoopMcpServer:
             self._attach_evidence(result, job_id)
         except Exception as exc:
             result["evidence_error"] = self.redact(str(exc))
+        self._mark_terminal_isolation(result)
         result["complete"] = True
         return result
 
@@ -902,11 +1005,12 @@ class CoopMcpServer:
             self._attach_evidence(value, task_id)
         except Exception as exc:
             value["evidence_error"] = self.redact(str(exc))
+        isolation_valid = self._mark_terminal_isolation(value)
         value["complete"] = True
         task["status"] = "completed"
         task["statusMessage"] = f"Coop job completed with status {status}."
         task["result"] = self._complete_result(
-            _tool_result(value, is_error=status != "succeeded")
+            _tool_result(value, is_error=status != "succeeded" or not isolation_valid)
         )
         return task
 
@@ -942,16 +1046,20 @@ class CoopMcpServer:
         wait_seconds = self._wait_seconds(arguments, default=60, allow_zero=True)
         if wait_seconds == 0:
             snapshot = _json_object(self.client.get(job_id))
-            snapshot["complete"] = str(snapshot.get("status")) not in {
-                "queued",
-                "running",
-            }
+            if str(snapshot.get("status")) in {"queued", "running"}:
+                snapshot["complete"] = False
+                return snapshot
+            snapshot = _json_object(self.client.result(job_id, timeout=5))
+            self._attach_evidence(snapshot, job_id)
+            self._mark_terminal_isolation(snapshot)
+            snapshot["complete"] = True
             return snapshot
         try:
             result = _json_object(
                 self._result_with_context(job_id, wait_seconds, context)
             )
             self._attach_evidence(result, job_id)
+            self._mark_terminal_isolation(result)
             result["complete"] = True
             return result
         except TimeoutError:
@@ -971,11 +1079,18 @@ class CoopMcpServer:
     def _cancel_job(self, arguments: JsonObject) -> JsonObject:
         _reject_unknown(arguments, {"job_id"})
         job_id = _required_string(arguments, "job_id")
-        cancelled = self.client.cancel(job_id)
-        job = None if cancelled is None else _json_object(cancelled)
-        # A current or legacy Coop server may acknowledge cancellation with an
-        # empty HTTP 200. Reaching this line means the request was accepted.
-        return {"job_id": job_id, "cancelled": True, "job": job}
+        cancellation = self.client.cancel_result(job_id)
+        job_value = cancellation["job"]
+        return {
+            "job_id": job_id,
+            # Compatibility alias: the known job was either asked to cancel or
+            # was already terminal. Use the two typed fields for exact state.
+            "cancelled": cancellation["cancellation_requested"]
+            or cancellation["already_terminal"],
+            "cancellation_requested": cancellation["cancellation_requested"],
+            "already_terminal": cancellation["already_terminal"],
+            "job": None if job_value is None else _json_object(job_value),
+        }
 
     def _attach_evidence(self, result: JsonObject, job_id: str) -> None:
         detail = _json_object(self.client.get(job_id))

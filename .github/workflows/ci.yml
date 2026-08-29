@@ -34,7 +34,9 @@ jobs:
       - name: Validate production verifier syntax
         run: >-
           python3 -m py_compile scripts/verify-production.py
-          scripts/build-rootfs-manifest.py
+          scripts/verify-python-adapter.py scripts/build-rootfs-manifest.py
+      - name: Test production verifier provider fixtures
+        run: python3 -m unittest discover -s scripts/tests -v
 
   rust-quality:
     name: rust quality

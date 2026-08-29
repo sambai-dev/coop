@@ -44,11 +44,19 @@ print(result["stdout"])
 
 Pass resource fields inside the `limits` object. The client accepts a default transport timeout and per-call deadlines; close/cancel work when the upstream agent request is abandoned.
 
+Both SDKs accept `requirements.minimum_isolation` using the server's exact
+isolation-class strings. `submit_result()` / `submitResult()` preserve the
+ordinary submission body while exposing `Location` and
+`Idempotency-Replayed`. Idempotency keys are limited to 128 visible ASCII
+bytes; ambiguous retries are explicit opt-ins and always reuse the same key.
+
 In both clients, `get` and `wait` return a job detail rather than the sparse
 submission shape. The requested spec is complete, with nullable stored `stdin`
 and all requested limits. `EffectiveJobSpec` uses `EffectiveLimits`, whose
 individual values can be null when the backend did not enforce a control or
-never reached its ready boundary. `LimitEnforcement` provides an explicit
+never reached its ready boundary. Its nullable `isolation_class` is observed
+execution evidence, not a copy of capability configuration.
+`LimitEnforcement` provides an explicit
 boolean for each resource control. In development subprocess mode, only wall
 time is effective; CPU, memory, process, and file values are null. The whole
 effective spec and execution-policy fields are nullable for queued, migrated,
@@ -82,7 +90,7 @@ Node versions without a global `WebSocket` fall back to cursor replay. Both SDKs
 
 `wait` and `result` reject non-finite deadlines, treat a zero budget as an immediate timeout, and cap each in-flight request to the remaining overall budget. A structured v0.2 `job_not_found` response is returned to the caller and is never mistaken for evidence that `/result` or `/stream-ticket` is a missing legacy route.
 
-The server may deliberately close a response connection after 30 seconds with zero socket write progress, and every connection (including an upgraded WebSocket) has a 10-minute absolute lifetime. Both clients treat an early EOF, a rejected response body, or a `Content-Length` mismatch as a retryable transport failure rather than parsing partial JSON. It is safe to retry detail, result, and replay reads with bounded backoff. Persist a replay cursor only after the whole page has decoded successfully; after a failure, request the previous cursor again and deduplicate events by `(job_id, seq)`. A WebSocket reconnect mints a new one-use ticket and resumes from the last accepted sequence. Submission is different: do not automatically repeat a timed-out `POST /v1/jobs`, because the first request may already have committed a durable job.
+The server may deliberately close a response connection after 30 seconds with zero socket write progress, and every connection (including an upgraded WebSocket) has a 10-minute absolute lifetime. Both clients treat an early EOF, a rejected response body, or a `Content-Length` mismatch as a retryable transport failure rather than parsing partial JSON. It is safe to retry detail, result, and replay reads with bounded backoff. Persist a replay cursor only after the whole page has decoded successfully; after a failure, request the previous cursor again and deduplicate events by `(job_id, seq)`. A WebSocket reconnect mints a new one-use ticket and resumes from the last accepted sequence. Submission is different: repeat an ambiguously acknowledged `POST /v1/jobs` only when it carried an `Idempotency-Key`, and reuse the exact key and canonical job specification.
 
 ## Integration pattern
 
@@ -94,7 +102,11 @@ Expose one narrow tool to the model:
 4. return bounded stdout, stderr, terminal status, and violations to the agent;
 5. retain the Coop job ID in the parent trace for investigation.
 
-Do not give a model the Coop API key or let it choose the Coop base URL. Keep both in the trusted tool adapter. Avoid transparently retrying submissions because a network timeout does not prove the server rejected the first request.
+Do not give a model the Coop API key or let it choose the Coop base URL. Keep
+both in the trusted tool adapter. Configure the adapter's minimum isolation as
+operator policy and validate the terminal observed class. Do not transparently
+retry an unkeyed submission because a network timeout does not prove the server
+rejected the first request.
 
 ## Compatibility
 

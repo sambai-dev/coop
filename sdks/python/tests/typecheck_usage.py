@@ -10,6 +10,7 @@ from coop import (
     ExecutionRequirements,
     ExecutorOutputEvidence,
     HashedCoopEvent,
+    IsolationClass,
     JobDetail,
     JobPage,
     JobResult,
@@ -17,6 +18,8 @@ from coop import (
     OutputEvidence,
     Receipt,
     SubmitResponse,
+    SubmitResult,
+    isolation_satisfies,
 )
 
 client = Coop("https://coop.example", "tenant-key", timeout=5)
@@ -28,6 +31,12 @@ submitted: SubmitResponse = client.submit(
     requirements=requirements,
     idempotency_key="consumer-submit-1",
 )
+submitted_with_metadata: SubmitResult = client.submit_result(
+    "python",
+    "print(42)",
+    requirements=requirements,
+    idempotency_key="consumer-submit-2",
+)
 page: JobPage = client.list(status="running", language="python")
 detail: JobDetail = client.get(submitted["job_id"])
 receipt: Optional[Receipt] = detail["receipt"]
@@ -36,6 +45,10 @@ events: Iterator[CoopEvent] = client.stream(submitted["job_id"])
 result: JobResult = client.result(submitted["job_id"])
 cancelled: CancellationResponse = client.cancel_result(submitted["job_id"])
 hashed: HashedCoopEvent = cast(HashedCoopEvent, next(events))
+observed_isolation: IsolationClass = "gvisor-application-kernel"
+isolation_ok: bool = isolation_satisfies(
+    observed_isolation, requirements.get("minimum_isolation", "none")
+)
 
 effective: Optional[EffectiveJobSpec] = detail["effective_spec"]
 executor_output: Optional[ExecutorOutputEvidence] = (
@@ -57,4 +70,6 @@ _ = (
     result,
     cancelled,
     hashed,
+    submitted_with_metadata,
+    isolation_ok,
 )

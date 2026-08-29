@@ -33,15 +33,19 @@ size, maximum wait, or required isolation posture. Those are process settings:
 |---|---|---|
 | `COOP_BASE_URL` | `http://127.0.0.1:7300` | Use the private/TLS Coop endpoint |
 | `COOP_API_KEY` | none; required | Give each harness its own tenant key |
-| `COOP_MCP_REQUIRE_ISOLATION` | `false` | Set `true`; calls fail closed unless Coop reports every isolation control |
+| `COOP_MCP_REQUIRE_ISOLATION` | `false` | Compatibility switch for a minimum `linux-shared-kernel` class |
+| `COOP_MCP_MINIMUM_ISOLATION` | unset | Exact required class; use `gvisor-application-kernel`, `hardware-vm`, or `confidential-vm` when that stronger boundary is mandatory |
 | `COOP_MCP_ALLOWED_LANGUAGES` | `python,node,bash` | Reduce to what the agent needs |
 | `COOP_MCP_MAX_WAIT_SECONDS` | `300` | Reduce for interactive agents if desired |
 | `COOP_MCP_MAX_CODE_BYTES` | `524288` | Reduce to bound model-generated payloads further |
 
-The adapter checks server capabilities before its first submission. With
-`COOP_MCP_REQUIRE_ISOLATION=true`, it requires the private-rootfs namespace
-backend, dedicated bootstrap, seccomp, disabled networking, and all five
-resource-enforcement flags. The terminal job receipt remains the per-run proof.
+The adapter sends its minimum isolation requirement with every submission, so
+admission and execution use the same atomic policy. It applies Coop's exact
+class satisfaction order: gVisor and VM providers satisfy
+`linux-shared-kernel`, confidential VMs satisfy `hardware-vm`, and Wasm remains
+a separate branch. Terminal policy and receipt evidence must report a class
+that still satisfies the configured minimum. This avoids imposing
+namespace-specific seccomp/rootfs assertions on gVisor or VM providers.
 
 ## Hermes
 
@@ -57,9 +61,9 @@ resource-enforcement flags. The terminal job receipt remains the per-run proof.
 2. Merge [`hermes/config.snippet.yaml`](hermes/config.snippet.yaml) into
    `~/.hermes/config.yaml`. Replace `command: "coop-mcp"` with the absolute
    virtual-environment executable if necessary.
-3. Restart Hermes and use its MCP test/reload surface. Keep
-   `supports_parallel_tool_calls: false`; this adapter intentionally processes
-   one stdio request at a time while Coop performs concurrency control.
+3. Restart Hermes and use its MCP test/reload surface. Parallel tool calls are
+   supported through the adapter's bounded concurrent dispatcher; Coop remains
+   authoritative for tenant and global admission limits.
 4. Disable Hermes' local `execute_code` or terminal toolset for agents that
    must use Coop. Merely adding Coop does not stop a model from choosing an
    existing host/Docker execution tool.

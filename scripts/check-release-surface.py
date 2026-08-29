@@ -377,6 +377,7 @@ def check_pins_and_packaging() -> int:
         "COOP_PRODUCTION_VM_ACKNOWLEDGED",
         'test "$(uname -m)" = x86_64',
         "scripts/verify-production.py",
+        "COOP_VERIFY_MINIMUM_ISOLATION",
         "target.write_text",
         "target.chmod(0o600)",
     ]:
@@ -384,19 +385,30 @@ def check_pins_and_packaging() -> int:
     container_smoke = read("scripts/smoke-container.sh")
     for required in [
         "scripts/verify-production.py",
+        "scripts/verify-python-adapter.py",
         "COOP_VERIFY_LANGUAGES=python,node,bash",
+        "COOP_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel",
     ]:
         require(required in container_smoke, f"container smoke contract missing: {required}")
     production_verifier = read("scripts/verify-production.py")
     for required in [
         "verify_canary",
         "verify_receipt",
+        "parse_minimum_isolation",
+        "isolation_satisfies",
+        "COOP_VERIFY_MINIMUM_ISOLATION",
+        '"requirements": {"minimum_isolation": minimum_isolation}',
+        'for field in ["runtime_sha256", "rootfs_sha256", "config_sha256"]',
         'receipt.get("receipt_sha256")',
         'document.get("networking") == "disabled"',
-        'policy.get("network_allowed") is False',
         'hashlib.sha256(canonical.encode("utf-8")).hexdigest() == recorded',
     ]:
         require(required in production_verifier, f"production verifier contract missing: {required}")
+    require(
+        "python3 -m unittest discover -s scripts/tests -v"
+        in read(".github/workflows/ci.yml"),
+        "CI does not run production verifier provider fixtures",
+    )
     for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"]:
         require(
             "bash scripts/smoke-container.sh" in read(workflow),

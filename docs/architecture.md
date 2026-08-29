@@ -22,8 +22,8 @@ agent / SDK / dashboard
                ▼
 ┌──────────────────────────────┐
 │ Executor                     │
-│ x86_64 rootfs · namespaces   │
-│ cgroup v2 · rlimits · seccomp│
+│ namespace or gVisor provider │
+│ cgroup v2 · private rootfs   │
 └──────────────┬───────────────┘
                │ ordered events
                ▼
@@ -44,8 +44,8 @@ The executor interface is intentionally narrower than an OCI runtime API: one
 job enters, an ordered stream of output/violation events leaves, and one
 terminal outcome plus executor-observed provenance returns. The provenance
 ready bit is set only at the backend's actual workload-ready boundary. A future
-gVisor/OCI backend should preserve that contract while producing its own
-runtime provenance.
+provider must preserve that contract. The integrated gVisor/OCI backend does
+so while adding reviewed-runtime, rootfs-manifest, and OCI-config digests.
 
 ## Job state and events
 

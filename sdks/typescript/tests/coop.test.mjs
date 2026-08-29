@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Coop, CoopError } from "../dist/coop.js";
+import {
+  Coop,
+  CoopError,
+  ISOLATION_CLASSES,
+  isolationSatisfies,
+} from "../dist/coop.js";
 
 function response(value, status = 200, headers = {}) {
   return new Response(value === undefined ? null : JSON.stringify(value), {
@@ -72,6 +77,86 @@ test("submit sends a typed minimum-isolation requirement", async () => {
   });
 });
 
+test("isolation satisfaction matches the server's branched ordering", () => {
+  assert.deepEqual(ISOLATION_CLASSES, [
+    "none",
+    "linux-shared-kernel",
+    "gvisor-application-kernel",
+    "wasm-capability",
+    "hardware-vm",
+    "confidential-vm",
+  ]);
+  assert.equal(isolationSatisfies("gvisor-application-kernel", "linux-shared-kernel"), true);
+  assert.equal(isolationSatisfies("confidential-vm", "hardware-vm"), true);
+  assert.equal(isolationSatisfies("linux-shared-kernel", "gvisor-application-kernel"), false);
+  assert.equal(isolationSatisfies("wasm-capability", "wasm-capability"), true);
+  assert.equal(isolationSatisfies("hardware-vm", "wasm-capability"), false);
+  assert.equal(isolationSatisfies("wasm-capability", "linux-shared-kernel"), false);
+  assert.equal(isolationSatisfies("future-provider", "linux-shared-kernel"), false);
+  assert.equal(isolationSatisfies("hardware-vm", "future-minimum"), false);
+  for (const actual of ISOLATION_CLASSES) {
+    assert.equal(isolationSatisfies(actual, "none"), true);
+  }
+});
+
+test("submitResult exposes Location and Idempotency-Replayed headers additively", async () => {
+  const body = {
+    job_id: "j",
+    status: "queued",
+    stream_url: "/v1/jobs/j/stream",
+    replay_url: "/v1/jobs/j/replay",
+    stream_ticket_url: "/v1/jobs/j/stream-ticket",
+  };
+  const transport = queuedFetch(
+    response(body, 201, {
+      Location: "/v1/jobs/j",
+      "Idempotency-Replayed": "false",
+    }),
+    response(body, 201, {
+      Location: "/v1/jobs/j",
+      "Idempotency-Replayed": "true",
+    }),
+  );
+  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  assert.deepEqual(await coop.submitResult("python", "pass", {
+    idempotencyKey: "logical-request-result",
+  }), {
+    job: body,
+    location: "/v1/jobs/j",
+    idempotency_replayed: false,
+  });
+  assert.deepEqual(await coop.submitResult("python", "pass", {
+    idempotencyKey: "logical-request-result",
+  }), {
+    job: body,
+    location: "/v1/jobs/j",
+    idempotency_replayed: true,
+  });
+});
+
+test("submit preserves its body-only compatibility contract", async () => {
+  const body = { job_id: "j", status: "queued", stream_url: "/s", replay_url: "/r" };
+  const transport = queuedFetch(response(body, 201, {
+    Location: "/v1/jobs/j",
+    "Idempotency-Replayed": "true",
+  }));
+  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  assert.deepEqual(await coop.submit("python", "pass"), body);
+});
+
+test("submitResult rejects an invalid Idempotency-Replayed header", async () => {
+  const transport = queuedFetch(response(
+    { job_id: "j", status: "queued", stream_url: "/s", replay_url: "/r" },
+    201,
+    { "Idempotency-Replayed": "yes" },
+  ));
+  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  await assert.rejects(
+    coop.submitResult("python", "pass", { idempotencyKey: "logical-request-invalid-header" }),
+    (error) => error instanceof CoopError && error.code === "invalid_response",
+  );
+});
+
 test("ambiguous submission retry reuses one generated idempotency key", async () => {
   const transport = queuedFetch(
     new Error("connection reset after write"),
@@ -83,7 +168,7 @@ test("ambiguous submission retry reuses one generated idempotency key", async ()
   assert.equal(transport.calls.length, 2);
   const firstKey = transport.calls[0].init.headers["Idempotency-Key"];
   const secondKey = transport.calls[1].init.headers["Idempotency-Key"];
-  assert.match(firstKey, /^[!-~]{1,255}$/);
+  assert.match(firstKey, /^[!-~]{1,128}$/);
   assert.equal(secondKey, firstKey);
 });
 
@@ -136,10 +221,11 @@ test("submission idempotency keys reject controls, whitespace, and overlength", 
       return response({});
     },
   });
+  await coop.submit("python", "", { idempotencyKey: "x".repeat(128) });
   await assert.rejects(coop.submit("python", "", { idempotencyKey: "contains space" }), TypeError);
   await assert.rejects(coop.submit("python", "", { idempotencyKey: "line\nbreak" }), TypeError);
-  await assert.rejects(coop.submit("python", "", { idempotencyKey: "x".repeat(256) }), TypeError);
-  assert.equal(calls, 0);
+  await assert.rejects(coop.submit("python", "", { idempotencyKey: "x".repeat(129) }), TypeError);
+  assert.equal(calls, 1);
 });
 
 test("ambiguous retry does not repeat a client-side serialization failure", async () => {
@@ -370,20 +456,72 @@ test("replay rejects a non-advancing initial cursor", async () => {
   assert.equal(transport.calls.length, 1);
 });
 
-test("whoami and capabilities expose the v0.2 discovery endpoints", async () => {
+test("whoami and capabilities expose the complete v0.4 discovery contract", async () => {
+  const enforcement = {
+    wall_seconds: true,
+    cpu_seconds: true,
+    mem_mb: true,
+    max_pids: true,
+    max_file_mb: true,
+  };
   const transport = queuedFetch(
-    response({ tenant: "acme" }),
     response({
-      version: "0.2.0",
+      tenant: "acme",
+      principal_id: "legacy:acme",
+      credential_id: null,
+      auth_method: "api_key",
+      scopes: ["jobs:submit", "jobs:read", "jobs:cancel", "service:read", "metrics:read"],
+      expires_at_ms: null,
+    }),
+    response({
+      version: "0.4.0",
       languages: ["python"],
-      execution: { backend: "gvisor", isolated: true },
-      limits: { wall_seconds_max: 300 },
-      features: { stream_tickets: true },
+      execution: {
+        backend: "gvisor",
+        isolation_class: "gvisor-application-kernel",
+        isolated: true,
+        private_rootfs: true,
+        dedicated_bootstrap: true,
+        seccomp: false,
+        networking: "disabled",
+        limit_enforcement: enforcement,
+      },
+      limits: {
+        wall_seconds_max: 300,
+        cpu_seconds_max: 240,
+        mem_mb_max: 1_024,
+        concurrent_mem_mb_max: 4_096,
+        pids_max: 1_024,
+        file_mb_max: 512,
+        output_lines_max: 10_000,
+        output_bytes_per_stream_max: 1_048_576,
+        output_record_bytes_max: 16_384,
+        code_bytes_max: 1_048_576,
+        stdin_bytes_max: 1_048_576,
+      },
+      features: {
+        result_wait: true,
+        cancellation: true,
+        event_cursors: true,
+        stream_tickets: true,
+        receipts: true,
+      },
     }),
   );
   const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
-  assert.equal((await coop.whoami()).tenant, "acme");
-  assert.equal((await coop.capabilities()).features.stream_tickets, true);
+  const identity = await coop.whoami();
+  const capabilities = await coop.capabilities();
+  assert.equal(identity.principal_id, "legacy:acme");
+  assert.deepEqual(identity.scopes, [
+    "jobs:submit",
+    "jobs:read",
+    "jobs:cancel",
+    "service:read",
+    "metrics:read",
+  ]);
+  assert.equal(capabilities.execution.isolation_class, "gvisor-application-kernel");
+  assert.equal(capabilities.limits.concurrent_mem_mb_max, 4_096);
+  assert.equal(capabilities.features.stream_tickets, true);
   assert.equal(transport.calls[0].url.pathname, "/v1/whoami");
 });
 
@@ -400,6 +538,7 @@ test("job detail distinguishes unknown policy from persisted and executor eviden
       max_file_mb: 16,
       allow_network: false,
     },
+    requirements: { minimum_isolation: "linux-shared-kernel" },
   };
   const enforcement = {
     wall_seconds: true,
@@ -411,6 +550,7 @@ test("job detail distinguishes unknown policy from persisted and executor eviden
   const effectiveSpec = {
     ...storedSpec,
     limits: { ...storedSpec.limits, allow_network: false },
+    isolation_class: "gvisor-application-kernel",
   };
   const base = {
     tenant: "acme",
@@ -429,6 +569,7 @@ test("job detail distinguishes unknown policy from persisted and executor eviden
     effective_spec: null,
     execution_policy: {
       sandbox: null,
+      isolation_class: null,
       bootstrap_ready: null,
       isolated: null,
       seccomp: null,
@@ -437,6 +578,10 @@ test("job detail distinguishes unknown policy from persisted and executor eviden
       private_rootfs: null,
       dedicated_bootstrap: null,
       limit_enforcement: null,
+      runtime_version: null,
+      runtime_sha256: null,
+      rootfs_sha256: null,
+      config_sha256: null,
     },
     receipt: null,
   };
@@ -445,16 +590,22 @@ test("job detail distinguishes unknown policy from persisted and executor eviden
     job_id: "done",
     status: "succeeded",
     effective_spec: effectiveSpec,
+    receipt_sha256: "b".repeat(64),
     execution_policy: {
-      sandbox: "namespaces+cgroups-v2+private-rootfs",
+      sandbox: "gvisor",
+      isolation_class: "gvisor-application-kernel",
       bootstrap_ready: true,
       isolated: true,
-      seccomp: true,
+      seccomp: false,
       network_allowed: false,
       networking: "disabled",
       private_rootfs: true,
       dedicated_bootstrap: true,
       limit_enforcement: enforcement,
+      runtime_version: "runsc version 20260817.0",
+      runtime_sha256: "1".repeat(64),
+      rootfs_sha256: "2".repeat(64),
+      config_sha256: "3".repeat(64),
     },
     receipt: {
       version: 1,
@@ -473,16 +624,23 @@ test("job detail distinguishes unknown policy from persisted and executor eviden
         complete: true,
       },
       receipt_sha256: "b".repeat(64),
-      backend: "namespaces+cgroups-v2+private-rootfs",
+      backend: "gvisor",
+      requirements: storedSpec.requirements,
+      minimum_isolation: "linux-shared-kernel",
+      isolation_class: "gvisor-application-kernel",
       bootstrap_ready: true,
       isolated: true,
-      seccomp: true,
+      seccomp: false,
       network_allowed: false,
       networking: "disabled",
       private_rootfs: true,
       dedicated_bootstrap: true,
       effective_limits: effectiveSpec.limits,
       limit_enforcement: enforcement,
+      runtime_version: "runsc version 20260817.0",
+      runtime_sha256: "1".repeat(64),
+      rootfs_sha256: "2".repeat(64),
+      config_sha256: "3".repeat(64),
       output: {
         encoding: "utf8-event-lines-joined-by-lf-no-trailing-lf",
         stdout_bytes: 2,
@@ -551,6 +709,7 @@ test("job detail distinguishes unknown policy from persisted and executor eviden
 
   assert.equal(queued.effective_spec, null);
   assert.equal(queued.execution_policy.sandbox, null);
+  assert.equal(queued.execution_policy.isolation_class, null);
   assert.equal(
     complete.receipt.output.encoding,
     "utf8-event-lines-joined-by-lf-no-trailing-lf",
@@ -559,6 +718,11 @@ test("job detail distinguishes unknown policy from persisted and executor eviden
   assert.equal(complete.receipt.private_rootfs, true);
   assert.equal(complete.receipt.dedicated_bootstrap, true);
   assert.equal(complete.receipt.bootstrap_ready, true);
+  assert.equal(complete.effective_spec.isolation_class, "gvisor-application-kernel");
+  assert.equal(complete.execution_policy.runtime_sha256, "1".repeat(64));
+  assert.equal(complete.receipt.minimum_isolation, "linux-shared-kernel");
+  assert.equal(complete.receipt.isolation_class, "gvisor-application-kernel");
+  assert.equal(complete.receipt.config_sha256, "3".repeat(64));
   assert.deepEqual(complete.receipt.limit_enforcement, enforcement);
   assert.equal(restarted.effective_spec, null);
   assert.equal(restarted.execution_policy.bootstrap_ready, null);

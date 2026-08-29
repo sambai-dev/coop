@@ -1,6 +1,6 @@
 # Coop TypeScript SDK
 
-The typed v0.3 client runs in modern browsers and Node.js 18+. It uses the
+The typed client runs in modern browsers and Node.js 18+. It uses the
 platform `fetch`, supports `AbortSignal` and per-request deadlines, and has no
 runtime dependencies.
 
@@ -38,6 +38,7 @@ import { Coop } from "coop-sdk";
 const coop = new Coop("http://127.0.0.1:7300", "tenant-api-key");
 const job = await coop.submit("node", "console.log(6 * 7)", {
   limits: { wall_seconds: 10, mem_mb: 256 },
+  requirements: { minimum_isolation: "linux-shared-kernel" },
 });
 
 for await (const event of coop.streamEvents(job.job_id)) {
@@ -47,6 +48,32 @@ for await (const event of coop.streamEvents(job.job_id)) {
 const result = await coop.result(job.job_id, 60_000);
 console.log(result.status, result.stdout);
 ```
+
+For an idempotent v0.4 submission, use `submitResult()`. It preserves the
+ordinary response body under `job` and also exposes the `Location` and
+`Idempotency-Replayed` response headers:
+
+```ts
+const accepted = await coop.submitResult("python", "print('once')", {
+  idempotencyKey: "workflow-run-018f6f8d", // 1-128 visible ASCII bytes
+  retryAmbiguous: true,
+  requirements: { minimum_isolation: "gvisor-application-kernel" },
+});
+console.log(accepted.job.job_id, accepted.location, accepted.idempotency_replayed);
+```
+
+`retryAmbiguous` makes at most one automatic retry and reuses the same key. Use
+it only with a server that enforces v0.4 idempotency semantics. An ambiguous
+failure carries the stable key on `CoopError.idempotencyKey` so a caller can
+persist it and reconcile the logical request later. `cancelResult()` returns
+the typed v0.4 cancellation state; `cancel()` remains the body-discarding
+compatibility wrapper.
+
+`capabilities()` exposes the provider's `isolation_class`, per-job
+`mem_mb_max`, and aggregate `concurrent_mem_mb_max`. Use
+`isolationSatisfies(actual, minimum)` for the server-compatible branched
+ordering: `wasm-capability` satisfies only that capability requirement and is
+not silently interchangeable with a shared-kernel or VM class.
 
 Every network method accepts an `AbortSignal` directly or through its options.
 `CoopError` exposes `status`, `code`, `requestId`, `retryable`, and

@@ -29,6 +29,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Tuple,
     TypedDict,
     Union,
     cast,
@@ -49,6 +50,7 @@ __all__ = [
     "ExecutionRequirements",
     "ExecutionPolicy",
     "HashedCoopEvent",
+    "IsolationClass",
     "Job",
     "JobDetail",
     "JobPage",
@@ -67,7 +69,9 @@ __all__ = [
     "StoredJobSpec",
     "StoredLimits",
     "SubmitResponse",
+    "SubmitResult",
     "WhoAmI",
+    "isolation_satisfies",
 ]
 
 __version__ = "0.3.0"
@@ -129,7 +133,7 @@ class JobSpec(_RequiredJobSpec, total=False):
     requirements: "ExecutionRequirements"
 
 
-MinimumIsolation = Literal[
+IsolationClass = Literal[
     "none",
     "linux-shared-kernel",
     "gvisor-application-kernel",
@@ -137,9 +141,29 @@ MinimumIsolation = Literal[
     "hardware-vm",
     "confidential-vm",
 ]
+MinimumIsolation = IsolationClass
 
 
-class ExecutionRequirements(TypedDict):
+def isolation_satisfies(observed: IsolationClass, minimum: IsolationClass) -> bool:
+    """Return whether an observed provider class satisfies a requested minimum."""
+
+    if minimum == "none":
+        return True
+    if minimum == "wasm-capability":
+        return observed == "wasm-capability"
+    process_chain = {
+        "none": 0,
+        "linux-shared-kernel": 1,
+        "gvisor-application-kernel": 2,
+        "hardware-vm": 3,
+        "confidential-vm": 4,
+    }
+    if observed == "wasm-capability":
+        return False
+    return process_chain[observed] >= process_chain[minimum]
+
+
+class ExecutionRequirements(TypedDict, total=False):
     """Atomic admission requirements enforced by a supporting Coop server."""
 
     minimum_isolation: MinimumIsolation
@@ -185,6 +209,8 @@ class EffectiveJobSpec(TypedDict):
     code: str
     stdin: Optional[str]
     limits: EffectiveLimits
+    requirements: ExecutionRequirements
+    isolation_class: Optional[IsolationClass]
 
 
 class LimitEnforcement(TypedDict):
@@ -204,6 +230,12 @@ class _RequiredSubmitResponse(TypedDict):
 
 class SubmitResponse(_RequiredSubmitResponse, total=False):
     stream_ticket_url: str
+
+
+class SubmitResult(TypedDict):
+    job: SubmitResponse
+    location: Optional[str]
+    idempotency_replayed: bool
 
 
 class JobView(TypedDict):
@@ -229,6 +261,7 @@ class ExecutionPolicy(TypedDict):
     """Observed policy; fields are unknown for queued or migrated rows."""
 
     sandbox: Optional[str]
+    isolation_class: Optional[IsolationClass]
     bootstrap_ready: Optional[bool]
     isolated: Optional[bool]
     seccomp: Optional[bool]
@@ -237,6 +270,10 @@ class ExecutionPolicy(TypedDict):
     private_rootfs: Optional[bool]
     dedicated_bootstrap: Optional[bool]
     limit_enforcement: Optional[LimitEnforcement]
+    runtime_version: Optional[str]
+    runtime_sha256: Optional[str]
+    rootfs_sha256: Optional[str]
+    config_sha256: Optional[str]
 
 
 class EventChainReceipt(TypedDict):
@@ -313,6 +350,8 @@ class Receipt(_RequiredReceipt, total=False):
     created_at_ms: int
     started_at_ms: Optional[int]
     backend: str
+    minimum_isolation: MinimumIsolation
+    isolation_class: IsolationClass
     bootstrap_ready: bool
     isolated: bool
     seccomp: bool
@@ -320,6 +359,10 @@ class Receipt(_RequiredReceipt, total=False):
     networking: Optional[Literal["disabled", "host"]]
     private_rootfs: bool
     dedicated_bootstrap: bool
+    runtime_version: Optional[str]
+    runtime_sha256: Optional[str]
+    rootfs_sha256: Optional[str]
+    config_sha256: Optional[str]
     evidence_complete: bool
     requested_limits: ReceiptLimits
     effective_limits: EffectiveLimits
@@ -395,6 +438,7 @@ class StreamTicket(TypedDict):
 
 class ExecutionCapabilities(TypedDict):
     backend: str
+    isolation_class: IsolationClass
     isolated: bool
     private_rootfs: bool
     dedicated_bootstrap: bool
@@ -407,6 +451,7 @@ class LimitCapabilities(TypedDict):
     wall_seconds_max: int
     cpu_seconds_max: int
     mem_mb_max: int
+    concurrent_mem_mb_max: int
     pids_max: int
     file_mb_max: int
     output_lines_max: int
@@ -626,6 +671,26 @@ class Coop:
         timeout: Optional[float] = None,
         idempotency_key: Optional[str] = None,
     ) -> Any:
+        value, _, _ = self._request_with_metadata(
+            method,
+            path,
+            payload,
+            query=query,
+            timeout=timeout,
+            idempotency_key=idempotency_key,
+        )
+        return value
+
+    def _request_with_metadata(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[Mapping[str, Any]] = None,
+        *,
+        query: Optional[Mapping[str, Union[str, int, None]]] = None,
+        timeout: Optional[float] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Tuple[Any, Mapping[str, str], Optional[int]]:
         data = (
             json.dumps(payload, separators=(",", ":")).encode("utf-8")
             if payload is not None
@@ -649,10 +714,18 @@ class Coop:
                 timeout=self.timeout if timeout is None else timeout,
             ) as response:
                 raw = response.read()
+                response_headers = cast(
+                    Mapping[str, str], getattr(response, "headers", {})
+                )
+                response_status = cast(Optional[int], getattr(response, "status", None))
                 if not raw:
-                    return None
+                    return None, response_headers, response_status
                 try:
-                    return json.loads(raw.decode("utf-8"))
+                    return (
+                        json.loads(raw.decode("utf-8")),
+                        response_headers,
+                        response_status,
+                    )
                 except (json.JSONDecodeError, UnicodeError) as exc:
                     raise CoopError(
                         "server returned invalid JSON",
@@ -741,7 +814,36 @@ class Coop:
         retry_backoff: float = 0.25,
         **limit_overrides: Union[int, bool],
     ) -> SubmitResponse:
-        """Submit a job, optionally retrying an ambiguous keyed request safely.
+        """Submit a job and return the compatibility response body."""
+
+        return self.submit_result(
+            language,
+            code,
+            stdin,
+            limits,
+            requirements=requirements,
+            idempotency_key=idempotency_key,
+            retry_ambiguous=retry_ambiguous,
+            max_ambiguous_retries=max_ambiguous_retries,
+            retry_backoff=retry_backoff,
+            **limit_overrides,
+        )["job"]
+
+    def submit_result(
+        self,
+        language: str,
+        code: str,
+        stdin: Optional[str] = None,
+        limits: Optional[LimitInput] = None,
+        *,
+        requirements: Optional[ExecutionRequirements] = None,
+        idempotency_key: Optional[str] = None,
+        retry_ambiguous: bool = False,
+        max_ambiguous_retries: int = 1,
+        retry_backoff: float = 0.25,
+        **limit_overrides: Union[int, bool],
+    ) -> SubmitResult:
+        """Submit a job with response metadata and optional ambiguous retry.
 
         Ambiguous retries are disabled by default. Opting in reuses one caller-
         supplied or generated key and assumes the target Coop server implements
@@ -754,11 +856,11 @@ class Coop:
             if (
                 not isinstance(key_value, str)
                 or not key_value
-                or len(key_value) > 255
+                or len(key_value) > 128
                 or any(ord(char) < 0x21 or ord(char) > 0x7E for char in key_value)
             ):
                 raise ValueError(
-                    "idempotency_key must contain 1-255 visible ASCII characters"
+                    "idempotency_key must contain 1-128 visible ASCII bytes"
                 )
             idempotency_key = key_value
         retry_value: Any = retry_ambiguous
@@ -796,9 +898,7 @@ class Coop:
                 raise TypeError(
                     "unknown requirement: " + ", ".join(sorted(unknown_requirements))
                 )
-            if "minimum_isolation" not in requirements_mapping:
-                raise ValueError("requirements.minimum_isolation is required")
-            minimum: Any = requirements_mapping.get("minimum_isolation")
+            minimum: Any = requirements_mapping.get("minimum_isolation", "none")
             allowed_isolation = {
                 "none",
                 "linux-shared-kernel",
@@ -815,15 +915,30 @@ class Coop:
         attempt = 0
         while True:
             try:
-                return cast(
-                    SubmitResponse,
-                    self._request(
-                        "POST",
-                        "/v1/jobs",
-                        spec,
-                        idempotency_key=idempotency_key,
-                    ),
+                value, headers, _ = self._request_with_metadata(
+                    "POST",
+                    "/v1/jobs",
+                    spec,
+                    idempotency_key=idempotency_key,
                 )
+                replayed_raw = headers.get("idempotency-replayed") or headers.get(
+                    "Idempotency-Replayed"
+                )
+                if replayed_raw is None:
+                    replayed = False
+                elif replayed_raw.lower() in {"true", "false"}:
+                    replayed = replayed_raw.lower() == "true"
+                else:
+                    raise CoopError(
+                        "server returned an invalid Idempotency-Replayed header",
+                        code="invalid_response",
+                    )
+                location = headers.get("location") or headers.get("Location")
+                return {
+                    "job": cast(SubmitResponse, value),
+                    "location": location,
+                    "idempotency_replayed": replayed,
+                }
             except CoopError as exc:
                 if idempotency_key is not None:
                     exc.idempotency_key = idempotency_key

@@ -13,13 +13,17 @@ export const JOB_STATUSES = [
 
 export type JobStatus = (typeof JOB_STATUSES)[number];
 export type Language = "python" | "node" | "bash";
-export type IsolationLevel =
-  | "none"
-  | "linux-shared-kernel"
-  | "gvisor-application-kernel"
-  | "wasm-capability"
-  | "hardware-vm"
-  | "confidential-vm";
+export const ISOLATION_CLASSES = [
+  "none",
+  "linux-shared-kernel",
+  "gvisor-application-kernel",
+  "wasm-capability",
+  "hardware-vm",
+  "confidential-vm",
+] as const;
+export type IsolationClass = (typeof ISOLATION_CLASSES)[number];
+/** @deprecated Use `IsolationClass`. */
+export type IsolationLevel = IsolationClass;
 export type EventKind =
   | "accepted"
   | "started"
@@ -40,7 +44,26 @@ export interface Limits {
 }
 
 export interface JobRequirements {
-  minimum_isolation: IsolationLevel;
+  minimum_isolation: IsolationClass;
+}
+
+/** Whether an observed provider class satisfies an atomic minimum requirement. */
+export function isolationSatisfies(
+  actual: IsolationClass,
+  minimum: IsolationClass,
+): boolean {
+  if (minimum === "none") return true;
+  if (minimum === "wasm-capability") return actual === "wasm-capability";
+  if (actual === "wasm-capability" || actual === "none") return false;
+  const processClasses: readonly IsolationClass[] = [
+    "linux-shared-kernel",
+    "gvisor-application-kernel",
+    "hardware-vm",
+    "confidential-vm",
+  ];
+  const actualRank = processClasses.indexOf(actual);
+  const minimumRank = processClasses.indexOf(minimum);
+  return minimumRank >= 0 && actualRank >= minimumRank;
 }
 
 export interface JobSpec {
@@ -67,8 +90,8 @@ export interface StoredJobSpec {
   code: string;
   stdin: string | null;
   limits: StoredLimits;
-  /** Absent on pre-v0.4 servers; null when no minimum was requested. */
-  requirements?: JobRequirements | null;
+  /** Absent on pre-v0.4 servers; v0.4 defaults this to `none`. */
+  requirements?: JobRequirements;
 }
 
 /** Controls actually enforced for an execution; null means not enforced. */
@@ -87,6 +110,10 @@ export interface EffectiveJobSpec {
   code: string;
   stdin: string | null;
   limits: EffectiveLimits;
+  /** Absent on pre-v0.4 execution evidence. */
+  requirements?: JobRequirements;
+  /** Null until the provider crosses its observed workload-ready boundary. */
+  isolation_class?: IsolationClass | null;
 }
 
 export interface LimitEnforcement {
@@ -105,12 +132,29 @@ export interface SubmitResponse {
   stream_ticket_url?: string;
 }
 
+/** Submission body plus typed response-header evidence. */
+export interface SubmitResult {
+  job: SubmitResponse;
+  /** Relative or absolute job URL from the HTTP Location header. */
+  location?: string;
+  /** True when the server replayed a prior identical Idempotency-Key request. */
+  idempotency_replayed: boolean;
+}
+
 export interface CancellationResponse {
-  /** Null only when adapting an empty cancellation response from a v0.1-v0.3 server. */
-  job: JobView | null;
+  job: JobView;
   cancellation_requested: boolean;
   already_terminal: boolean;
 }
+
+/** Normalized evidence for the empty 200 returned by v0.1-v0.3 servers. */
+export interface LegacyCancellationResponse {
+  job: null;
+  cancellation_requested: true;
+  already_terminal: false;
+}
+
+export type CancellationResult = CancellationResponse | LegacyCancellationResponse;
 
 export interface JobView {
   job_id: string;
@@ -126,6 +170,8 @@ export interface JobView {
 export interface ExecutionPolicy {
   /** Values are null for queued or migrated rows without execution evidence. */
   sandbox: string | null;
+  /** Absent on pre-v0.4 projections. */
+  isolation_class?: IsolationClass | null;
   bootstrap_ready: boolean | null;
   isolated: boolean | null;
   seccomp: boolean | null;
@@ -134,6 +180,11 @@ export interface ExecutionPolicy {
   private_rootfs: boolean | null;
   dedicated_bootstrap: boolean | null;
   limit_enforcement: LimitEnforcement | null;
+  /** Provider provenance is absent on pre-v0.4 or not-ready projections. */
+  runtime_version?: string | null;
+  runtime_sha256?: string | null;
+  rootfs_sha256?: string | null;
+  config_sha256?: string | null;
 }
 
 export interface JobDetail extends JobView {
@@ -239,11 +290,18 @@ export interface Receipt {
   dedicated_bootstrap?: boolean;
   evidence_complete?: boolean;
   requested_limits?: ReceiptLimits;
+  requirements?: JobRequirements;
+  minimum_isolation?: IsolationClass;
+  isolation_class?: IsolationClass;
   effective_limits?: EffectiveLimits;
   limit_enforcement?: LimitEnforcement;
   code_sha256?: string;
   stdin_sha256?: string;
   policy_sha256?: string;
+  runtime_version?: string | null;
+  runtime_sha256?: string | null;
+  rootfs_sha256?: string | null;
+  config_sha256?: string | null;
   resource_usage?: ResourceUsage | null;
   executor_output?: ExecutorOutputEvidence | null;
   output?: OutputEvidence;
@@ -276,41 +334,54 @@ export interface StreamTicket {
   expires_at_ms: number;
 }
 
+export interface ExecutionCapabilities {
+  backend: string;
+  isolation_class: IsolationClass;
+  isolated: boolean;
+  private_rootfs: boolean;
+  dedicated_bootstrap: boolean;
+  seccomp: boolean;
+  networking: "disabled" | "host";
+  limit_enforcement: LimitEnforcement;
+}
+
+export interface LimitCapabilities {
+  wall_seconds_max: number;
+  cpu_seconds_max: number;
+  mem_mb_max: number;
+  concurrent_mem_mb_max: number;
+  pids_max: number;
+  file_mb_max: number;
+  output_lines_max: number;
+  output_bytes_per_stream_max: number;
+  output_record_bytes_max: number;
+  code_bytes_max: number;
+  stdin_bytes_max: number;
+}
+
+export interface FeatureCapabilities {
+  result_wait: boolean;
+  cancellation: boolean;
+  event_cursors: boolean;
+  stream_tickets: boolean;
+  receipts: boolean;
+}
+
 export interface Capabilities {
   version: string;
   languages: string[];
-  execution: {
-    backend: string;
-    isolated: boolean;
-    private_rootfs: boolean;
-    dedicated_bootstrap: boolean;
-    seccomp: boolean;
-    networking: "disabled" | "host";
-    limit_enforcement: LimitEnforcement;
-  };
-  limits: {
-    wall_seconds_max: number;
-    cpu_seconds_max: number;
-    mem_mb_max: number;
-    pids_max: number;
-    file_mb_max: number;
-    output_lines_max: number;
-    output_bytes_per_stream_max: number;
-    output_record_bytes_max: number;
-    code_bytes_max: number;
-    stdin_bytes_max: number;
-  };
-  features: {
-    result_wait: boolean;
-    cancellation: boolean;
-    event_cursors: boolean;
-    stream_tickets: boolean;
-    receipts: boolean;
-  };
+  execution: ExecutionCapabilities;
+  limits: LimitCapabilities;
+  features: FeatureCapabilities;
 }
 
 export interface WhoAmI {
   tenant: string;
+  principal_id: string;
+  credential_id: string | null;
+  auth_method: string;
+  scopes: string[];
+  expires_at_ms: number | null;
 }
 
 export interface RequestOptions {
@@ -324,7 +395,7 @@ export interface SubmitOptions extends RequestOptions {
   requirements?: JobRequirements | undefined;
   /**
    * Stable key for safely reconciling an ambiguously acknowledged submission.
-   * The value must contain 1-255 visible ASCII characters.
+   * The value must contain 1-128 visible ASCII bytes.
    */
   idempotencyKey?: string | undefined;
   /**
@@ -474,8 +545,8 @@ function throwIfAborted(signal?: AbortSignal): void {
 }
 
 function validateIdempotencyKey(value: string): string {
-  if (value.length < 1 || value.length > 255 || !/^[\x21-\x7e]+$/.test(value)) {
-    throw new TypeError("idempotencyKey must contain 1-255 visible ASCII characters");
+  if (value.length < 1 || value.length > 128 || !/^[\x21-\x7e]+$/.test(value)) {
+    throw new TypeError("idempotencyKey must contain 1-128 visible ASCII bytes");
   }
   return value;
 }
@@ -566,6 +637,7 @@ async function messageText(value: unknown): Promise<string> {
 interface RequestResult<T> {
   data: T;
   status: number;
+  headers: Headers;
 }
 
 interface RequestPolicy {
@@ -717,9 +789,15 @@ export class Coop {
         });
       }
       if (!response.ok) throw parseHttpError(response.status, text, response.headers);
-      if (!text) return { data: undefined as T, status: response.status };
+      if (!text) {
+        return { data: undefined as T, status: response.status, headers: response.headers };
+      }
       try {
-        return { data: JSON.parse(text) as T, status: response.status };
+        return {
+          data: JSON.parse(text) as T,
+          status: response.status,
+          headers: response.headers,
+        };
       } catch (cause) {
         throw new CoopError("server returned invalid JSON", {
           status: response.status,
@@ -750,6 +828,14 @@ export class Coop {
     code: string,
     options: SubmitOptions = {},
   ): Promise<SubmitResponse> {
+    return (await this.submitResult(language, code, options)).job;
+  }
+
+  async submitResult(
+    language: Language | (string & {}),
+    code: string,
+    options: SubmitOptions = {},
+  ): Promise<SubmitResult> {
     const {
       signal,
       timeoutMs,
@@ -780,7 +866,7 @@ export class Coop {
     const attempts = retryAmbiguous ? 2 : 1;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        return await this.request(
+        const response = await this.requestResult<SubmitResponse>(
           "POST",
           "/v1/jobs",
           spec,
@@ -788,6 +874,23 @@ export class Coop {
           undefined,
           policy,
         );
+        const replayedHeader = response.headers.get("idempotency-replayed");
+        if (
+          replayedHeader !== null &&
+          replayedHeader !== "true" &&
+          replayedHeader !== "false"
+        ) {
+          throw new CoopError("invalid Idempotency-Replayed response header", {
+            status: response.status,
+            code: "invalid_response",
+          });
+        }
+        const location = response.headers.get("location");
+        return {
+          job: response.data,
+          idempotency_replayed: replayedHeader === "true",
+          ...(location === null ? {} : { location }),
+        };
       } catch (error) {
         if (attempt + 1 < attempts && isAmbiguousTransportFailure(error)) {
           if (signal?.aborted) {
@@ -813,7 +916,7 @@ export class Coop {
   async cancelResult(
     jobId: string,
     options: RequestOptions = {},
-  ): Promise<CancellationResponse> {
+  ): Promise<CancellationResult> {
     const result = await this.requestResult<CancellationResponse | undefined>(
       "DELETE",
       this.jobPath(jobId),

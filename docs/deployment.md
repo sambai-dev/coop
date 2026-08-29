@@ -44,14 +44,43 @@ To repeat the full posture and canary gate without rebuilding, extract the key
 into `COOP_CLIENT_KEY` through your secret manager and run:
 
 ```bash
-COOP_CLIENT_KEY="$key" python3 scripts/verify-production.py
+COOP_CLIENT_KEY="$key" \
+COOP_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel \
+  python3 scripts/verify-production.py
 ```
 
 The verifier permits plain HTTP only on loopback. Set `COOP_VERIFY_BASE_URL` to
 an HTTPS endpoint for remote ingress and `COOP_VERIFY_LANGUAGES` to a
 comma-separated subset when the deployment intentionally disables a runtime.
+`COOP_VERIFY_MINIMUM_ISOLATION` accepts the API's exact isolation-class values;
+it defaults to `linux-shared-kernel`. That minimum also accepts gVisor,
+hardware-VM, and confidential-VM providers. Set it to
+`gvisor-application-kernel`, `hardware-vm`, or `confidential-vm` when the
+deployment contract requires that stronger class specifically. Wasm is a
+separate capability branch and does not satisfy a Linux/VM minimum.
 
-Before admitting jobs, require `execution.backend` to be `namespaces+cgroups-v2+private-rootfs`, `isolated`, `private_rootfs`, `dedicated_bootstrap`, and `seccomp` to be true, `execution.networking` to be `disabled`, every `execution.limit_enforcement` flag to be true, `storage_ready` to be true, and `scheduler.shutting_down` to be false. Then run one canary in each enabled language and require its terminal receipt to report `bootstrap_ready: true`, `isolated: true`, `private_rootfs: true`, `dedicated_bootstrap: true`, `seccomp: true`, disabled networking, and all five limit-enforcement flags. Startup status describes configured capability; the receipt proves the per-job ready boundary was observed.
+To exercise the bundled Python SDK and MCP adapter against the same live
+server—including keyed replay, typed cancellation, atomic minimum isolation,
+and terminal isolation evidence—run:
+
+```bash
+PYTHONPATH=sdks/python \
+COOP_CLIENT_KEY="$key" \
+COOP_VERIFY_BASE_URL=http://127.0.0.1:7300 \
+COOP_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel \
+  python3 scripts/verify-python-adapter.py
+```
+
+Before admitting jobs, compare `execution.isolation_class` with the configured
+minimum using the API's satisfaction order, require disabled networking and all
+five limit-enforcement flags for isolated process providers, require
+`storage_ready: true`, and require `scheduler.shutting_down: false`. Namespace
+deployments must additionally report the private rootfs, dedicated bootstrap,
+and Coop seccomp filter. gVisor deliberately reports `seccomp: false` for the
+namespace-guest filter; its terminal policy and receipt must instead carry the
+reviewed runtime, rootfs, and OCI-config SHA-256 digests. The verifier submits
+the minimum atomically with every canary and confirms the requested, effective,
+policy, and receipt isolation records all agree.
 
 The Compose service is privileged because the in-tree backend creates namespaces, mounts, and cgroups. On Linux, a privileged-container compromise is effectively a host compromise. Run this only inside the dedicated VM; never add the Docker socket, cloud credentials, home directories, or unrelated volumes.
 
@@ -193,4 +222,12 @@ The Apple-silicon macOS and x86_64 Windows archives run the local-development su
 
 ## gVisor and other external runtimes
 
-Do not assume that merely running the whole Coop container under gVisor creates per-job tenant separation inside that container. A future backend must create a distinct OCI workload per job, provide a clean rootfs, wire cancellation and resource policy, and report runtime provenance into the receipt. Until that integration exists, the status endpoint will not claim a gVisor boundary.
+The integrated gVisor provider creates one reviewed `runsc` OCI workload per
+job. Its capability class is `gvisor-application-kernel`; it must report
+disabled networking and all limit controls, while each terminal receipt binds
+the exact runtime, private-rootfs manifest, and generated OCI configuration by
+SHA-256. It does not reuse the namespace backend's guest seccomp claim. Run the
+verifier with `COOP_VERIFY_MINIMUM_ISOLATION=gvisor-application-kernel` when
+gVisor is the required production contract. Merely placing the outer Coop
+service inside an unrelated gVisor container still does not create this
+per-job boundary.

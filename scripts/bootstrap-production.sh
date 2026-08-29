@@ -53,6 +53,7 @@ docker compose up --detach --wait
 
 COOP_CLIENT_KEY="$key" \
 COOP_VERIFY_BASE_URL="${COOP_VERIFY_BASE_URL:-http://127.0.0.1:7300}" \
+COOP_VERIFY_MINIMUM_ISOLATION="${COOP_VERIFY_MINIMUM_ISOLATION:-linux-shared-kernel}" \
 python3 scripts/verify-production.py
 
 echo "Coop is running and verified. The agent-a key remains only in .env." >&2

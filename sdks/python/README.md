@@ -34,7 +34,12 @@ coop-mcp
 
 Normally an MCP host launches the command. Use the [Hermes, OpenClaw, and
 generic host templates](../../integrations/README.md), and set
-`COOP_MCP_REQUIRE_ISOLATION=true` in production.
+`COOP_MCP_REQUIRE_ISOLATION=true` in production. That compatibility switch
+requires at least `linux-shared-kernel`; use `COOP_MCP_MINIMUM_ISOLATION` for an
+exact class name such as `gvisor-application-kernel` or `hardware-vm`. Coop
+checks the minimum atomically at submission and the adapter validates the
+terminal observed `isolation_class` without assuming namespace-specific
+rootfs or seccomp details.
 
 ```python
 from coop import Coop, Limits
@@ -53,19 +58,26 @@ result = client.result(job["job_id"], timeout=60)
 print(result["status"], result["stdout"])
 ```
 
+Pass `requirements={"minimum_isolation": "linux-shared-kernel"}` to enforce an
+execution boundary at admission. `submit_result()` additively exposes the
+response `Location` and `Idempotency-Replayed` metadata. Idempotency keys are
+1–128 visible ASCII bytes; ambiguous retries remain opt-in and reuse one key.
+
 The v0.2 client obtains a one-use stream ticket, so API keys do not appear in
 WebSocket URLs. The legacy v0.1 query-key fallback is disabled by default
 because URLs leak into logs and history. Enable it only for a trusted legacy
 server with `allow_legacy_query_key=True`; structured v0.2 errors never trigger
 that fallback.
 
-`CoopError` exposes `status`, `code`, `request_id`, `retryable`, and
-`retry_after`. Transport and invalid-response errors use the same error type.
+`CoopError` exposes `status`, `code`, `request_id`, `retryable`, `retry_after`,
+and the submission `idempotency_key` when relevant. Transport and
+invalid-response errors use the same error type.
 
 `submit()` accepts the sparse `JobSpec` shape, while `get()` and `wait()`
 return `JobDetail`. The requested `StoredJobSpec` is complete.
 `EffectiveJobSpec` uses `EffectiveLimits`: each control can be `None` when it
-was not enforced, and `LimitEnforcement` supplies the explicit booleans. The
+was not enforced, `isolation_class` is runtime-observed evidence, and
+`LimitEnforcement` supplies the explicit booleans. The
 whole effective spec and policy fields are nullable when a queued, migrated,
 or restart-recovered row has no execution evidence. `Receipt`,
 `EventChainReceipt`, `OutputEvidence`, `ExecutorOutputEvidence`,

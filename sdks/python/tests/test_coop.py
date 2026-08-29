@@ -5,13 +5,14 @@ import unittest
 import urllib.error
 import urllib.parse
 
-from coop import Coop, CoopError, Limits, _SameOriginRedirect
+from coop import Coop, CoopError, Limits, _SameOriginRedirect, isolation_satisfies
 
 
 class Response:
-    def __init__(self, value, status=200):
+    def __init__(self, value, status=200, headers=None):
         self.body = json.dumps(value).encode() if value is not None else b""
         self.status = status
+        self.headers = headers or {}
 
     def __enter__(self):
         return self
@@ -35,6 +36,8 @@ class QueueOpener:
         value = self.values.pop(0)
         if isinstance(value, Exception):
             raise value
+        if isinstance(value, Response):
+            return value
         return Response(value)
 
 
@@ -51,6 +54,18 @@ class Socket:
 
 
 class CoopTests(unittest.TestCase):
+    def test_isolation_satisfaction_matches_the_server_lattice(self):
+        self.assertTrue(
+            isolation_satisfies("gvisor-application-kernel", "linux-shared-kernel")
+        )
+        self.assertTrue(isolation_satisfies("confidential-vm", "hardware-vm"))
+        self.assertFalse(
+            isolation_satisfies("linux-shared-kernel", "gvisor-application-kernel")
+        )
+        self.assertTrue(isolation_satisfies("wasm-capability", "wasm-capability"))
+        self.assertFalse(isolation_satisfies("hardware-vm", "wasm-capability"))
+        self.assertFalse(isolation_satisfies("wasm-capability", "linux-shared-kernel"))
+
     def test_truncated_response_is_a_retryable_transport_error(self):
         class TruncatedResponse(Response):
             def __init__(self):
@@ -131,10 +146,13 @@ class CoopTests(unittest.TestCase):
             body["requirements"], {"minimum_isolation": "linux-shared-kernel"}
         )
 
-    def test_submit_rejects_incomplete_execution_requirements_before_transport(self):
-        client = Coop("https://example.test", "secret", opener=QueueOpener())
-        with self.assertRaisesRegex(ValueError, "minimum_isolation is required"):
-            client.submit("python", "pass", requirements={})
+    def test_submit_accepts_empty_requirements_as_the_server_default(self):
+        opener = QueueOpener(
+            {"job_id": "j", "status": "queued", "stream_url": "/s", "replay_url": "/r"}
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+        client.submit("python", "pass", requirements={})
+        self.assertEqual(json.loads(opener.requests[0].data)["requirements"], {})
 
     def test_submit_uses_one_idempotency_key_for_ambiguous_retries(self):
         opener = QueueOpener(
@@ -161,6 +179,40 @@ class CoopTests(unittest.TestCase):
         self.assertEqual(opener.requests[0].data, opener.requests[1].data)
         for request in opener.requests:
             self.assertEqual(request.get_header("Idempotency-key"), "submit-123")
+
+    def test_submit_result_exposes_location_and_replay_metadata(self):
+        body = {
+            "job_id": "j",
+            "status": "queued",
+            "stream_url": "/s",
+            "replay_url": "/r",
+        }
+        opener = QueueOpener(
+            Response(
+                body,
+                status=201,
+                headers={
+                    "Location": "/v1/jobs/j",
+                    "Idempotency-Replayed": "false",
+                },
+            ),
+            Response(
+                body,
+                status=201,
+                headers={
+                    "Location": "/v1/jobs/j",
+                    "Idempotency-Replayed": "true",
+                },
+            ),
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+        first = client.submit_result("python", "pass", idempotency_key="submit-1")
+        replay = client.submit_result("python", "pass", idempotency_key="submit-1")
+        self.assertEqual(first["job"]["job_id"], "j")
+        self.assertEqual(first["location"], "/v1/jobs/j")
+        self.assertFalse(first["idempotency_replayed"])
+        self.assertEqual(replay["job"]["job_id"], "j")
+        self.assertTrue(replay["idempotency_replayed"])
 
     def test_submit_does_not_retry_ambiguity_without_explicit_opt_in(self):
         opener = QueueOpener(
@@ -189,6 +241,7 @@ class CoopTests(unittest.TestCase):
         client = Coop("https://example.test", "secret", opener=QueueOpener())
         for operation in (
             lambda: client.submit("python", "pass", idempotency_key="bad\nkey"),
+            lambda: client.submit("python", "pass", idempotency_key="k" * 129),
             lambda: client.submit(
                 "python", "pass", idempotency_key="key", max_ambiguous_retries=11
             ),
@@ -553,10 +606,18 @@ class CoopTests(unittest.TestCase):
                 "cancellation_requested": True,
                 "already_terminal": False,
             },
+            {
+                "job": {"job_id": "j", "status": "succeeded"},
+                "cancellation_requested": False,
+                "already_terminal": True,
+            },
         )
         client = Coop("https://example.test", "secret", opener=opener)
         self.assertEqual(client.cancel_result("j")["job"], job)
         self.assertEqual(client.cancel("j"), job)
+        terminal = client.cancel_result("j")
+        self.assertFalse(terminal["cancellation_requested"])
+        self.assertTrue(terminal["already_terminal"])
 
     def test_whoami_and_capabilities_are_typed_endpoints(self):
         opener = QueueOpener(
@@ -564,14 +625,27 @@ class CoopTests(unittest.TestCase):
             {
                 "version": "0.2.0",
                 "languages": ["python"],
-                "execution": {"backend": "gvisor", "isolated": True},
-                "limits": {"wall_seconds_max": 300},
+                "execution": {
+                    "backend": "gvisor",
+                    "isolation_class": "gvisor-application-kernel",
+                    "isolated": True,
+                },
+                "limits": {
+                    "wall_seconds_max": 300,
+                    "concurrent_mem_mb_max": 8192,
+                },
                 "features": {"stream_tickets": True},
             },
         )
         client = Coop("https://example.test", "secret", opener=opener)
         self.assertEqual(client.whoami()["tenant"], "acme")
-        self.assertTrue(client.capabilities()["features"]["stream_tickets"])
+        capabilities = client.capabilities()
+        self.assertTrue(capabilities["features"]["stream_tickets"])
+        self.assertEqual(
+            capabilities["execution"]["isolation_class"],
+            "gvisor-application-kernel",
+        )
+        self.assertEqual(capabilities["limits"]["concurrent_mem_mb_max"], 8192)
         self.assertEqual(opener.requests[0].full_url, "https://example.test/v1/whoami")
 
     def test_job_detail_distinguishes_unknown_policy_and_output_evidence(self):
@@ -587,6 +661,7 @@ class CoopTests(unittest.TestCase):
                 "max_file_mb": 16,
                 "allow_network": False,
             },
+            "requirements": {"minimum_isolation": "linux-shared-kernel"},
         }
         enforcement = {
             "wall_seconds": True,
@@ -601,6 +676,7 @@ class CoopTests(unittest.TestCase):
                 **stored_spec["limits"],
                 "allow_network": False,
             },
+            "isolation_class": "linux-shared-kernel",
         }
         base = {
             "tenant": "acme",
@@ -619,6 +695,7 @@ class CoopTests(unittest.TestCase):
             "effective_spec": None,
             "execution_policy": {
                 "sandbox": None,
+                "isolation_class": None,
                 "bootstrap_ready": None,
                 "isolated": None,
                 "seccomp": None,
@@ -627,6 +704,10 @@ class CoopTests(unittest.TestCase):
                 "private_rootfs": None,
                 "dedicated_bootstrap": None,
                 "limit_enforcement": None,
+                "runtime_version": None,
+                "runtime_sha256": None,
+                "rootfs_sha256": None,
+                "config_sha256": None,
             },
             "receipt": None,
         }
@@ -637,6 +718,7 @@ class CoopTests(unittest.TestCase):
             "effective_spec": effective_spec,
             "execution_policy": {
                 "sandbox": "namespaces+cgroups-v2+private-rootfs",
+                "isolation_class": "linux-shared-kernel",
                 "bootstrap_ready": True,
                 "isolated": True,
                 "seccomp": True,
@@ -645,6 +727,10 @@ class CoopTests(unittest.TestCase):
                 "private_rootfs": True,
                 "dedicated_bootstrap": True,
                 "limit_enforcement": enforcement,
+                "runtime_version": "python 3",
+                "runtime_sha256": "1" * 64,
+                "rootfs_sha256": "2" * 64,
+                "config_sha256": "3" * 64,
             },
             "receipt": {
                 "version": 1,
@@ -664,6 +750,8 @@ class CoopTests(unittest.TestCase):
                 },
                 "receipt_sha256": "b" * 64,
                 "backend": "namespaces+cgroups-v2+private-rootfs",
+                "minimum_isolation": "linux-shared-kernel",
+                "isolation_class": "linux-shared-kernel",
                 "bootstrap_ready": True,
                 "isolated": True,
                 "seccomp": True,
@@ -671,6 +759,10 @@ class CoopTests(unittest.TestCase):
                 "networking": "disabled",
                 "private_rootfs": True,
                 "dedicated_bootstrap": True,
+                "runtime_version": "python 3",
+                "runtime_sha256": "1" * 64,
+                "rootfs_sha256": "2" * 64,
+                "config_sha256": "3" * 64,
                 "effective_limits": effective_spec["limits"],
                 "limit_enforcement": enforcement,
                 "output": {
@@ -741,6 +833,12 @@ class CoopTests(unittest.TestCase):
 
         self.assertIsNone(queued["effective_spec"])
         self.assertIsNone(queued["execution_policy"]["sandbox"])
+        self.assertEqual(
+            complete["effective_spec"]["isolation_class"], "linux-shared-kernel"
+        )
+        self.assertEqual(
+            complete["receipt"]["minimum_isolation"], "linux-shared-kernel"
+        )
         self.assertEqual(
             complete["receipt"]["output"]["encoding"],
             "utf8-event-lines-joined-by-lf-no-trailing-lf",

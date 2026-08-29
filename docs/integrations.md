@@ -48,9 +48,10 @@ policy; Coop can only govern jobs that reach its API.
 
 `coop_run_code` submits once and never transparently retries submission. If its
 wait budget expires, it returns `complete: false` with the durable `job_id`.
-Call `coop_job_result` or `coop_cancel_job` with that ID. Transport failures
-during submission remain ambiguous because the server may have committed the
-job before the connection failed.
+Call `coop_job_result` or `coop_cancel_job` with that ID. Direct SDK callers can
+use an `Idempotency-Key` (maximum 128 visible ASCII bytes) and explicitly opt
+into one ambiguous transport retry; the same key and canonical job spec then
+resolve to the original job.
 
 Tool results include both MCP structured content and the same JSON serialized
 as text for older hosts. Execution failures such as a nonzero exit, timeout,
@@ -60,12 +61,15 @@ policy failures use MCP `isError: true`.
 
 ## Production checklist
 
-- run Coop's namespace backend only on the dedicated Linux x86_64 VM described
-  in [deployment](deployment.md)
+- run a reviewed provider on the dedicated Linux x86_64 VM described in
+  [deployment](deployment.md)
 - use a private or TLS Coop endpoint and an integration-specific tenant key
-- set `COOP_MCP_REQUIRE_ISOLATION=true`
+- set `COOP_MCP_REQUIRE_ISOLATION=true` for a minimum
+  `linux-shared-kernel` boundary, or set `COOP_MCP_MINIMUM_ISOLATION` to the
+  exact stronger class the workflow requires
 - restrict `COOP_MCP_ALLOWED_LANGUAGES` and adapter ceilings
 - set the MCP host timeout above the intended Coop wait budget
 - disable alternate execution tools when Coop is mandatory
 - probe the MCP server, then run a canary through the actual harness
-- retain the job ID in the parent agent trace and inspect its terminal receipt
+- retain the job ID in the parent agent trace and inspect the terminal
+  `isolation_class` and receipt evidence

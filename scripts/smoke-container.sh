@@ -69,6 +69,13 @@ test "$ready" = true
 COOP_CLIENT_KEY="$key" \
 COOP_VERIFY_BASE_URL="$base" \
 COOP_VERIFY_LANGUAGES=python,node,bash \
+COOP_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel \
 python3 scripts/verify-production.py
+
+COOP_CLIENT_KEY="$key" \
+COOP_VERIFY_BASE_URL="$base" \
+COOP_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel \
+PYTHONPATH=sdks/python \
+python3 scripts/verify-python-adapter.py
 
 docker stop --time 45 "$name" >/dev/null

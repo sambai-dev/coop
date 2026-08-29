@@ -13,6 +13,17 @@ import urllib.request
 from typing import Any, Dict, List, Mapping, Optional, cast
 
 MAX_JSON_BYTES = 4 * 1024 * 1024
+ISOLATION_CLASSES = frozenset(
+    {
+        "none",
+        "linux-shared-kernel",
+        "gvisor-application-kernel",
+        "wasm-capability",
+        "hardware-vm",
+        "confidential-vm",
+    }
+)
+DEFAULT_MINIMUM_ISOLATION = "linux-shared-kernel"
 CANARIES = {
     "python": (
         'print("coop-production-canary-python")',
@@ -40,11 +51,13 @@ class Api:
             raise VerificationError("COOP_VERIFY_BASE_URL must be an absolute HTTP URL")
         if parts.username or parts.password or parts.query or parts.fragment:
             raise VerificationError(
-                "COOP_VERIFY_BASE_URL must not contain credentials, a query, or fragment"
+                "COOP_VERIFY_BASE_URL must not contain credentials, a query, "
+                "or fragment"
             )
         if parts.scheme == "http" and parts.hostname not in {"127.0.0.1", "localhost"}:
             raise VerificationError(
-                "plain HTTP verification is allowed only on loopback; use HTTPS remotely"
+                "plain HTTP verification is allowed only on loopback; use HTTPS "
+                "remotely"
             )
         if not key.strip():
             raise VerificationError("COOP_CLIENT_KEY is required")
@@ -105,31 +118,128 @@ def require(condition: bool, message: str) -> None:
         raise VerificationError(message)
 
 
-def require_isolated_execution(document: Mapping[str, Any], label: str) -> None:
+def parse_minimum_isolation(raw: str) -> str:
+    value = raw.strip()
     require(
-        document.get("backend") == "namespaces+cgroups-v2+private-rootfs",
-        f"{label}: unexpected backend",
+        value in ISOLATION_CLASSES,
+        "COOP_VERIFY_MINIMUM_ISOLATION must be one of "
+        + ",".join(sorted(ISOLATION_CLASSES)),
     )
-    for field in ["isolated", "private_rootfs", "dedicated_bootstrap", "seccomp"]:
-        require(document.get(field) is True, f"{label}: {field} is not true")
+    return value
+
+
+def isolation_satisfies(observed: str, minimum: str) -> bool:
+    if minimum == "none":
+        return observed in ISOLATION_CLASSES
+    if minimum == "wasm-capability":
+        return observed == "wasm-capability"
+    process_classes = [
+        "linux-shared-kernel",
+        "gvisor-application-kernel",
+        "hardware-vm",
+        "confidential-vm",
+    ]
+    if minimum not in process_classes or observed not in process_classes:
+        return False
+    return process_classes.index(observed) >= process_classes.index(minimum)
+
+
+def require_sha256(value: Any, message: str) -> None:
     require(
-        document.get("networking") == "disabled", f"{label}: networking is not disabled"
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value),
+        message,
     )
+
+
+def require_limit_enforcement(document: Mapping[str, Any], label: str) -> None:
     enforcement = document.get("limit_enforcement")
     require(isinstance(enforcement, dict), f"{label}: limit enforcement is missing")
     for field in ["wall_seconds", "cpu_seconds", "mem_mb", "max_pids", "max_file_mb"]:
         require(enforcement.get(field) is True, f"{label}: {field} is not enforced")
 
 
-def verify_receipt(detail: Mapping[str, Any]) -> None:
+def require_execution(
+    document: Mapping[str, Any],
+    label: str,
+    minimum_isolation: str,
+    *,
+    terminal_evidence: bool = False,
+) -> str:
+    observed = document.get("isolation_class")
+    require(
+        isinstance(observed, str) and observed in ISOLATION_CLASSES,
+        f"{label}: isolation_class is missing or invalid",
+    )
+    require(
+        isolation_satisfies(observed, minimum_isolation),
+        f"{label}: isolation class {observed!r} does not satisfy {minimum_isolation!r}",
+    )
+
+    if observed == "none":
+        require(
+            document.get("isolated") is False, f"{label}: none class claimed isolation"
+        )
+        require(
+            document.get("networking") == "host",
+            f"{label}: none class hid host networking",
+        )
+        return observed
+
+    require(document.get("isolated") is True, f"{label}: isolated is not true")
+    require(
+        document.get("networking") == "disabled", f"{label}: networking is not disabled"
+    )
+    if "network_allowed" in document:
+        require(
+            document.get("network_allowed") is False, f"{label}: networking was allowed"
+        )
+    require_limit_enforcement(document, label)
+
+    backend = document.get("backend")
+    if observed == "linux-shared-kernel":
+        require(
+            backend == "namespaces+cgroups-v2+private-rootfs",
+            f"{label}: namespace class has an unexpected backend",
+        )
+        for field in ["private_rootfs", "dedicated_bootstrap", "seccomp"]:
+            require(document.get(field) is True, f"{label}: {field} is not true")
+    elif observed == "gvisor-application-kernel":
+        require(
+            backend == "gvisor-oci", f"{label}: gVisor class has an unexpected backend"
+        )
+        require(
+            document.get("private_rootfs") is True,
+            f"{label}: private_rootfs is not true",
+        )
+        require(
+            document.get("dedicated_bootstrap") is True,
+            f"{label}: dedicated_bootstrap is not true",
+        )
+        if terminal_evidence:
+            for field in ["runtime_sha256", "rootfs_sha256", "config_sha256"]:
+                require_sha256(document.get(field), f"{label}: invalid {field}")
+    return observed
+
+
+def verify_receipt(detail: Mapping[str, Any], minimum_isolation: str) -> None:
     receipt = detail.get("receipt")
     require(isinstance(receipt, dict), "terminal detail has no receipt")
     require(
         receipt.get("bootstrap_ready") is True,
         "receipt did not observe bootstrap readiness",
     )
-    require_isolated_execution(receipt, "receipt")
-    require(receipt.get("network_allowed") is False, "receipt allowed networking")
+    require(
+        receipt.get("minimum_isolation") == minimum_isolation,
+        "receipt minimum isolation differs from the submitted requirement",
+    )
+    require_execution(
+        receipt,
+        "receipt",
+        minimum_isolation,
+        terminal_evidence=True,
+    )
     require(receipt.get("evidence_complete") is True, "receipt evidence is incomplete")
     chain = receipt.get("event_chain")
     require(
@@ -148,10 +258,7 @@ def verify_receipt(detail: Mapping[str, Any]) -> None:
     require(isinstance(output, dict), "receipt output evidence is missing")
     require(output.get("truncated") is False, "canary output was truncated")
     for field in ["stdout_sha256", "stderr_sha256"]:
-        require(
-            isinstance(output.get(field), str) and len(output[field]) == 64,
-            f"invalid {field}",
-        )
+        require_sha256(output.get(field), f"invalid {field}")
     recorded = receipt.get("receipt_sha256")
     require(
         recorded == detail.get("receipt_sha256"), "detail and receipt hashes differ"
@@ -167,7 +274,7 @@ def verify_receipt(detail: Mapping[str, Any]) -> None:
     )
 
 
-def verify_canary(api: Api, language: str) -> str:
+def verify_canary(api: Api, language: str, minimum_isolation: str) -> str:
     code, expected = CANARIES[language]
     submitted = api.request(
         "POST",
@@ -175,6 +282,7 @@ def verify_canary(api: Api, language: str) -> str:
         {
             "language": language,
             "code": code,
+            "requirements": {"minimum_isolation": minimum_isolation},
             "limits": {
                 "wall_seconds": 10,
                 "mem_mb": 128,
@@ -200,19 +308,34 @@ def verify_canary(api: Api, language: str) -> str:
     policy = detail.get("execution_policy")
     require(isinstance(policy, dict), f"{language}: execution policy is missing")
     require(
-        policy.get("sandbox") == "namespaces+cgroups-v2+private-rootfs",
-        f"{language}: unexpected observed sandbox",
-    )
-    require(
         policy.get("bootstrap_ready") is True, f"{language}: bootstrap was not ready"
     )
-    require_isolated_execution(
-        {"backend": policy.get("sandbox"), **policy}, f"{language} policy"
+    observed_policy = {"backend": policy.get("sandbox"), **policy}
+    require_execution(
+        observed_policy,
+        f"{language} policy",
+        minimum_isolation,
+        terminal_evidence=True,
     )
+    requested = detail.get("requested_spec")
+    require(isinstance(requested, dict), f"{language}: requested spec is missing")
     require(
-        policy.get("network_allowed") is False, f"{language}: networking was allowed"
+        requested.get("requirements") == {"minimum_isolation": minimum_isolation},
+        f"{language}: requested minimum isolation was not retained",
     )
-    verify_receipt(detail)
+    effective = detail.get("effective_spec")
+    require(isinstance(effective, dict), f"{language}: effective spec is missing")
+    require(
+        effective.get("requirements") == {"minimum_isolation": minimum_isolation},
+        f"{language}: effective minimum isolation differs",
+    )
+    effective_class = effective.get("isolation_class")
+    require(
+        isinstance(effective_class, str)
+        and isolation_satisfies(effective_class, minimum_isolation),
+        f"{language}: effective isolation class does not satisfy the minimum",
+    )
+    verify_receipt(detail, minimum_isolation)
     return job_id
 
 
@@ -235,10 +358,13 @@ def main() -> None:
         languages = parse_languages(
             os.environ.get("COOP_VERIFY_LANGUAGES", "python,node,bash")
         )
+        minimum_isolation = parse_minimum_isolation(
+            os.environ.get("COOP_VERIFY_MINIMUM_ISOLATION", DEFAULT_MINIMUM_ISOLATION)
+        )
         status = api.request("GET", "/v1/status")
         execution = status.get("execution")
         require(isinstance(execution, dict), "status execution posture is missing")
-        require_isolated_execution(execution, "status")
+        observed_class = require_execution(execution, "status", minimum_isolation)
         require(status.get("storage_ready") is True, "storage is not ready")
         scheduler = status.get("scheduler")
         require(
@@ -256,20 +382,31 @@ def main() -> None:
             isinstance(capability_execution, dict),
             "capability execution posture is missing",
         )
-        require_isolated_execution(capability_execution, "capabilities")
+        capability_class = require_execution(
+            capability_execution, "capabilities", minimum_isolation
+        )
+        require(
+            capability_class == observed_class,
+            "status and capability isolation classes differ",
+        )
         features = capabilities.get("features")
         require(
             isinstance(features, dict) and features.get("receipts") is True,
             "receipt capability is unavailable",
         )
 
-        jobs = {language: verify_canary(api, language) for language in languages}
+        jobs = {
+            language: verify_canary(api, language, minimum_isolation)
+            for language in languages
+        }
         print(
             json.dumps(
                 {
                     "ok": True,
                     "version": status.get("version"),
                     "backend": execution.get("backend"),
+                    "isolation_class": observed_class,
+                    "minimum_isolation": minimum_isolation,
                     "languages": languages,
                     "canary_job_ids": jobs,
                 },
