@@ -1,4 +1,4 @@
-use crate::auth::Tenant;
+use crate::auth::AuthContext;
 use crate::bus::WireEvent;
 use crate::AppState;
 use axum::extract::rejection::JsonRejection;
@@ -6,7 +6,7 @@ use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpg
 use axum::extract::{DefaultBodyLimit, FromRequest, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Version};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use coop_store::{JobCursor, JobRow, JobSummary, ListJobsQuery};
 use coop_types::{
@@ -141,6 +141,11 @@ pub struct StreamTicketResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct WhoAmIResponse {
     pub tenant: String,
+    pub principal_id: String,
+    pub credential_id: Option<String>,
+    pub auth_method: String,
+    pub scopes: Vec<String>,
+    pub expires_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -398,8 +403,8 @@ impl FromRequest<AppState> for SubmitPayload {
     async fn from_request(req: Request, state: &AppState) -> Result<Self, Self::Rejection> {
         let tenant = req
             .extensions()
-            .get::<Tenant>()
-            .map(|tenant| tenant.0.clone())
+            .get::<AuthContext>()
+            .map(|auth| auth.tenant_id.clone())
             .unwrap_or_else(|| "unauthenticated".to_string());
         extract_submit_payload(
             req,
@@ -894,17 +899,61 @@ fn spawn_submission_commit(
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
-        .route("/v1/jobs", post(submit).get(list_jobs))
-        .route("/v1/jobs/{id}", get(get_job).delete(cancel_job))
-        .route("/v1/jobs/{id}/replay", get(replay))
-        .route("/v1/jobs/{id}/result", get(job_result))
-        .route("/v1/jobs/{id}/stream", get(stream))
-        .route("/v1/jobs/{id}/stream-ticket", post(stream_ticket))
-        .route("/v1/metrics", get(metrics))
-        .route("/v1/status", get(status))
-        .route("/v1/capabilities", get(capabilities))
-        .route("/v1/whoami", get(whoami))
-        .route("/whoami", get(whoami))
+        .route(
+            "/v1/jobs",
+            post(submit).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_submit)),
+        )
+        .route(
+            "/v1/jobs",
+            get(list_jobs).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}",
+            get(get_job).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}",
+            delete(cancel_job)
+                .route_layer(axum::middleware::from_fn(crate::auth::require_jobs_cancel)),
+        )
+        .route(
+            "/v1/jobs/{id}/replay",
+            get(replay).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}/result",
+            get(job_result).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}/stream",
+            get(stream).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}/stream-ticket",
+            post(stream_ticket)
+                .route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/metrics",
+            get(metrics).route_layer(axum::middleware::from_fn(crate::auth::require_metrics_read)),
+        )
+        .route(
+            "/v1/status",
+            get(status).route_layer(axum::middleware::from_fn(crate::auth::require_service_read)),
+        )
+        .route(
+            "/v1/capabilities",
+            get(capabilities)
+                .route_layer(axum::middleware::from_fn(crate::auth::require_service_read)),
+        )
+        .route(
+            "/v1/whoami",
+            get(whoami).route_layer(axum::middleware::from_fn(crate::auth::require_service_read)),
+        )
+        .route(
+            "/whoami",
+            get(whoami).route_layer(axum::middleware::from_fn(crate::auth::require_service_read)),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::ratelimit::middleware,
@@ -913,13 +962,18 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             crate::auth::middleware,
         ))
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES));
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .layer(axum::middleware::from_fn(crate::auth::no_store));
 
     Router::new()
         .route("/", get(dashboard))
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/metrics", get(operator_metrics))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth_protected_resource_metadata),
+        )
         .route("/openapi.json", get(crate::openapi::serve))
         .merge(api)
         .fallback(not_found)
@@ -984,7 +1038,7 @@ fn internal_error(context: &str, e: impl std::fmt::Display) -> Response {
 )]
 pub async fn submit(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     headers: HeaderMap,
     SubmitPayload {
         spec,
@@ -996,7 +1050,11 @@ pub async fn submit(
         Err(response) => return *response,
     };
     if let Some(request) = idempotency.as_ref() {
-        match state.store.lookup_idempotency(&tenant.0, request).await {
+        match state
+            .store
+            .lookup_idempotency(&auth.tenant_id, request)
+            .await
+        {
             Ok(coop_store::IdempotencyLookup::Replay { job_id }) => {
                 return submission_response(job_id, true)
             }
@@ -1111,7 +1169,7 @@ pub async fn submit(
     // saturated admission returns 503 immediately and cannot leave a zombie
     // queued row behind.
     let mem_mb = state.cfg.clamp_limits(spec.limits.clone()).mem_mb;
-    let permit = match state.admission.try_reserve(&tenant.0, mem_mb) {
+    let permit = match state.admission.try_reserve(&auth.tenant_id, mem_mb) {
         Ok(permit) => permit,
         Err(crate::scheduler::TryAdmissionError::GlobalFull) => {
             state.metrics.reject(
@@ -1170,7 +1228,7 @@ pub async fn submit(
         body_permit,
         PendingSubmission {
             job_id: job_id.clone(),
-            tenant: tenant.0.clone(),
+            tenant: auth.tenant_id.clone(),
             language: spec.language.clone(),
             spec_json,
             requested_mem_mb: mem_mb,
@@ -1218,7 +1276,14 @@ pub async fn submit(
     };
 
     let accepted_job_id = &accepted.job_id;
-    tracing::info!(job_id = %accepted_job_id, replayed = accepted.replayed, tenant = tenant.0.as_str(), language = spec.language.as_str(), "job submitted");
+    tracing::info!(
+        job_id = %accepted_job_id,
+        replayed = accepted.replayed,
+        tenant = %auth.tenant_id,
+        principal = %auth.principal_id,
+        language = %spec.language,
+        "job submitted"
+    );
 
     submission_response(accepted.job_id, accepted.replayed)
 }
@@ -1240,7 +1305,7 @@ pub async fn submit(
 )]
 pub async fn list_jobs(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     if let Some(unknown) = params
@@ -1305,7 +1370,7 @@ pub async fn list_jobs(
     match state
         .store
         .list_job_summaries_page(ListJobsQuery {
-            tenant: Some(tenant.0),
+            tenant: Some(auth.tenant_id),
             status,
             language,
             before,
@@ -1362,11 +1427,11 @@ fn decode_job_cursor(raw: &str) -> Result<JobCursor, String> {
 )]
 pub async fn get_job(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Response {
     match state.store.get_job_summary(&id).await {
-        Ok(Some(row)) if row.tenant == tenant.0 => {}
+        Ok(Some(row)) if row.tenant == auth.tenant_id => {}
         Ok(_) => {
             return api_error(
                 StatusCode::NOT_FOUND,
@@ -1378,7 +1443,7 @@ pub async fn get_job(
         Err(e) => return internal_error("get job summary", e),
     }
     // Acquire before selecting the multi-megabyte spec/receipt columns.
-    let permit = match acquire_large_response(&state, &tenant.0) {
+    let permit = match acquire_large_response(&state, &auth.tenant_id) {
         Ok(permit) => permit,
         Err(error) => {
             record_lifetime_rejection(
@@ -1390,7 +1455,7 @@ pub async fn get_job(
         }
     };
     match state.store.get_job(&id).await {
-        Ok(Some(row)) if row.tenant == tenant.0 => match job_detail(&state, &row) {
+        Ok(Some(row)) if row.tenant == auth.tenant_id => match job_detail(&state, &row) {
             Ok(detail) => guarded_json_response(StatusCode::OK, &detail, permit),
             Err(e) => internal_error("decode stored job detail", e),
         },
@@ -1566,11 +1631,11 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
 #[allow(clippy::needless_return)]
 pub async fn cancel_job(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Response {
     let row = match state.store.get_job_summary(&id).await {
-        Ok(Some(row)) if row.tenant == tenant.0 => row,
+        Ok(Some(row)) if row.tenant == auth.tenant_id => row,
         Ok(_) => {
             return api_error(
                 StatusCode::NOT_FOUND,
@@ -1591,7 +1656,12 @@ pub async fn cancel_job(
 
     if let Some(flag) = state.cancels.get(&id) {
         flag.cancel.cancel();
-        tracing::info!(job_id = %id, tenant = tenant.0.as_str(), "job cancellation requested (running)");
+        tracing::info!(
+            job_id = %id,
+            tenant = %auth.tenant_id,
+            principal = %auth.principal_id,
+            "job cancellation requested (running)"
+        );
         return cancellation_response(&row, true, false);
     }
 
@@ -1603,15 +1673,20 @@ pub async fn cancel_job(
     let queued_receipt = crate::scheduler::build_queued_cancel_receipt(&state, &id).await;
     match state
         .store
-        .cancel_queued_with_event(&id, &tenant.0, queued_receipt.as_ref())
+        .cancel_queued_with_event(&id, &auth.tenant_id, queued_receipt.as_ref())
         .await
     {
         Ok(Some(event)) => {
             state.bus.send(&id, wire_event(event));
             state.bus.complete(&id);
-            tracing::info!(job_id = %id, tenant = tenant.0.as_str(), "queued job cancelled");
+            tracing::info!(
+                job_id = %id,
+                tenant = %auth.tenant_id,
+                principal = %auth.principal_id,
+                "queued job cancelled"
+            );
             return match state.store.get_job_summary(&id).await {
-                Ok(Some(current)) if current.tenant == tenant.0 => {
+                Ok(Some(current)) if current.tenant == auth.tenant_id => {
                     cancellation_response(&current, true, false)
                 }
                 Ok(_) => api_error(
@@ -1628,7 +1703,7 @@ pub async fn cancel_job(
                 .cancels
                 .entry(id.clone())
                 .or_insert_with(|| crate::RunningJob {
-                    tenant: tenant.0.clone(),
+                    tenant: auth.tenant_id.clone(),
                     cancel: Arc::new(coop_exec::ExecutionCancellation::default()),
                 })
                 .clone();
@@ -1645,7 +1720,8 @@ pub async fn cancel_job(
                     running.cancel.cancel();
                     tracing::info!(
                         job_id = %id,
-                        tenant = tenant.0.as_str(),
+                        tenant = %auth.tenant_id,
+                        principal = %auth.principal_id,
                         "job cancellation requested (race — flag installed)"
                     );
                     return cancellation_response(&current, true, false);
@@ -1693,12 +1769,16 @@ fn wire_event(event: coop_store::EventRow) -> WireEvent {
 )]
 pub async fn metrics(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Response {
     let mut body = String::with_capacity(512);
     body.push_str("# HELP coop_jobs_current Current tenant jobs by status.\n");
     body.push_str("# TYPE coop_jobs_current gauge\n");
-    match state.store.count_by_status_for_tenant(&tenant.0).await {
+    match state
+        .store
+        .count_by_status_for_tenant(&auth.tenant_id)
+        .await
+    {
         Ok(rows) => {
             for (status, n) in rows {
                 body.push_str(&format!("coop_jobs_current{{status=\"{status}\"}} {n}\n"));
@@ -1711,7 +1791,7 @@ pub async fn metrics(
         state
             .cancels
             .iter()
-            .filter(|entry| entry.tenant == tenant.0)
+            .filter(|entry| entry.tenant == auth.tenant_id)
             .count()
     ));
     (
@@ -1821,11 +1901,11 @@ pub async fn operator_metrics(State(state): State<AppState>, headers: HeaderMap)
 )]
 pub async fn replay(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    match owns_job(&state, &id, &tenant.0).await {
+    match owns_job(&state, &id, &auth.tenant_id).await {
         Ok(true) => {}
         Ok(false) => {
             return api_error(
@@ -1877,7 +1957,7 @@ pub async fn replay(
         None => 1_000,
     };
     // Bound both event materialization and the subsequent transfer.
-    let permit = match acquire_large_response(&state, &tenant.0) {
+    let permit = match acquire_large_response(&state, &auth.tenant_id) {
         Ok(permit) => permit,
         Err(error) => {
             record_lifetime_rejection(
@@ -1925,7 +2005,7 @@ pub async fn replay(
 )]
 pub async fn job_result(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -1945,7 +2025,7 @@ pub async fn job_result(
     };
 
     let mut row = match state.store.get_job_summary(&id).await {
-        Ok(Some(row)) if row.tenant == tenant.0 => row,
+        Ok(Some(row)) if row.tenant == auth.tenant_id => row,
         Ok(_) => {
             return api_error(
                 StatusCode::NOT_FOUND,
@@ -1961,17 +2041,19 @@ pub async fn job_result(
     if !terminal && wait_seconds > 0 {
         let mut shutdown = state.shutdown.subscribe();
         if !*shutdown.borrow() {
-            _wait_permit = Some(match state.result_wait_admission.try_acquire(&tenant.0) {
-                Ok(permit) => permit,
-                Err(error) => {
-                    record_lifetime_rejection(
-                        state.metrics.as_ref(),
-                        crate::metrics::AdmissionScope::ResultWait,
-                        error,
-                    );
-                    return result_wait_error(error);
-                }
-            });
+            _wait_permit = Some(
+                match state.result_wait_admission.try_acquire(&auth.tenant_id) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        record_lifetime_rejection(
+                            state.metrics.as_ref(),
+                            crate::metrics::AdmissionScope::ResultWait,
+                            error,
+                        );
+                        return result_wait_error(error);
+                    }
+                },
+            );
             // During readiness-gated startup recovery, durable queued rows
             // can briefly predate their in-process completion watch. Poll the
             // indexed summary until recovery registers the watch, then switch
@@ -2017,7 +2099,7 @@ pub async fn job_result(
                     completion = None;
                 }
                 row = match state.store.get_job_summary(&id).await {
-                    Ok(Some(row)) if row.tenant == tenant.0 => row,
+                    Ok(Some(row)) if row.tenant == auth.tenant_id => row,
                     Ok(_) => {
                         return api_error(
                             StatusCode::NOT_FOUND,
@@ -2039,7 +2121,7 @@ pub async fn job_result(
         // One post-notification read is enough. If completion raced with the
         // durable transition, this read observes the committed state.
         row = match state.store.get_job_summary(&id).await {
-            Ok(Some(row)) if row.tenant == tenant.0 => row,
+            Ok(Some(row)) if row.tenant == auth.tenant_id => row,
             Ok(_) => {
                 return api_error(
                     StatusCode::NOT_FOUND,
@@ -2054,7 +2136,7 @@ pub async fn job_result(
 
     // Only completed/non-waiting callers compete for response memory; a
     // completion burst cannot materialize more than the response cap.
-    let permit = match acquire_large_response(&state, &tenant.0) {
+    let permit = match acquire_large_response(&state, &auth.tenant_id) {
         Ok(permit) => permit,
         Err(error) => {
             record_lifetime_rejection(
@@ -2137,7 +2219,7 @@ fn fold_result(row: &JobSummary, events: &[coop_store::EventRow]) -> ResultView 
 )]
 pub async fn stream(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     ws: WebSocketUpgrade,
@@ -2151,7 +2233,7 @@ pub async fn stream(
             Some(1),
         );
     }
-    match owns_job(&state, &id, &tenant.0).await {
+    match owns_job(&state, &id, &auth.tenant_id).await {
         Ok(true) => {}
         Ok(false) => {
             return api_error(
@@ -2177,7 +2259,7 @@ pub async fn stream(
         },
         None => 0,
     };
-    let stream_permit = match state.stream_admission.try_acquire(&tenant.0) {
+    let stream_permit = match state.stream_admission.try_acquire(&auth.tenant_id) {
         Ok(permit) => permit,
         Err(error) => {
             record_lifetime_rejection(
@@ -2206,7 +2288,7 @@ pub async fn stream(
 )]
 pub async fn stream_ticket(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Response {
     if *state.shutdown.borrow() {
@@ -2218,7 +2300,7 @@ pub async fn stream_ticket(
             Some(1),
         );
     }
-    match owns_job(&state, &id, &tenant.0).await {
+    match owns_job(&state, &id, &auth.tenant_id).await {
         Ok(true) => {}
         Ok(false) => {
             return api_error(
@@ -2242,7 +2324,7 @@ pub async fn stream_ticket(
             Some(1),
         );
     }
-    let (ticket, expires_at_ms) = crate::auth::issue_stream_ticket(&state, &id, &tenant.0);
+    let (ticket, expires_at_ms) = crate::auth::issue_stream_ticket(&state, &id, &auth);
     if *state.shutdown.borrow() {
         state.stream_tickets.remove(&ticket);
         return api_error_with_retry(
@@ -2546,6 +2628,27 @@ pub async fn health() -> Response {
 
 #[utoipa::path(
     get,
+    path = "/.well-known/oauth-protected-resource",
+    responses(
+        (status = 200, description = "RFC 9728 OAuth protected-resource metadata"),
+        (status = 404, body = ErrorEnvelope)
+    ),
+    security()
+)]
+pub async fn oauth_protected_resource_metadata(State(state): State<AppState>) -> Response {
+    match &state.cfg.jwt {
+        Some(jwt) => Json(jwt.protected_resource_metadata()).into_response(),
+        None => api_error(
+            StatusCode::NOT_FOUND,
+            "oauth_not_configured",
+            "OAuth protected-resource metadata is unavailable",
+            false,
+        ),
+    }
+}
+
+#[utoipa::path(
+    get,
     path = "/readyz",
     security(),
     responses(
@@ -2654,8 +2757,21 @@ pub async fn capabilities(State(state): State<AppState>) -> Response {
     path = "/v1/whoami",
     responses((status = 200, body = WhoAmIResponse), (status = 401, body = ErrorEnvelope))
 )]
-pub async fn whoami(Extension(tenant): Extension<Tenant>) -> Response {
-    Json(WhoAmIResponse { tenant: tenant.0 }).into_response()
+pub async fn whoami(Extension(auth): Extension<AuthContext>) -> Response {
+    Json(WhoAmIResponse {
+        tenant: auth.tenant_id,
+        principal_id: auth.principal_id,
+        credential_id: auth.credential_id,
+        auth_method: auth.method.as_str().to_string(),
+        scopes: auth
+            .scopes
+            .names()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        expires_at_ms: auth.expires_at_ms,
+    })
+    .into_response()
 }
 
 /// Version + sandbox mode detail, behind the authenticated API surface
@@ -2670,7 +2786,7 @@ pub async fn whoami(Extension(tenant): Extension<Tenant>) -> Response {
 )]
 pub async fn status(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Response {
     let storage_ready = state.readiness.storage_ready();
     Json(StatusResponse {
@@ -2686,11 +2802,11 @@ pub async fn status(
         scheduler: SchedulerStatus {
             workers: state.cfg.workers,
             queue_capacity: state.admission.tenant_capacity(),
-            queue_depth: state.admission.tenant_depth(&tenant.0),
+            queue_depth: state.admission.tenant_depth(&auth.tenant_id),
             running: state
                 .cancels
                 .iter()
-                .filter(|entry| entry.tenant == tenant.0)
+                .filter(|entry| entry.tenant == auth.tenant_id)
                 .count(),
             shutting_down: *state.shutdown.borrow(),
         },
@@ -2699,7 +2815,7 @@ pub async fn status(
     .into_response()
 }
 
-const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-JKWf++1p6cejiOMJq6kcdylN4cYL3LeuydoiIM64MK4='; style-src 'sha256-BzeKOrleFRyiaWvVhMJMi/Z9OXSk2nGkYEfG61+CmcU='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-KVafjTK4lFLCbjRA/jx7F306ETWMA6ae8J0QF+R7xpE='; style-src 'sha256-OnkbHLJCao4lUInrIixJS5R6vH5qJxZa5q7aCWDVZGs='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 async fn dashboard() -> Response {
     let mut response = Html(include_str!("dashboard.html")).into_response();
@@ -2815,6 +2931,9 @@ mod tests {
             .await
             .expect("dashboard body");
         let html = std::str::from_utf8(&body).expect("UTF-8 dashboard");
+        assert!(!html.contains("localStorage"));
+        assert!(!html.contains("sessionStorage"));
+        assert!(!html.contains("rememberKey"));
         let style = inline_block(html, "<style>", "</style>");
         let script = inline_block(html, "<script>", "</script>");
         let style_digest = Sha256::digest(style.as_bytes());

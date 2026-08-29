@@ -1897,6 +1897,8 @@ mod admission_tests {
             db_path: db.to_string_lossy().into_owned(),
             api_keys: std::collections::HashMap::new(),
             metrics_token: None,
+            credentials: Default::default(),
+            jwt: None,
             workers: 1,
             tenant_concurrency: 1,
             tenant_queue_capacity: 64,

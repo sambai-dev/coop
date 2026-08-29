@@ -4,6 +4,8 @@ use axum::Router;
 use coop_server::config::Config;
 use coop_server::scheduler;
 use coop_store::Store;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +29,8 @@ fn test_config(db: &std::path::Path) -> Config {
         db_path: db.to_string_lossy().into_owned(),
         api_keys,
         metrics_token: Some("test-metrics-token".to_string()),
+        credentials: Default::default(),
+        jwt: None,
         workers: 2,
         tenant_concurrency: 4,
         tenant_queue_capacity: 64,
@@ -73,6 +77,82 @@ async fn spawn_app_with_limits(workers: usize, tenant_concurrency: usize) -> Rou
     let (app, state, queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
     scheduler::spawn_workers(state, queue_rx);
     app
+}
+
+async fn spawn_scoped_app() -> (Router, HashMap<&'static str, String>) {
+    let db = std::env::temp_dir().join(format!("coop-scoped-test-{}.db", uuid::Uuid::now_v7()));
+    let root =
+        std::env::temp_dir().join(format!("coop-scoped-credentials-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let pepper = [0x42_u8; 32];
+    let mut keys = HashMap::new();
+    for (name, marker) in [
+        ("submit", 'a'),
+        ("read", 'b'),
+        ("cancel", 'c'),
+        ("service", 'd'),
+        ("metrics", 'e'),
+        ("other-read", 'f'),
+        ("other-cancel", 'g'),
+    ] {
+        keys.insert(
+            name,
+            format!("coop_{name}_{}", marker.to_string().repeat(43)),
+        );
+    }
+    let scopes = [
+        ("submit", "tenant-a", "jobs:submit"),
+        ("read", "tenant-a", "jobs:read"),
+        ("cancel", "tenant-a", "jobs:cancel"),
+        ("service", "tenant-a", "service:read"),
+        ("metrics", "tenant-a", "metrics:read"),
+        ("other-read", "tenant-b", "jobs:read"),
+        ("other-cancel", "tenant-b", "jobs:cancel"),
+    ];
+    let credentials = scopes
+        .into_iter()
+        .map(|(name, tenant, scope)| {
+            let key = keys.get(name).unwrap();
+            let mut hmac = Hmac::<Sha256>::new_from_slice(&pepper).unwrap();
+            hmac.update(key.as_bytes());
+            let digest = hmac.finalize().into_bytes();
+            serde_json::json!({
+                "key_id": name,
+                "tenant_id": tenant,
+                "principal_id": format!("principal-{name}"),
+                "digest_hmac_sha256": digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                "scopes": [scope],
+                "created_at_ms": 1,
+                "expires_at_ms": i64::MAX
+            })
+        })
+        .collect::<Vec<_>>();
+    let credentials_path = root.join("credentials.json");
+    let pepper_path = root.join("pepper");
+    std::fs::write(
+        &credentials_path,
+        serde_json::json!({"version":1,"credentials":credentials}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        &pepper_path,
+        pepper
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let mut cfg = test_config(&db);
+    cfg.api_keys.clear();
+    cfg.credentials =
+        coop_server::auth::CredentialStore::load(&credentials_path, &pepper_path, false).unwrap();
+    let store = Arc::new(Store::open(&db).await.unwrap());
+    let (app, _state, queue_rx) = coop_server::build_app(cfg, store).await.unwrap();
+    tokio::spawn(async move {
+        let _queue_rx = queue_rx;
+        std::future::pending::<()>().await;
+    });
+    (app, keys)
 }
 
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
@@ -147,20 +227,214 @@ fn python_available() -> bool {
 #[tokio::test]
 async fn rejects_missing_api_key() {
     let app = spawn_app().await;
-    let (status, body) = send(
-        &app,
-        request(
+    let response = app
+        .oneshot(request(
             "POST",
             "/v1/jobs",
             None,
             Some(r#"{"language":"python","code":"print(1)"}"#.into()),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers().get(header::WWW_AUTHENTICATE),
+        Some(&header::HeaderValue::from_static("Bearer realm=\"coop\""))
+    );
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL),
+        Some(&header::HeaderValue::from_static("no-store"))
+    );
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["error"]["code"], "missing_api_key", "{body}");
     assert!(body["error"]["request_id"].is_string(), "{body}");
     assert_eq!(body["error"]["retryable"], false, "{body}");
+}
+
+#[tokio::test]
+async fn invalid_and_malformed_bearers_return_rfc6750_challenges() {
+    let app = spawn_app().await;
+    let invalid = app
+        .clone()
+        .oneshot(request("GET", "/v1/whoami", Some("wrong-key"), None))
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        invalid.headers().get(header::WWW_AUTHENTICATE),
+        Some(&header::HeaderValue::from_static(
+            "Bearer realm=\"coop\", error=\"invalid_token\""
+        ))
+    );
+
+    let malformed = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/whoami")
+                .header(header::AUTHORIZATION, "Basic secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        malformed.headers().get(header::WWW_AUTHENTICATE),
+        Some(&header::HeaderValue::from_static(
+            "Bearer realm=\"coop\", error=\"invalid_request\""
+        ))
+    );
+}
+
+#[tokio::test]
+async fn indexed_credentials_enforce_every_route_scope_and_preserve_tenant_404s() {
+    let (app, keys) = spawn_scoped_app().await;
+    let key = |name| keys.get(name).unwrap().as_str();
+    let payload = r#"{"language":"python","code":"print(1)"}"#.to_string();
+
+    let denied = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/jobs",
+            Some(key("read")),
+            Some(payload.clone()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        denied.headers().get(header::CACHE_CONTROL),
+        Some(&header::HeaderValue::from_static("no-store"))
+    );
+    assert_eq!(
+        denied.headers().get(header::WWW_AUTHENTICATE),
+        Some(&header::HeaderValue::from_static(
+            "Bearer realm=\"coop\", error=\"insufficient_scope\", scope=\"jobs:submit\""
+        ))
+    );
+
+    let (status, created) = send(
+        &app,
+        request("POST", "/v1/jobs", Some(key("submit")), Some(payload)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let job_id = created["job_id"].as_str().unwrap();
+
+    for (method, path, expected) in [
+        ("GET", "/v1/jobs".to_string(), StatusCode::OK),
+        ("GET", format!("/v1/jobs/{job_id}"), StatusCode::OK),
+        ("GET", format!("/v1/jobs/{job_id}/replay"), StatusCode::OK),
+        (
+            "GET",
+            format!("/v1/jobs/{job_id}/result?wait_seconds=0"),
+            StatusCode::ACCEPTED,
+        ),
+        (
+            "POST",
+            format!("/v1/jobs/{job_id}/stream-ticket"),
+            StatusCode::OK,
+        ),
+    ] {
+        let (status, body) = send(&app, request(method, &path, Some(key("read")), None)).await;
+        assert_eq!(status, expected, "{method} {path}: {body}");
+    }
+    let (stream_status, _) = send(
+        &app,
+        request(
+            "GET",
+            &format!("/v1/jobs/{job_id}/stream"),
+            Some(key("read")),
+            None,
+        ),
+    )
+    .await;
+    assert_ne!(stream_status, StatusCode::FORBIDDEN);
+
+    for path in [
+        format!("/v1/jobs/{job_id}"),
+        format!("/v1/jobs/{job_id}/replay"),
+        format!("/v1/jobs/{job_id}/result?wait_seconds=0"),
+        format!("/v1/jobs/{job_id}/stream-ticket"),
+    ] {
+        let method = if path.ends_with("stream-ticket") {
+            "POST"
+        } else {
+            "GET"
+        };
+        let (status, _) = send(&app, request(method, &path, Some(key("other-read")), None)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "foreign {method} {path}");
+    }
+    let (foreign_cancel, _) = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/v1/jobs/{job_id}"),
+            Some(key("other-cancel")),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(foreign_cancel, StatusCode::NOT_FOUND);
+
+    for (method, path, credential, required) in [
+        ("GET", "/v1/jobs", "submit", "jobs:read"),
+        ("DELETE", "/v1/jobs/unknown", "read", "jobs:cancel"),
+        ("GET", "/v1/status", "read", "service:read"),
+        ("GET", "/v1/capabilities", "read", "service:read"),
+        ("GET", "/v1/whoami", "read", "service:read"),
+        ("GET", "/v1/metrics", "read", "metrics:read"),
+        ("GET", "/v1/status", "metrics", "service:read"),
+        ("GET", "/v1/metrics", "service", "metrics:read"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(method, path, Some(key(credential)), None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        let challenge = response
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(challenge.contains(required), "{challenge}");
+    }
+
+    let (status, whoami) = send(
+        &app,
+        request("GET", "/v1/whoami", Some(key("service")), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{whoami}");
+    assert_eq!(whoami["tenant"], "tenant-a");
+    assert_eq!(whoami["principal_id"], "principal-service");
+    assert_eq!(whoami["credential_id"], "service");
+    assert_eq!(whoami["auth_method"], "api_key");
+    assert_eq!(whoami["scopes"], serde_json::json!(["service:read"]));
+
+    let (metrics, _) = send(
+        &app,
+        request("GET", "/v1/metrics", Some(key("metrics")), None),
+    )
+    .await;
+    assert_eq!(metrics, StatusCode::OK);
+    let (cancelled, _) = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/v1/jobs/{job_id}"),
+            Some(key("cancel")),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(cancelled, StatusCode::OK);
 }
 
 #[tokio::test]

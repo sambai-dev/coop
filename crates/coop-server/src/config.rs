@@ -17,6 +17,8 @@ pub struct Config {
     /// Optional, separately scoped bearer credential for the global operator
     /// metrics endpoint. It is never accepted by tenant API middleware.
     pub metrics_token: Option<String>,
+    pub credentials: crate::auth::CredentialStore,
+    pub jwt: Option<crate::auth::JwtConfig>,
     pub workers: usize,
     pub tenant_concurrency: usize,
     pub tenant_queue_capacity: usize,
@@ -76,6 +78,8 @@ impl std::fmt::Debug for Config {
                 "metrics_token",
                 &self.metrics_token.as_ref().map(|_| "configured, redacted"),
             )
+            .field("credentials", &self.credentials)
+            .field("jwt", &self.jwt)
             .field("workers", &self.workers)
             .field("tenant_concurrency", &self.tenant_concurrency)
             .field("tenant_queue_capacity", &self.tenant_queue_capacity)
@@ -484,14 +488,99 @@ impl Config {
         getenv: &dyn Fn(&str) -> Option<String>,
         production: bool,
     ) -> Result<Self, String> {
+        let credentials_path = getenv("COOP_CREDENTIALS_FILE")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let pepper_path = getenv("COOP_CREDENTIAL_PEPPER_FILE")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let credentials = match (credentials_path.as_deref(), pepper_path.as_deref()) {
+            (Some(credentials), Some(pepper)) => crate::auth::CredentialStore::load(
+                Path::new(credentials),
+                Path::new(pepper),
+                production,
+            )?,
+            (None, None) => crate::auth::CredentialStore::default(),
+            _ => return Err(
+                "COOP_CREDENTIALS_FILE and COOP_CREDENTIAL_PEPPER_FILE must be configured together"
+                    .to_string(),
+            ),
+        };
+
+        let oidc_issuer = getenv("COOP_OIDC_ISSUER")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let oidc_audience = getenv("COOP_OIDC_AUDIENCE")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let oidc_jwks = getenv("COOP_OIDC_JWKS_URL")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let oidc_tenant_map = getenv("COOP_OIDC_TENANT_MAP")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let optional_oidc_values = [
+            getenv("COOP_OIDC_TENANT_CLAIM"),
+            getenv("COOP_OIDC_ALGORITHMS"),
+            getenv("COOP_OIDC_JWKS_TTL_SECONDS"),
+            getenv("COOP_OIDC_MAX_TOKEN_AGE_SECONDS"),
+        ];
+        let oidc_requested = oidc_issuer.is_some()
+            || oidc_audience.is_some()
+            || oidc_jwks.is_some()
+            || oidc_tenant_map.is_some()
+            || optional_oidc_values
+                .iter()
+                .any(|value| value.as_ref().is_some_and(|value| !value.trim().is_empty()));
+        let jwt = if oidc_requested {
+            let issuer = oidc_issuer.as_deref().ok_or_else(|| {
+                "COOP_OIDC_ISSUER is required when OIDC authentication is configured".to_string()
+            })?;
+            let audience = oidc_audience.as_deref().ok_or_else(|| {
+                "COOP_OIDC_AUDIENCE is required when OIDC authentication is configured".to_string()
+            })?;
+            let jwks = oidc_jwks.as_deref().ok_or_else(|| {
+                "COOP_OIDC_JWKS_URL is required when OIDC authentication is configured".to_string()
+            })?;
+            let tenant_map = oidc_tenant_map.as_deref().ok_or_else(|| {
+                "COOP_OIDC_TENANT_MAP is required when OIDC authentication is configured"
+                    .to_string()
+            })?;
+            Some(crate::auth::JwtConfig::parse(
+                issuer,
+                audience,
+                jwks,
+                &env_or(getenv, "COOP_OIDC_TENANT_CLAIM", "tenant_id"),
+                tenant_map,
+                &env_or(getenv, "COOP_OIDC_ALGORITHMS", "RS256,ES256,EdDSA"),
+                parse_number(
+                    getenv,
+                    "COOP_OIDC_JWKS_TTL_SECONDS",
+                    "300",
+                    60_u64,
+                    3600_u64,
+                )?,
+                parse_number(
+                    getenv,
+                    "COOP_OIDC_MAX_TOKEN_AGE_SECONDS",
+                    "3600",
+                    60_u64,
+                    86_400_u64,
+                )?,
+            )?)
+        } else {
+            None
+        };
+
         let mut api_keys = HashMap::new();
         let raw = getenv("COOP_API_KEYS").filter(|v| !v.trim().is_empty());
         let raw = match raw {
-            Some(raw) => raw,
+            Some(raw) => Some(raw),
+            None if !credentials.is_empty() || jwt.is_some() => None,
             None if production => {
                 return Err(
-                    "COOP_API_KEYS must be configured in production; refusing to start with the \
-                     development default API key"
+                    "configure COOP_CREDENTIALS_FILE with COOP_CREDENTIAL_PEPPER_FILE or provide \
+                     legacy COOP_API_KEYS; refusing to start production without credentials"
                         .to_string(),
                 );
             }
@@ -501,47 +590,57 @@ impl Config {
                      default key '{DEV_DEFAULT_API_KEY}'. Anyone who can reach this server can run \
                      code on it. Set COOP_API_KEYS before exposing coop beyond localhost."
                 );
-                DEV_DEFAULT_API_KEY.to_string()
+                Some(DEV_DEFAULT_API_KEY.to_string())
             }
         };
-        for entry in raw.split(',') {
-            let entry = entry.trim();
-            if entry.is_empty() {
-                continue;
-            }
-            let (tenant, key) = match entry.split_once(':') {
-                Some((tenant, key)) => (tenant.trim(), key.trim()),
-                None if !production => ("local", entry),
-                None => {
-                    return Err(
-                        "each production COOP_API_KEYS entry must use tenant:key syntax"
-                            .to_string(),
-                    )
+        if let Some(raw) = raw {
+            for entry in raw.split(',') {
+                let entry = entry.trim();
+                if entry.is_empty() {
+                    continue;
                 }
-            };
-            if tenant.is_empty() {
-                return Err("COOP_API_KEYS contains a blank tenant".to_string());
-            }
-            if key.is_empty() {
-                return Err(format!(
-                    "COOP_API_KEYS contains a blank key for tenant {tenant:?}"
-                ));
-            }
-            if production && (key == "coop-dev-key" || key.len() < 16) {
-                return Err(format!(
-                    "production API key for tenant {tenant:?} is public or too short (minimum 16 characters)"
-                ));
-            }
-            if api_keys
-                .insert(key.to_string(), tenant.to_string())
-                .is_some()
-            {
-                return Err("COOP_API_KEYS contains a duplicate key".to_string());
+                let (tenant, key) = match entry.split_once(':') {
+                    Some((tenant, key)) => (tenant.trim(), key.trim()),
+                    None if !production => ("local", entry),
+                    None => {
+                        return Err(
+                            "each production COOP_API_KEYS entry must use tenant:key syntax"
+                                .to_string(),
+                        )
+                    }
+                };
+                if tenant.is_empty() {
+                    return Err("COOP_API_KEYS contains a blank tenant".to_string());
+                }
+                if key.is_empty() {
+                    return Err(format!(
+                        "COOP_API_KEYS contains a blank key for tenant {tenant:?}"
+                    ));
+                }
+                if production && (key == "coop-dev-key" || key.len() < 16) {
+                    return Err(format!(
+                        "production API key for tenant {tenant:?} is public or too short (minimum 16 characters)"
+                    ));
+                }
+                if api_keys
+                    .insert(key.to_string(), tenant.to_string())
+                    .is_some()
+                {
+                    return Err("COOP_API_KEYS contains a duplicate key".to_string());
+                }
             }
         }
 
-        if api_keys.is_empty() {
-            return Err("COOP_API_KEYS did not contain any usable tenant keys".to_string());
+        if api_keys.is_empty() && credentials.is_empty() && jwt.is_none() {
+            return Err(
+                "credential configuration did not contain any usable credentials".to_string(),
+            );
+        }
+        if production && !api_keys.is_empty() {
+            tracing::warn!(
+                "SECURITY: legacy COOP_API_KEYS are enabled in production; migrate to the indexed \
+                 peppered COOP_CREDENTIALS_FILE format"
+            );
         }
 
         let metrics_token = getenv("COOP_METRICS_TOKEN")
@@ -634,6 +733,8 @@ impl Config {
             db_path: env_or(getenv, "COOP_DB", "coop.db"),
             api_keys,
             metrics_token,
+            credentials,
+            jwt,
             workers: parse_number(getenv, "COOP_WORKERS", "4", 1usize, 256usize)?,
             tenant_concurrency: parse_number(
                 getenv,
@@ -820,6 +921,71 @@ mod tests {
             Some("acme")
         );
         assert!(!cfg.api_keys.contains_key("coop-dev-key"));
+    }
+
+    #[test]
+    fn credentials_file_can_be_the_only_auth_source_and_requires_a_paired_pepper() {
+        let root =
+            std::env::temp_dir().join(format!("coop-config-credentials-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let credentials = root.join("credentials.json");
+        let pepper = root.join("pepper");
+        std::fs::write(&pepper, "11".repeat(32)).unwrap();
+        std::fs::write(
+            &credentials,
+            serde_json::json!({
+                "version":1,
+                "credentials":[{
+                    "key_id":"agent-a",
+                    "tenant_id":"tenant-a",
+                    "principal_id":"principal-a",
+                    "digest_hmac_sha256":"22".repeat(32),
+                    "scopes":["jobs:read"],
+                    "created_at_ms":1
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let credential_path = credentials.to_string_lossy().into_owned();
+        let pepper_path = pepper.to_string_lossy().into_owned();
+        let cfg = Config::from_sources(
+            &source(&[
+                ("COOP_CREDENTIALS_FILE", credential_path.as_str()),
+                ("COOP_CREDENTIAL_PEPPER_FILE", pepper_path.as_str()),
+            ]),
+            false,
+        )
+        .unwrap();
+        assert!(cfg.api_keys.is_empty());
+        assert_eq!(cfg.credentials.len(), 1);
+        assert!(Config::from_sources(
+            &source(&[("COOP_CREDENTIALS_FILE", credential_path.as_str())]),
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn oidc_can_be_the_only_auth_source_but_partial_or_insecure_config_fails_closed() {
+        let complete = [
+            ("COOP_OIDC_ISSUER", "https://issuer.example"),
+            ("COOP_OIDC_AUDIENCE", "https://coop.example"),
+            ("COOP_OIDC_JWKS_URL", "https://issuer.example/jwks"),
+            ("COOP_OIDC_TENANT_MAP", "external=internal"),
+        ];
+        let cfg = Config::from_sources(&source(&complete), false).unwrap();
+        assert!(cfg.api_keys.is_empty());
+        assert!(cfg.jwt.is_some());
+
+        assert!(Config::from_sources(
+            &source(&[("COOP_OIDC_ISSUER", "https://issuer.example")]),
+            false
+        )
+        .is_err());
+        let mut insecure = complete;
+        insecure[2].1 = "http://issuer.example/jwks";
+        assert!(Config::from_sources(&source(&insecure), false).is_err());
     }
 
     #[test]

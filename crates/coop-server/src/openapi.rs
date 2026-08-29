@@ -33,6 +33,7 @@ use utoipa::{Modify, OpenApi};
         crate::routes::status,
         crate::routes::capabilities,
         crate::routes::whoami,
+        crate::routes::oauth_protected_resource_metadata,
         crate::routes::health,
         crate::routes::ready
     ),

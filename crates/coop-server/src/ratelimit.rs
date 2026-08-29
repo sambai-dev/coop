@@ -54,15 +54,14 @@ pub async fn middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    let Some(tenant) = req.extensions().get::<crate::auth::Tenant>() else {
-        return crate::routes::api_error(
-            StatusCode::UNAUTHORIZED,
+    let Some(auth) = req.extensions().get::<crate::auth::AuthContext>() else {
+        return crate::auth::unauthorized(
             "missing_tenant",
             "authenticated tenant context is missing",
-            false,
+            None,
         );
     };
-    let decision = state.rate.check(&tenant.0);
+    let decision = state.rate.check(&auth.tenant_id);
     if decision.allowed {
         let mut response = next.run(req).await;
         if let Ok(value) = HeaderValue::from_str(&state.cfg.rate_per_min.to_string()) {

@@ -146,6 +146,7 @@ pub struct AppState {
     pub metrics_token_digest: Option<[u8; 32]>,
     /// O(1) readiness snapshot fed by one bounded background store probe.
     pub readiness: Arc<readiness::ReadinessCache>,
+    pub jwt_verifier: Option<Arc<auth::JwtVerifier>>,
     pub sandbox_mode: coop_exec::SandboxMode,
     pub execution_provider: Arc<dyn coop_exec::ExecutionProvider>,
     /// F-005: install a seccomp-BPF allowlist in sandboxed jobs (see Config).
@@ -219,6 +220,10 @@ pub async fn build_app(
     let memory_budget_mb = cfg.memory_budget_mb;
     let (admission, queue_rx) =
         scheduler::Admission::channel(QUEUE_CAPACITY, cfg.tenant_queue_capacity);
+    let jwt_verifier = match cfg.jwt.clone() {
+        Some(jwt) => Some(Arc::new(auth::JwtVerifier::build(jwt).await?)),
+        None => None,
+    };
 
     // N-1: tenant isolation requires the jobs root to be server-private
     // (0700). The binary path enforces this in main(), but any embedder that
@@ -317,6 +322,7 @@ pub async fn build_app(
         metrics: Arc::new(metrics::Metrics::new()),
         metrics_token_digest,
         readiness: Arc::new(readiness::ReadinessCache::new()),
+        jwt_verifier,
         sandbox_mode,
         execution_provider,
         seccomp: seccomp_enabled,

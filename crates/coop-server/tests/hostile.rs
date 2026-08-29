@@ -103,6 +103,8 @@ async fn spawn_app_with_root() -> (Router, String) {
         db_path: db.to_string_lossy().into_owned(),
         api_keys,
         metrics_token: None,
+        credentials: Default::default(),
+        jwt: None,
         workers: 2,
         tenant_concurrency: 4,
         tenant_queue_capacity: 64,
