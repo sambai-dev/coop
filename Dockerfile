@@ -1,5 +1,5 @@
 # Keep this version in sync with rust-toolchain.toml and CI.
-FROM rust:1.89.0-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6 AS build
+FROM rust:1.98.0-slim-bookworm@sha256:af0579d28b9a7ec5251aaafcb0c0a23dcde5c97065112aae0cc3abeda42d5394 AS build
 
 ARG VCS_REF=unknown
 
