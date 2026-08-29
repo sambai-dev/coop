@@ -970,6 +970,12 @@ async fn handle_job(
         )
         .await;
 
+    let isolation_evidence_mismatch = execution_evidence_violates_requirement(
+        &result,
+        &provenance,
+        spec.requirements.minimum_isolation,
+    );
+
     let controls = {
         let mut queue = deferred_controls
             .lock()
@@ -993,44 +999,82 @@ async fn handle_job(
         }
     }
 
-    match result {
-        Ok(outcome) => {
-            let status = coop_types::JobStatus::from(outcome.status);
-            execution_observation.finish(crate::metrics::JobOutcome::classify(status.as_str()));
-            finish_via(
-                op_tx,
-                status.as_str(),
+    if isolation_evidence_mismatch {
+        execution_observation.finish(crate::metrics::JobOutcome::Error);
+        tracing::error!(
+            requested = ?spec.requirements.minimum_isolation,
+            observed = ?provenance.isolation_class,
+            bootstrap_ready = provenance.bootstrap_ready,
+            "executor-observed isolation evidence contradicted the admitted requirement"
+        );
+        let _ = op_tx
+            .send(Op::Violation(
+                "minimum_isolation_observation_mismatch",
+                json!({
+                    "minimum_isolation": spec.requirements.minimum_isolation,
+                    "observed_isolation": provenance.isolation_class,
+                    "bootstrap_ready": provenance.bootstrap_ready,
+                }),
+            ))
+            .await;
+        let (exit_code, duration_ms, telemetry) = match result {
+            Ok(outcome) => (
                 outcome.exit_code,
                 outcome.telemetry.wall_time_ms.min(i64::MAX as u64) as i64,
-                outcome.killed_by.clone(),
-                Some(outcome.telemetry.clone()),
-                Some(provenance),
-            )
-            .await;
-            tracing::info!(
-                status = status.as_str(),
-                exit_code = outcome.exit_code,
-                killed_by = outcome.killed_by.as_deref().unwrap_or(""),
-                duration_ms = outcome.telemetry.wall_time_ms,
-                "job finished"
-            );
-        }
-        Err(e) => {
-            execution_observation.finish(crate::metrics::JobOutcome::Error);
-            tracing::error!(error = %e, "executor failure");
-            let _ = op_tx
-                .send(Op::Violation("executor_error", executor_error_detail(&e)))
+                Some(outcome.telemetry),
+            ),
+            Err(_) => (None, started_at.elapsed().as_millis() as i64, None),
+        };
+        finish_via(
+            op_tx,
+            "error",
+            exit_code,
+            duration_ms,
+            Some("minimum_isolation_observation_mismatch".to_string()),
+            telemetry,
+            Some(provenance),
+        )
+        .await;
+    } else {
+        match result {
+            Ok(outcome) => {
+                let status = coop_types::JobStatus::from(outcome.status);
+                execution_observation.finish(crate::metrics::JobOutcome::classify(status.as_str()));
+                finish_via(
+                    op_tx,
+                    status.as_str(),
+                    outcome.exit_code,
+                    outcome.telemetry.wall_time_ms.min(i64::MAX as u64) as i64,
+                    outcome.killed_by.clone(),
+                    Some(outcome.telemetry.clone()),
+                    Some(provenance),
+                )
                 .await;
-            finish_via(
-                op_tx,
-                "error",
-                None,
-                started_at.elapsed().as_millis() as i64,
-                None,
-                None,
-                Some(provenance),
-            )
-            .await;
+                tracing::info!(
+                    status = status.as_str(),
+                    exit_code = outcome.exit_code,
+                    killed_by = outcome.killed_by.as_deref().unwrap_or(""),
+                    duration_ms = outcome.telemetry.wall_time_ms,
+                    "job finished"
+                );
+            }
+            Err(e) => {
+                execution_observation.finish(crate::metrics::JobOutcome::Error);
+                tracing::error!(error = %e, "executor failure");
+                let _ = op_tx
+                    .send(Op::Violation("executor_error", executor_error_detail(&e)))
+                    .await;
+                finish_via(
+                    op_tx,
+                    "error",
+                    None,
+                    started_at.elapsed().as_millis() as i64,
+                    None,
+                    None,
+                    Some(provenance),
+                )
+                .await;
+            }
         }
     }
 
@@ -1044,6 +1088,24 @@ async fn handle_job(
     }
     await_event_pump(&state, &job_id, pump).await;
     state.cancels.remove(&job_id);
+}
+
+fn execution_evidence_violates_requirement(
+    outcome: &std::io::Result<coop_exec::ExecOutcome>,
+    provenance: &coop_exec::ExecutionProvenance,
+    minimum: coop_types::IsolationClass,
+) -> bool {
+    if provenance.bootstrap_ready {
+        return !provenance.isolation_class.satisfies(minimum);
+    }
+
+    // A provider can legitimately fail or observe cancellation before its
+    // workload-ready boundary. Any other successful executor outcome without
+    // that boundary is contradictory evidence and must not remain successful.
+    matches!(
+        outcome,
+        Ok(result) if result.status != coop_types::OutcomeStatus::Cancelled
+    )
 }
 
 async fn await_event_pump(state: &AppState, job_id: &str, pump: JoinHandle<()>) {
@@ -1883,6 +1945,74 @@ fn wire_event(event: coop_store::EventRow) -> WireEvent {
 #[cfg(test)]
 mod admission_tests {
     use super::*;
+
+    fn observed_provenance(
+        isolation_class: coop_types::IsolationClass,
+        bootstrap_ready: bool,
+    ) -> coop_exec::ExecutionProvenance {
+        coop_exec::ExecutionProvenance {
+            backend: "test-provider".to_string(),
+            isolation_class,
+            bootstrap_ready,
+            isolated: isolation_class != coop_types::IsolationClass::None && bootstrap_ready,
+            private_rootfs: false,
+            dedicated_bootstrap: false,
+            seccomp: false,
+            network_allowed: None,
+            networking: None,
+            limit_enforcement: coop_types::LimitEnforcement::NONE,
+            runtime_version: None,
+            runtime_sha256: None,
+            rootfs_sha256: None,
+            config_sha256: None,
+        }
+    }
+
+    fn successful_outcome(
+        status: coop_types::OutcomeStatus,
+    ) -> std::io::Result<coop_exec::ExecOutcome> {
+        Ok(coop_exec::ExecOutcome {
+            status,
+            exit_code: Some(0),
+            killed_by: None,
+            telemetry: coop_exec::ExecTelemetry::default(),
+        })
+    }
+
+    #[test]
+    fn terminal_execution_fails_closed_on_contradictory_isolation_evidence() {
+        let gvisor = observed_provenance(coop_types::IsolationClass::GvisorApplicationKernel, true);
+        assert!(!execution_evidence_violates_requirement(
+            &successful_outcome(coop_types::OutcomeStatus::Succeeded),
+            &gvisor,
+            coop_types::IsolationClass::LinuxSharedKernel,
+        ));
+
+        let shared_kernel =
+            observed_provenance(coop_types::IsolationClass::LinuxSharedKernel, true);
+        assert!(execution_evidence_violates_requirement(
+            &successful_outcome(coop_types::OutcomeStatus::Succeeded),
+            &shared_kernel,
+            coop_types::IsolationClass::GvisorApplicationKernel,
+        ));
+
+        let not_ready = observed_provenance(coop_types::IsolationClass::None, false);
+        assert!(execution_evidence_violates_requirement(
+            &successful_outcome(coop_types::OutcomeStatus::Succeeded),
+            &not_ready,
+            coop_types::IsolationClass::None,
+        ));
+        assert!(!execution_evidence_violates_requirement(
+            &successful_outcome(coop_types::OutcomeStatus::Cancelled),
+            &not_ready,
+            coop_types::IsolationClass::GvisorApplicationKernel,
+        ));
+        assert!(!execution_evidence_violates_requirement(
+            &Err(std::io::Error::other("failed before ready")),
+            &not_ready,
+            coop_types::IsolationClass::GvisorApplicationKernel,
+        ));
+    }
 
     async fn monitor_test_state() -> (AppState, mpsc::Receiver<QueuedJob>) {
         let base = std::env::temp_dir().join(format!(
