@@ -1,9 +1,10 @@
 use crate::bus::WireEvent;
 use crate::routes::{
-    CancellationResponse, CapabilitiesResponse, ErrorBody, ErrorEnvelope, ExecutionCapabilities,
-    ExecutionPolicy, FeatureCapabilities, JobDetail, JobView, LimitCapabilities, ListJobsResponse,
-    ReplayResponse, ResultView, SchedulerStatus, StatusResponse, StreamTicketResponse,
-    SubmitResponse, WhoAmIResponse,
+    AttestationCapabilities, AttestationPublicKeyResponse, CancellationResponse,
+    CapabilitiesResponse, ErrorBody, ErrorEnvelope, ExecutionCapabilities, ExecutionPolicy,
+    FeatureCapabilities, JobAttestationStatus, JobDetail, JobView, LimitCapabilities,
+    ListJobsResponse, ReplayResponse, ResultView, SchedulerStatus, StatusResponse,
+    StreamTicketResponse, SubmitResponse, WhoAmIResponse,
 };
 use axum::Json;
 use coop_types::{
@@ -27,11 +28,14 @@ use utoipa::{Modify, OpenApi};
         crate::routes::cancel_job,
         crate::routes::replay,
         crate::routes::job_result,
+        crate::routes::job_attestation,
+        crate::routes::job_result_artifact,
         crate::routes::stream,
         crate::routes::stream_ticket,
         crate::routes::metrics,
         crate::routes::status,
         crate::routes::capabilities,
+        crate::routes::attestation_public_key,
         crate::routes::whoami,
         crate::routes::oauth_protected_resource_metadata,
         crate::routes::health,
@@ -48,6 +52,7 @@ use utoipa::{Modify, OpenApi};
         JobView,
         CancellationResponse,
         JobDetail,
+        JobAttestationStatus,
         ExecutionPolicy,
         ResultView,
         SubmitResponse,
@@ -59,6 +64,8 @@ use utoipa::{Modify, OpenApi};
         ExecutionCapabilities,
         LimitCapabilities,
         FeatureCapabilities,
+        AttestationCapabilities,
+        AttestationPublicKeyResponse,
         StatusResponse,
         SchedulerStatus,
         WireEvent,

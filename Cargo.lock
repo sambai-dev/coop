@@ -349,6 +349,7 @@ version = "0.3.0"
 dependencies = [
  "axum",
  "base64",
+ "coop-attestation",
  "coop-exec",
  "coop-store",
  "coop-types",

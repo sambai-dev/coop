@@ -13,7 +13,7 @@ fn test_db(label: &str) -> PathBuf {
 async fn schema_lifecycle_recovery_and_receipt_are_consistent() {
     let db = test_db("lifecycle");
     let store = Store::open(&db).await.unwrap();
-    assert_eq!(store.schema_version().await.unwrap(), 3);
+    assert_eq!(store.schema_version().await.unwrap(), 4);
 
     store
         .create_job("queued", "tenant-a", "python", r#"{"code":"1"}"#)

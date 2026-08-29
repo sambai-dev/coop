@@ -1,11 +1,14 @@
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
+use coop_attestation::{
+    verify_attestation, write_private_key_file_new, ArtifactDigest, SigningKey, VerificationPolicy,
+};
 use coop_server::config::Config;
 use coop_server::scheduler;
 use coop_store::Store;
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +28,8 @@ fn test_config(db: &std::path::Path) -> Config {
     api_keys.insert("test-key".to_string(), "t1".to_string());
     api_keys.insert("other-key".to_string(), "t2".to_string());
     Config {
+        attestation_mode: coop_server::config::AttestationMode::Off,
+        attestation_key_file: None,
         addr: "127.0.0.1:0".to_string(),
         db_path: db.to_string_lossy().into_owned(),
         api_keys,
@@ -245,6 +250,162 @@ async fn wait_terminal_with_key(app: &Router, job_id: &str, key: &str) -> serde_
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     panic!("job {job_id} did not reach a terminal state in time");
+}
+
+#[tokio::test]
+async fn signed_attestation_surfaces_return_exact_verifiable_tenant_scoped_bytes() {
+    let root = std::env::temp_dir().join(format!("coop-api-attestation-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let db = root.join("coop.db");
+    let key_path = root.join("attestation-key.pem");
+    let signing_key = SigningKey::from_bytes(&[37_u8; 32]);
+    let verifying_key = signing_key.verifying_key();
+    write_private_key_file_new(&key_path, &signing_key).unwrap();
+
+    let mut cfg = test_config(&db);
+    cfg.attestation_mode = coop_server::config::AttestationMode::Sign;
+    cfg.attestation_key_file = Some(key_path.to_string_lossy().into_owned());
+    let store = Arc::new(Store::open(&db).await.unwrap());
+    let (app, _state, _queue_rx) = coop_server::build_app(cfg, Arc::clone(&store), loopback_addr())
+        .await
+        .unwrap();
+    store
+        .create_job_with_event(
+            "signed-job",
+            "t1",
+            "python",
+            r#"{"language":"python","code":"print(1)"}"#,
+        )
+        .await
+        .unwrap();
+    store
+        .append_event("signed-job", "stdout", &serde_json::json!({"line":"hello"}))
+        .await
+        .unwrap();
+    store
+        .finalize_with_event(
+            "signed-job",
+            "succeeded",
+            Some(0),
+            2,
+            Some(&serde_json::json!({"policy":"default"})),
+        )
+        .await
+        .unwrap();
+
+    let mut signed_detail = None;
+    for _ in 0..200 {
+        let (status, detail) = send(
+            &app,
+            request("GET", "/v1/jobs/signed-job", Some("test-key"), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        if detail["attestation"]["available"] == true {
+            signed_detail = Some(detail);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let detail = signed_detail.expect("attestation worker did not persist the signed job");
+    assert_eq!(
+        detail["attestation"]["envelope_url"],
+        "/v1/jobs/signed-job/attestation"
+    );
+
+    let capabilities = send(
+        &app,
+        request("GET", "/v1/capabilities", Some("test-key"), None),
+    )
+    .await;
+    assert_eq!(capabilities.0, StatusCode::OK);
+    assert_eq!(capabilities.1["features"]["signed_attestations"], true);
+    assert_eq!(capabilities.1["attestations"]["enabled"], true);
+    assert_eq!(
+        capabilities.1["attestations"]["public_key_url"],
+        "/v1/attestation/public-key"
+    );
+    let (public_status, public) = send(
+        &app,
+        request("GET", "/v1/attestation/public-key", Some("test-key"), None),
+    )
+    .await;
+    assert_eq!(public_status, StatusCode::OK, "{public}");
+    assert_eq!(public["algorithm"], "Ed25519");
+    assert!(public["trust_notice"]
+        .as_str()
+        .unwrap()
+        .contains("not a trust anchor"));
+
+    for path in [
+        "/v1/jobs/signed-job/attestation",
+        "/v1/jobs/signed-job/result-artifact",
+    ] {
+        let (foreign_status, foreign) =
+            send(&app, request("GET", path, Some("other-key"), None)).await;
+        assert_eq!(foreign_status, StatusCode::NOT_FOUND, "{foreign}");
+        assert_eq!(foreign["error"]["code"], "job_not_found");
+    }
+
+    let envelope_response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/jobs/signed-job/attestation",
+            Some("test-key"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(envelope_response.status(), StatusCode::OK);
+    assert_eq!(
+        envelope_response.headers()[header::CONTENT_TYPE],
+        coop_server::attestation::DSSE_ENVELOPE_MEDIA_TYPE
+    );
+    let envelope_sha256 = envelope_response.headers()["x-content-sha256"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let envelope = axum::body::to_bytes(envelope_response.into_body(), 3 << 20)
+        .await
+        .unwrap();
+    assert_eq!(format!("{:x}", Sha256::digest(&envelope)), envelope_sha256);
+
+    let result_response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/jobs/signed-job/result-artifact",
+            Some("test-key"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result_response.status(), StatusCode::OK);
+    assert_eq!(
+        result_response.headers()[header::CONTENT_TYPE],
+        coop_server::attestation::RESULT_ARTIFACT_MEDIA_TYPE
+    );
+    let result = axum::body::to_bytes(result_response.into_body(), 17 << 20)
+        .await
+        .unwrap();
+    let digest = ArtifactDigest::from_bytes(&result);
+    let verified = verify_attestation(
+        &envelope,
+        &digest,
+        &[verifying_key],
+        &VerificationPolicy::default()
+            .with_subject_name("coop://jobs/signed-job/result")
+            .with_media_type(coop_server::attestation::RESULT_ARTIFACT_MEDIA_TYPE),
+    )
+    .unwrap();
+    assert_eq!(
+        verified.statement().predicate().execution_id(),
+        "signed-job"
+    );
+    let artifact: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(artifact["stdout"], "hello");
+    assert_eq!(artifact["receipt_sha256"], detail["receipt_sha256"]);
 }
 
 fn python_name() -> &'static str {

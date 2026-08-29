@@ -1,8 +1,8 @@
 use coop_store::{
     canonical_json, capacity_error_kind, compute_receipt_sha256, is_idempotency_conflict,
     CapacityErrorKind, CreateJobOutcome, IdempotencyLookup, IdempotencyRequest, JobCursor,
-    ListJobsQuery, StorageLimits, Store, JOB_COMPLETION_RESERVE_BYTES, MAX_EVENT_BATCH_SIZE,
-    MAX_RETENTION_EVENTS_PER_BATCH,
+    ListJobsQuery, PersistAttestationOutcome, StorageLimits, Store, JOB_COMPLETION_RESERVE_BYTES,
+    MAX_EVENT_BATCH_SIZE, MAX_RETENTION_EVENTS_PER_BATCH,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -286,7 +286,7 @@ fn migrates_v01_database_without_fabricating_event_hashes() {
         connection.close().await.unwrap();
 
         let store = Store::open(&db).await.unwrap();
-        assert_eq!(store.schema_version().await.unwrap(), 3);
+        assert_eq!(store.schema_version().await.unwrap(), 4);
         let legacy = store.get_job("legacy").await.unwrap().unwrap();
         assert_eq!(legacy.status, "succeeded");
         assert!(legacy.effective_spec_json.is_none());
@@ -1016,7 +1016,7 @@ fn genuine_v2_migrates_memory_accounting_and_reconciles_covering_indexes() {
         connection.close().await.unwrap();
 
         let store = Store::open(&db).await.unwrap();
-        assert_eq!(store.schema_version().await.unwrap(), 3);
+        assert_eq!(store.schema_version().await.unwrap(), 4);
         assert_eq!(
             store.job_requested_mem_mb("v2-queued").await.unwrap(),
             Some(512)
@@ -1313,7 +1313,7 @@ fn validated_max_payload_writes_keep_healthy_reopen_on_the_bounded_fast_path() {
         .fetch_one(&mut connection)
         .await
         .unwrap();
-        assert_eq!(revision, 2);
+        assert_eq!(revision, 3);
         let accounting_revision: i64 = sqlx::query_scalar(
             "SELECT accounting_validation_revision FROM store_integrity WHERE singleton = 1",
         )
@@ -2167,7 +2167,7 @@ fn current_v3_valid_range_lifecycle_edits_are_dirty_and_fail_closed() {
         assert!(
             error
                 .to_string()
-                .contains("jobs/events were modified outside an owned write"),
+                .contains("modified outside an owned write"),
             "unexpected raw lifecycle error: {error}"
         );
     });
@@ -2437,6 +2437,237 @@ fn rejects_blank_identity_and_invalid_json() {
             .await
             .is_err());
         assert!(store.list_jobs(None, 50).await.unwrap().is_empty());
+    });
+}
+
+#[test]
+fn schema_v3_migrates_to_v4_and_current_markers_fail_closed_on_partial_attestation_schema() {
+    sqlx::test_block_on(async {
+        let db = test_db("attestation-v4-migration");
+        let store = Store::open(&db).await.unwrap();
+        store
+            .create_job_with_event("legacy-terminal", "tenant-a", "python", "{}")
+            .await
+            .unwrap();
+        store
+            .finalize_with_event("legacy-terminal", "succeeded", Some(0), 1, None)
+            .await
+            .unwrap();
+        drop(store);
+        let mut connection = raw_connection(&db).await;
+        sqlx::query("DROP TABLE attestation_outbox")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE job_attestations")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("DROP TRIGGER coop_schema_migrations_storage_guard_delete")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM schema_migrations WHERE version = 4")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA user_version = 3")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+
+        let migrated = Store::open(&db).await.unwrap();
+        assert_eq!(migrated.schema_version().await.unwrap(), 4);
+        assert_eq!(
+            migrated.pending_attestation_job_ids(10).await.unwrap(),
+            vec!["legacy-terminal"]
+        );
+        drop(migrated);
+
+        let mut connection = raw_connection(&db).await;
+        sqlx::query("DROP TABLE job_attestations")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        let error = Store::open(&db).await.unwrap_err();
+        assert!(error.to_string().contains("partially present"), "{error}");
+    });
+}
+
+#[test]
+fn terminal_outbox_and_exact_attestation_persistence_are_idempotent_immutable_and_retained() {
+    sqlx::test_block_on(async {
+        let db = test_db("attestation-persistence");
+        let store = Store::open(&db).await.unwrap();
+        store
+            .create_job_with_event(
+                "attested",
+                "tenant-a",
+                "python",
+                r#"{"language":"python","code":"print(1)"}"#,
+            )
+            .await
+            .unwrap();
+        store
+            .finalize_with_event(
+                "attested",
+                "succeeded",
+                Some(0),
+                4,
+                Some(&json!({"policy":"default"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.pending_attestation_job_ids(10).await.unwrap(),
+            vec!["attested"]
+        );
+        let receipt_json = store
+            .get_job("attested")
+            .await
+            .unwrap()
+            .unwrap()
+            .receipt_json
+            .unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&receipt_json).unwrap();
+        let receipt_sha256 = receipt["receipt_sha256"].as_str().unwrap();
+        let result = br#"{"job_id":"attested","status":"succeeded"}"#;
+        let result_sha256 = format!("{:x}", Sha256::digest(result));
+        let envelope = br#"{"payload":"c3RhdGVtZW50","payloadType":"application/vnd.in-toto+json","signatures":[]}"#;
+        let envelope_sha256 = format!("{:x}", Sha256::digest(envelope));
+        let outcome = store
+            .persist_attestation(
+                "attested",
+                &receipt_json,
+                receipt_sha256,
+                "application/vnd.coop.execution-result.v1+json",
+                result,
+                &result_sha256,
+                envelope,
+                &envelope_sha256,
+                "sha256:test-key",
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, PersistAttestationOutcome::Created);
+        assert!(store
+            .pending_attestation_job_ids(10)
+            .await
+            .unwrap()
+            .is_empty());
+        let stored = store.get_attestation("attested").await.unwrap().unwrap();
+        assert_eq!(stored.result_artifact, result);
+        assert_eq!(stored.envelope_json, envelope);
+        assert_eq!(stored.metadata.receipt_sha256, receipt_sha256);
+
+        let replay = store
+            .persist_attestation(
+                "attested",
+                &receipt_json,
+                receipt_sha256,
+                "application/vnd.coop.execution-result.v1+json",
+                result,
+                &result_sha256,
+                envelope,
+                &envelope_sha256,
+                "sha256:test-key",
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay, PersistAttestationOutcome::Existing);
+        let different = br#"{"job_id":"attested","status":"failed"}"#;
+        let different_sha = format!("{:x}", Sha256::digest(different));
+        let error = store
+            .persist_attestation(
+                "attested",
+                &receipt_json,
+                receipt_sha256,
+                "application/vnd.coop.execution-result.v1+json",
+                different,
+                &different_sha,
+                envelope,
+                &envelope_sha256,
+                "sha256:test-key",
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("immutable"), "{error}");
+
+        let (jobs, _) = store.prune_older_than(0).await.unwrap();
+        assert_eq!(jobs, 1);
+        assert!(store.get_attestation("attested").await.unwrap().is_none());
+    });
+}
+
+#[test]
+fn raw_attestation_byte_tampering_dirties_validation_and_fails_reopen() {
+    sqlx::test_block_on(async {
+        let db = test_db("attestation-tamper");
+        let store = Store::open(&db).await.unwrap();
+        store
+            .create_job_with_event("job", "tenant-a", "python", "{}")
+            .await
+            .unwrap();
+        store
+            .finalize_with_event("job", "succeeded", Some(0), 1, None)
+            .await
+            .unwrap();
+        let receipt_json = store
+            .get_job("job")
+            .await
+            .unwrap()
+            .unwrap()
+            .receipt_json
+            .unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&receipt_json).unwrap();
+        let receipt_sha256 = receipt["receipt_sha256"].as_str().unwrap();
+        let result = br#"{"ok":true}"#;
+        let result_sha256 = format!("{:x}", Sha256::digest(result));
+        let envelope = br#"{"payload":"e30=","payloadType":"x","signatures":[]}"#;
+        let envelope_sha256 = format!("{:x}", Sha256::digest(envelope));
+        store
+            .persist_attestation(
+                "job",
+                &receipt_json,
+                receipt_sha256,
+                "application/json",
+                result,
+                &result_sha256,
+                envelope,
+                &envelope_sha256,
+                "sha256:test",
+            )
+            .await
+            .unwrap();
+        drop(store);
+        let mut connection = raw_connection(&db).await;
+        assert!(sqlx::query(
+            "UPDATE job_attestations
+             SET result_artifact = CAST('{\"ok\":false}' AS BLOB)
+             WHERE job_id = 'job'",
+        )
+        .execute(&mut connection)
+        .await
+        .is_err());
+        // Even if an offline writer first removes the immutable-update guard,
+        // startup validation still catches the exact-byte digest mismatch.
+        sqlx::query("DROP TRIGGER coop_attestations_storage_guard_update")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE job_attestations
+             SET result_artifact = CAST('{\"ok\":false}' AS BLOB)
+             WHERE job_id = 'job'",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+        let error = Store::open(&db).await.unwrap_err();
+        assert!(error.to_string().contains("digest mismatch"), "{error}");
     });
 }
 

@@ -8,7 +8,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Version};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
-use coop_store::{JobCursor, JobRow, JobSummary, ListJobsQuery};
+use coop_store::{AttestationMetadata, JobCursor, JobRow, JobSummary, ListJobsQuery};
 use coop_types::{
     EffectiveJobSpec, IsolationClass, JobSpec, JobStatus, LimitEnforcement, CPU_MAX_SECONDS,
     FILE_MAX_MB, PIDS_MAX, SUPPORTED_LANGUAGES, WALL_MAX_SECONDS,
@@ -99,6 +99,21 @@ pub struct JobDetail {
     #[schema(value_type = Option<Object>)]
     pub receipt: Option<serde_json::Value>,
     pub receipt_sha256: Option<String>,
+    pub attestation: JobAttestationStatus,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct JobAttestationStatus {
+    pub available: bool,
+    pub key_id: Option<String>,
+    pub receipt_sha256: Option<String>,
+    pub result_media_type: Option<String>,
+    pub result_sha256: Option<String>,
+    pub result_size_bytes: Option<u64>,
+    pub envelope_sha256: Option<String>,
+    pub envelope_size_bytes: Option<u64>,
+    pub envelope_url: Option<String>,
+    pub result_artifact_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -155,6 +170,24 @@ pub struct CapabilitiesResponse {
     pub execution: ExecutionCapabilities,
     pub limits: LimitCapabilities,
     pub features: FeatureCapabilities,
+    pub attestations: AttestationCapabilities,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AttestationCapabilities {
+    pub enabled: bool,
+    pub algorithm: Option<String>,
+    pub envelope_format: Option<String>,
+    pub key_id: Option<String>,
+    pub public_key_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AttestationPublicKeyResponse {
+    pub algorithm: String,
+    pub key_id: String,
+    pub public_key_pem: String,
+    pub trust_notice: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -191,6 +224,7 @@ pub struct FeatureCapabilities {
     pub event_cursors: bool,
     pub stream_tickets: bool,
     pub receipts: bool,
+    pub signed_attestations: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -627,6 +661,22 @@ fn guarded_json_response<T: Serialize>(
         Ok(encoded) => encoded,
         Err(error) => return internal_error("serialize JSON response", error),
     };
+    guarded_bytes_response(
+        status,
+        encoded,
+        permit,
+        HeaderValue::from_static("application/json"),
+        None,
+    )
+}
+
+fn guarded_bytes_response(
+    status: StatusCode,
+    encoded: Vec<u8>,
+    permit: crate::LifetimePermit,
+    content_type: HeaderValue,
+    sha256: Option<&str>,
+) -> Response {
     let encoded_len = encoded.len();
     let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(1);
     tokio::spawn(async move {
@@ -658,12 +708,14 @@ fn guarded_json_response<T: Serialize>(
         });
     let mut response = Response::new(axum::body::Body::from_stream(stream));
     *response.status_mut() = status;
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
     if let Ok(value) = HeaderValue::from_str(&encoded_len.to_string()) {
         response.headers_mut().insert(header::CONTENT_LENGTH, value);
+    }
+    if let Some(sha256) = sha256.and_then(|value| HeaderValue::from_str(value).ok()) {
+        response.headers_mut().insert("x-content-sha256", sha256);
     }
     response
 }
@@ -967,6 +1019,16 @@ pub(crate) fn router(state: AppState) -> Router {
             get(job_result).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
         )
         .route(
+            "/v1/jobs/{id}/attestation",
+            get(job_attestation)
+                .route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}/result-artifact",
+            get(job_result_artifact)
+                .route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
             "/v1/jobs/{id}/stream",
             get(stream).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
         )
@@ -986,6 +1048,11 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(
             "/v1/capabilities",
             get(capabilities)
+                .route_layer(axum::middleware::from_fn(crate::auth::require_service_read)),
+        )
+        .route(
+            "/v1/attestation/public-key",
+            get(attestation_public_key)
                 .route_layer(axum::middleware::from_fn(crate::auth::require_service_read)),
         )
         .route(
@@ -1505,10 +1572,16 @@ pub async fn get_job(
         }
     };
     match state.store.get_job(&id).await {
-        Ok(Some(row)) if row.tenant == auth.tenant_id => match job_detail(&state, &row) {
-            Ok(detail) => guarded_json_response(StatusCode::OK, &detail, permit),
-            Err(e) => internal_error("decode stored job detail", e),
-        },
+        Ok(Some(row)) if row.tenant == auth.tenant_id => {
+            let metadata = match state.store.attestation_metadata(&id).await {
+                Ok(metadata) => metadata,
+                Err(error) => return internal_error("load job attestation metadata", error),
+            };
+            match job_detail(&state, &row, metadata.as_ref()) {
+                Ok(detail) => guarded_json_response(StatusCode::OK, &detail, permit),
+                Err(e) => internal_error("decode stored job detail", e),
+            }
+        }
         Ok(_) => api_error(
             StatusCode::NOT_FOUND,
             "job_not_found",
@@ -1519,7 +1592,11 @@ pub async fn get_job(
     }
 }
 
-fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::Error> {
+fn job_detail(
+    _state: &AppState,
+    row: &JobRow,
+    attestation: Option<&AttestationMetadata>,
+) -> Result<JobDetail, serde_json::Error> {
     let requested_spec: JobSpec = serde_json::from_str(&row.spec_json)?;
     let receipt: Option<serde_json::Value> = row
         .receipt_json
@@ -1661,7 +1738,153 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
         },
         receipt,
         receipt_sha256,
+        attestation: match attestation {
+            Some(attestation) => JobAttestationStatus {
+                available: true,
+                key_id: Some(attestation.key_id.clone()),
+                receipt_sha256: Some(attestation.receipt_sha256.clone()),
+                result_media_type: Some(attestation.result_media_type.clone()),
+                result_sha256: Some(attestation.result_sha256.clone()),
+                result_size_bytes: Some(attestation.result_size_bytes),
+                envelope_sha256: Some(attestation.envelope_sha256.clone()),
+                envelope_size_bytes: Some(attestation.envelope_size_bytes),
+                envelope_url: Some(format!("/v1/jobs/{}/attestation", row.job_id)),
+                result_artifact_url: Some(format!("/v1/jobs/{}/result-artifact", row.job_id)),
+            },
+            None => JobAttestationStatus {
+                available: false,
+                key_id: None,
+                receipt_sha256: None,
+                result_media_type: None,
+                result_sha256: None,
+                result_size_bytes: None,
+                envelope_sha256: None,
+                envelope_size_bytes: None,
+                envelope_url: None,
+                result_artifact_url: None,
+            },
+        },
     })
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/jobs/{id}/attestation",
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, description = "Exact persisted DSSE envelope bytes"),
+        (status = 404, body = ErrorEnvelope),
+        (status = 429, body = ErrorEnvelope),
+        (status = 503, body = ErrorEnvelope),
+        (status = 401, body = ErrorEnvelope)
+    )
+)]
+pub async fn job_attestation(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Response {
+    match owns_job(&state, &id, &auth.tenant_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "job_not_found",
+                "job not found",
+                false,
+            )
+        }
+        Err(error) => return internal_error("authorize job attestation", error),
+    }
+    let permit = match acquire_large_response(&state, &auth.tenant_id) {
+        Ok(permit) => permit,
+        Err(error) => {
+            record_lifetime_rejection(
+                state.metrics.as_ref(),
+                crate::metrics::AdmissionScope::LargeResponse,
+                error,
+            );
+            return large_response_error(error);
+        }
+    };
+    match state.store.attestation_envelope(&id).await {
+        Ok(Some((metadata, bytes))) => guarded_bytes_response(
+            StatusCode::OK,
+            bytes,
+            permit,
+            HeaderValue::from_static(crate::attestation::DSSE_ENVELOPE_MEDIA_TYPE),
+            Some(&metadata.envelope_sha256),
+        ),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "attestation_unavailable",
+            "this job does not have a persisted signed attestation",
+            false,
+        ),
+        Err(error) => internal_error("load job attestation", error),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/jobs/{id}/result-artifact",
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, description = "Exact result artifact bytes authenticated by the DSSE envelope"),
+        (status = 404, body = ErrorEnvelope),
+        (status = 429, body = ErrorEnvelope),
+        (status = 503, body = ErrorEnvelope),
+        (status = 401, body = ErrorEnvelope)
+    )
+)]
+pub async fn job_result_artifact(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Response {
+    match owns_job(&state, &id, &auth.tenant_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "job_not_found",
+                "job not found",
+                false,
+            )
+        }
+        Err(error) => return internal_error("authorize job result artifact", error),
+    }
+    let permit = match acquire_large_response(&state, &auth.tenant_id) {
+        Ok(permit) => permit,
+        Err(error) => {
+            record_lifetime_rejection(
+                state.metrics.as_ref(),
+                crate::metrics::AdmissionScope::LargeResponse,
+                error,
+            );
+            return large_response_error(error);
+        }
+    };
+    match state.store.attestation_result_artifact(&id).await {
+        Ok(Some((metadata, bytes))) => {
+            let content_type = HeaderValue::from_str(&metadata.result_media_type)
+                .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+            guarded_bytes_response(
+                StatusCode::OK,
+                bytes,
+                permit,
+                content_type,
+                Some(&metadata.result_sha256),
+            )
+        }
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "result_artifact_unavailable",
+            "this job does not have a persisted attested result artifact",
+            false,
+        ),
+        Err(error) => internal_error("load job result artifact", error),
+    }
 }
 
 /// Cancel a job. Running jobs are terminated by the executor's containment
@@ -2797,7 +3020,52 @@ pub async fn capabilities(State(state): State<AppState>) -> Response {
             event_cursors: true,
             stream_tickets: true,
             receipts: true,
+            signed_attestations: state.attestations.enabled(),
         },
+        attestations: AttestationCapabilities {
+            enabled: state.attestations.enabled(),
+            algorithm: state.attestations.enabled().then(|| "Ed25519".to_string()),
+            envelope_format: state
+                .attestations
+                .enabled()
+                .then(|| "DSSE/in-toto Statement v1".to_string()),
+            key_id: state.attestations.key_id().map(str::to_string),
+            public_key_url: state
+                .attestations
+                .enabled()
+                .then(|| "/v1/attestation/public-key".to_string()),
+        },
+    })
+    .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/attestation/public-key",
+    responses(
+        (status = 200, body = AttestationPublicKeyResponse),
+        (status = 404, body = ErrorEnvelope),
+        (status = 401, body = ErrorEnvelope)
+    )
+)]
+pub async fn attestation_public_key(State(state): State<AppState>) -> Response {
+    let (Some(key_id), Some(public_key_pem)) = (
+        state.attestations.key_id(),
+        state.attestations.public_key_pem(),
+    ) else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "attestations_disabled",
+            "this server has no attestation signing key",
+            false,
+        );
+    };
+    Json(AttestationPublicKeyResponse {
+        algorithm: "Ed25519".to_string(),
+        key_id: key_id.to_string(),
+        public_key_pem: public_key_pem.to_string(),
+        trust_notice: "The key id identifies this key but is not a trust anchor. Pin or distribute the public key through an authenticated out-of-band channel before relying on signatures."
+            .to_string(),
     })
     .into_response()
 }

@@ -54,19 +54,28 @@ pub enum IdempotencyLookup {
     Conflict,
 }
 
-const CURRENT_SCHEMA_VERSION: i64 = 3;
-const ROW_VALIDATION_REVISION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
+const ROW_VALIDATION_REVISION: i64 = 3;
 // Transaction-local durable sentinel used to distinguish Coop-owned writes
 // from offline/raw SQL changes in the validation-dirty triggers. SQLite's
 // immediate writer lock prevents another connection from observing or using
 // the sentinel until the transaction commits (which Coop never does).
 const OWNED_ROW_WRITE_REVISION: i64 = ROW_VALIDATION_REVISION + 1;
-const STORAGE_GUARD_REVISION_MARKER: &str = "coop-storage-guard-r2";
+const STORAGE_GUARD_REVISION_MARKER: &str = "coop-storage-guard-r3";
 const ACCOUNTING_VALIDATION_REVISION: i64 = 1;
 const OWNED_ACCOUNTING_WRITE_REVISION: i64 = ACCOUNTING_VALIDATION_REVISION + 1;
 pub const JOB_COMPLETION_RESERVE_BYTES: u64 = 32 * 1024 * 1024;
+/// Portion of a job's admission-time completion reserve retained after its
+/// receipt commits and until its durable attestation outbox item is either
+/// signed or explicitly waived by a server running with attestations off.
+pub const ATTESTATION_RESERVE_BYTES: u64 = 20 * 1024 * 1024;
+/// Exact persisted result artifacts are bounded independently of SQLite and
+/// HTTP response limits. Two 1 MiB output streams can expand under JSON
+/// escaping; 16 MiB leaves a deterministic fail-closed ceiling.
+pub const MAX_RESULT_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_ATTESTATION_ENVELOPE_BYTES: usize = 2 * 1024 * 1024;
 const LOGICAL_ROW_OVERHEAD_BYTES: u64 = 64;
-const TERMINAL_RESERVE_BYTES: u64 = 64 * 1024;
+const TERMINAL_RESERVE_BYTES: u64 = ATTESTATION_RESERVE_BYTES;
 const TENANT_QUOTA_MARKER: &str = "coop-capacity:tenant-logical-bytes";
 const GLOBAL_QUOTA_MARKER: &str = "coop-capacity:global-logical-bytes";
 const FREE_SPACE_MARKER: &str = "coop-capacity:filesystem-reserve";
@@ -87,7 +96,7 @@ pub fn capacity_error_kind(error: &sqlx::Error) -> Option<CapacityErrorKind> {
         None
     }
 }
-const STORAGE_GUARD_NAMES: [&str; 14] = [
+const STORAGE_GUARD_NAMES: [&str; 24] = [
     "coop_schema_migrations_storage_guard_insert",
     "coop_schema_migrations_storage_guard_update",
     "coop_schema_migrations_storage_guard_delete",
@@ -102,6 +111,16 @@ const STORAGE_GUARD_NAMES: [&str; 14] = [
     "coop_events_validation_dirty_insert",
     "coop_events_validation_dirty_update",
     "coop_events_validation_dirty_delete",
+    "coop_attestations_storage_guard_insert",
+    "coop_attestations_storage_guard_update",
+    "coop_attestations_validation_dirty_insert",
+    "coop_attestations_validation_dirty_update",
+    "coop_attestations_validation_dirty_delete",
+    "coop_attestation_outbox_storage_guard_insert",
+    "coop_attestation_outbox_storage_guard_update",
+    "coop_attestation_outbox_validation_dirty_insert",
+    "coop_attestation_outbox_validation_dirty_update",
+    "coop_attestation_outbox_validation_dirty_delete",
 ];
 const ACCOUNTING_GUARD_NAMES: [&str; 26] = [
     "coop_usage_aggregate_insert",
@@ -166,6 +185,47 @@ pub struct JobRow {
     pub spec_json: String,
     pub effective_spec_json: Option<String>,
     pub receipt_json: Option<String>,
+}
+
+/// Small retrieval projection for an immutable signed execution attestation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttestationMetadata {
+    pub job_id: String,
+    pub receipt_sha256: String,
+    pub result_media_type: String,
+    pub result_sha256: String,
+    pub result_size_bytes: u64,
+    pub envelope_sha256: String,
+    pub envelope_size_bytes: u64,
+    pub key_id: String,
+    pub created_at_ms: i64,
+}
+
+/// Exact bytes returned by the artifact and DSSE download endpoints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAttestation {
+    pub metadata: AttestationMetadata,
+    pub result_artifact: Vec<u8>,
+    pub envelope_json: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttestationSourceJob {
+    pub job_id: String,
+    pub tenant: String,
+    pub status: String,
+    pub created_at_ms: i64,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: i64,
+    pub exit_code: Option<i32>,
+    pub receipt_json: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistAttestationOutcome {
+    Created,
+    Existing,
+    StaleReceipt,
 }
 
 /// Lightweight projection for job-list surfaces. Deliberately excludes the
@@ -404,6 +464,24 @@ async fn actual_job_logical_bytes_tx(
                           + length(CAST(event.prev_hash AS BLOB))
                           + length(CAST(event.event_hash AS BLOB))
                       ) FROM events AS event WHERE event.job_id = job.job_id
+                    ), 0)
+                  + COALESCE((
+                      SELECT 64
+                          + length(CAST(attestation.job_id AS BLOB))
+                          + length(CAST(attestation.receipt_sha256 AS BLOB))
+                          + length(CAST(attestation.result_media_type AS BLOB))
+                          + length(attestation.result_artifact)
+                          + length(CAST(attestation.result_sha256 AS BLOB))
+                          + length(attestation.envelope_json)
+                          + length(CAST(attestation.envelope_sha256 AS BLOB))
+                          + length(CAST(attestation.key_id AS BLOB))
+                      FROM job_attestations AS attestation
+                      WHERE attestation.job_id = job.job_id
+                    ), 0)
+                  + COALESCE((
+                      SELECT 64 + length(CAST(outbox.job_id AS BLOB))
+                      FROM attestation_outbox AS outbox
+                      WHERE outbox.job_id = job.job_id
                     ), 0) AS retained_bytes
          FROM jobs AS job WHERE job.job_id = ?1",
     )
@@ -460,7 +538,20 @@ async fn reconcile_job_storage_tx(
         }
     }
     if release_reservation {
-        new_reserved = 0;
+        let attestation_pending: i64 = sqlx::query(
+            "SELECT EXISTS(
+                 SELECT 1 FROM attestation_outbox WHERE job_id = ?1
+             ) AS pending",
+        )
+        .bind(job_id)
+        .fetch_one(&mut **tx)
+        .await?
+        .try_get("pending")?;
+        new_reserved = if attestation_pending != 0 {
+            new_reserved.min(ATTESTATION_RESERVE_BYTES)
+        } else {
+            0
+        };
     }
     sqlx::query(
         "UPDATE job_storage_usage
@@ -779,15 +870,13 @@ impl Store {
                 "database has a partial v3 physical schema ({v3_table_count}/4 required tables)"
             )));
         }
-        if version == CURRENT_SCHEMA_VERSION && v3_table_count != 4 {
+        if version >= 3 && v3_table_count != 4 {
             return Err(sqlx::Error::Protocol(
-                "v3 database markers require the complete physical v3 schema".to_string(),
+                "v3-or-newer database markers require the complete physical v3 schema".to_string(),
             ));
         }
         let physical_v3 = physical_v3_signature;
-        if physical_v3
-            && (history_version != CURRENT_SCHEMA_VERSION || user_version != CURRENT_SCHEMA_VERSION)
-        {
+        if physical_v3 && !matches!((history_version, user_version), (3, 3) | (4, 4)) {
             return Err(sqlx::Error::Protocol(format!(
                 "physical v3 schema has downgraded or missing version markers (history={history_version}, user_version={user_version})"
             )));
@@ -800,6 +889,7 @@ impl Store {
                 Self::create_current_schema(conn).await?;
                 record_migration(conn, 1).await?;
                 record_migration(conn, 2).await?;
+                record_migration(conn, 3).await?;
                 record_migration(conn, CURRENT_SCHEMA_VERSION).await?;
             }
             (0, true) | (1, true) => {
@@ -815,6 +905,7 @@ impl Store {
                         record_migration(conn, 1).await?;
                     }
                     record_migration(conn, 2).await?;
+                    record_migration(conn, 3).await?;
                     record_migration(conn, CURRENT_SCHEMA_VERSION).await?;
                 }
             }
@@ -823,7 +914,7 @@ impl Store {
                     "schema migration history exists but the jobs table is missing".to_string(),
                 ));
             }
-            (2, true) | (CURRENT_SCHEMA_VERSION, true) => {}
+            (2, true) | (3, true) | (CURRENT_SCHEMA_VERSION, true) => {}
             (CURRENT_SCHEMA_VERSION, false) => {
                 return Err(sqlx::Error::Protocol(
                     "current schema migration is recorded but the jobs table is missing"
@@ -852,6 +943,12 @@ impl Store {
         // every open and prevents cursor reuse/exhaustion on the fast path.
         validated_event_sequence_counter(conn, "events").await?;
         Self::ensure_integrity_state(conn).await?;
+        // v4 tables must exist before row validation and logical accounting
+        // can inspect or charge them. Creating them is permitted only while
+        // migrating a legitimately marked pre-v4 database; current v4
+        // markers with missing tables fail closed inside this helper.
+        Self::ensure_retention_tombstones(conn).await?;
+        Self::ensure_attestation_tables(conn).await?;
         let row_validation_current = Self::row_validation_current(conn).await?;
         let storage_guards_were_current = storage_guards_current(conn).await?;
         // Current guards turn every committed raw jobs/events mutation into a
@@ -861,11 +958,14 @@ impl Store {
         // blessing such edits would launder immutable identity/evidence.
         if schema_markers_current && storage_guards_were_current && !row_validation_current {
             return Err(sqlx::Error::Protocol(
-                "jobs/events were modified outside an owned write".to_string(),
+                "jobs/events/attestations were modified outside an owned write".to_string(),
             ));
         }
-        let requires_full_validation =
-            !schema_markers_current || !row_validation_current || !storage_guards_were_current;
+        let attestation_outbox_seeded = Self::seed_missing_attestation_outbox(conn).await?;
+        let requires_full_validation = !schema_markers_current
+            || !row_validation_current
+            || !storage_guards_were_current
+            || attestation_outbox_seeded;
         if requires_full_validation {
             Self::validate_current_rows(conn).await?;
             validate_foreign_keys(conn).await?;
@@ -879,6 +979,7 @@ impl Store {
         }
         record_migration(conn, 1).await?;
         record_migration(conn, 2).await?;
+        record_migration(conn, 3).await?;
         record_migration(conn, CURRENT_SCHEMA_VERSION).await?;
 
         sqlx::query(&format!("PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"))
@@ -1059,6 +1160,7 @@ impl Store {
     async fn create_indexes(conn: &mut SqliteConnection) -> StoreResult<()> {
         Self::ensure_integrity_state(conn).await?;
         Self::ensure_retention_tombstones(conn).await?;
+        Self::ensure_attestation_tables(conn).await?;
         ensure_admitted_memory_column(conn, false).await?;
         let accounting_guards_were_current = accounting_guards_current(conn).await?;
         drop_accounting_guard_triggers(conn).await?;
@@ -1110,6 +1212,165 @@ impl Store {
         }
         create_storage_guard_triggers(conn).await?;
         Ok(())
+    }
+
+    async fn ensure_attestation_tables(conn: &mut SqliteConnection) -> StoreResult<()> {
+        let attestations_exist = table_exists(conn, "job_attestations").await?;
+        let outbox_exists = table_exists(conn, "attestation_outbox").await?;
+        let history_version: i64 =
+            sqlx::query("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations")
+                .fetch_one(&mut *conn)
+                .await?
+                .try_get("version")?;
+        let user_version: i64 = sqlx::query("PRAGMA user_version")
+            .fetch_one(&mut *conn)
+            .await?
+            .try_get("user_version")?;
+        if attestations_exist != outbox_exists {
+            return Err(sqlx::Error::Protocol(
+                "attestation schema is partially present".to_string(),
+            ));
+        }
+        if !attestations_exist && (history_version >= 4 || user_version >= 4) {
+            return Err(sqlx::Error::Protocol(
+                "v4 database is missing durable attestation tables".to_string(),
+            ));
+        }
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS job_attestations (
+                 job_id TEXT PRIMARY KEY NOT NULL
+                     REFERENCES jobs(job_id) ON DELETE CASCADE
+                     CHECK (typeof(job_id) = 'text' AND length(trim(job_id)) > 0),
+                 receipt_sha256 TEXT NOT NULL
+                     CHECK (typeof(receipt_sha256) = 'text'
+                            AND length(receipt_sha256) = 64
+                            AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'),
+                 result_media_type TEXT NOT NULL
+                     CHECK (typeof(result_media_type) = 'text'
+                            AND length(trim(result_media_type)) BETWEEN 1 AND 255),
+                 result_artifact BLOB NOT NULL
+                     CHECK (typeof(result_artifact) = 'blob'
+                            AND length(result_artifact) BETWEEN 1 AND 16777216
+                            AND json_valid(CAST(result_artifact AS TEXT))),
+                 result_sha256 TEXT NOT NULL
+                     CHECK (typeof(result_sha256) = 'text'
+                            AND length(result_sha256) = 64
+                            AND result_sha256 NOT GLOB '*[^0-9a-f]*'),
+                 envelope_json BLOB NOT NULL
+                     CHECK (typeof(envelope_json) = 'blob'
+                            AND length(envelope_json) BETWEEN 1 AND 2097152
+                            AND json_valid(CAST(envelope_json AS TEXT))),
+                 envelope_sha256 TEXT NOT NULL
+                     CHECK (typeof(envelope_sha256) = 'text'
+                            AND length(envelope_sha256) = 64
+                            AND envelope_sha256 NOT GLOB '*[^0-9a-f]*'),
+                 key_id TEXT NOT NULL
+                     CHECK (typeof(key_id) = 'text'
+                            AND length(trim(key_id)) BETWEEN 1 AND 256),
+                 created_at_ms INTEGER NOT NULL
+                     CHECK (typeof(created_at_ms) = 'integer' AND created_at_ms >= 0)
+             )",
+        )
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS attestation_outbox (
+                 job_id TEXT PRIMARY KEY NOT NULL
+                     REFERENCES jobs(job_id) ON DELETE CASCADE
+                     CHECK (typeof(job_id) = 'text' AND length(trim(job_id)) > 0),
+                 pending_since_ms INTEGER NOT NULL
+                     CHECK (typeof(pending_since_ms) = 'integer' AND pending_since_ms >= 0),
+                 attempt_count INTEGER NOT NULL DEFAULT 0
+                     CHECK (typeof(attempt_count) = 'integer'
+                            AND attempt_count BETWEEN 0 AND 2147483647),
+                 next_attempt_ms INTEGER NOT NULL
+                     CHECK (typeof(next_attempt_ms) = 'integer' AND next_attempt_ms >= 0)
+             )",
+        )
+        .execute(&mut *conn)
+        .await?;
+        validate_required_columns(
+            conn,
+            "job_attestations",
+            &[
+                RequiredColumn::primary_key("job_id", "TEXT"),
+                RequiredColumn::not_null("receipt_sha256", "TEXT"),
+                RequiredColumn::not_null("result_media_type", "TEXT"),
+                RequiredColumn::not_null("result_artifact", "BLOB"),
+                RequiredColumn::not_null("result_sha256", "TEXT"),
+                RequiredColumn::not_null("envelope_json", "BLOB"),
+                RequiredColumn::not_null("envelope_sha256", "TEXT"),
+                RequiredColumn::not_null("key_id", "TEXT"),
+                RequiredColumn::not_null("created_at_ms", "INTEGER"),
+            ],
+        )
+        .await?;
+        validate_required_columns(
+            conn,
+            "attestation_outbox",
+            &[
+                RequiredColumn::primary_key("job_id", "TEXT"),
+                RequiredColumn::not_null("pending_since_ms", "INTEGER"),
+                RequiredColumn::not_null("attempt_count", "INTEGER"),
+                RequiredColumn::not_null("next_attempt_ms", "INTEGER"),
+            ],
+        )
+        .await?;
+        for table in ["job_attestations", "attestation_outbox"] {
+            let foreign_keys = sqlx::query(&format!("PRAGMA foreign_key_list({table})"))
+                .fetch_all(&mut *conn)
+                .await?;
+            let has_job_cascade = foreign_keys.iter().any(|row| {
+                row.get::<String, _>("table") == "jobs"
+                    && row.get::<String, _>("from") == "job_id"
+                    && row.get::<String, _>("to") == "job_id"
+                    && row
+                        .get::<String, _>("on_delete")
+                        .eq_ignore_ascii_case("CASCADE")
+            });
+            if !has_job_cascade {
+                return Err(sqlx::Error::Protocol(format!(
+                    "{table}.job_id is missing its cascading jobs foreign key"
+                )));
+            }
+        }
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_attestation_outbox_pending
+             ON attestation_outbox(next_attempt_ms ASC, pending_since_ms ASC, job_id ASC)",
+        )
+        .execute(&mut *conn)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Re-establish crash-convergent signing work only after the caller has
+    /// checked whether durable row validation was already dirty. Keeping this
+    /// separate from schema creation prevents startup backfill from masking an
+    /// unrelated raw mutation before the fail-closed check runs.
+    async fn seed_missing_attestation_outbox(conn: &mut SqliteConnection) -> StoreResult<bool> {
+        let inserted = sqlx::query(
+            "INSERT OR IGNORE INTO attestation_outbox(
+                 job_id, pending_since_ms, attempt_count, next_attempt_ms
+             )
+             SELECT jobs.job_id,
+                    COALESCE(jobs.finished_at_ms, jobs.created_at_ms),
+                    0,
+                    COALESCE(jobs.finished_at_ms, jobs.created_at_ms)
+             FROM jobs
+             LEFT JOIN job_attestations ON job_attestations.job_id = jobs.job_id
+             WHERE jobs.status IN ('succeeded','failed','timed_out','oom_killed','cancelled','error')
+               AND jobs.receipt_json IS NOT NULL
+               AND job_attestations.job_id IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM retention_tombstones
+                   WHERE retention_tombstones.job_id = jobs.job_id
+               )",
+        )
+        .execute(&mut *conn)
+        .await?;
+        Ok(inserted.rows_affected() != 0)
     }
 
     async fn ensure_storage_accounting(
@@ -1215,6 +1476,24 @@ impl Store {
                                   + length(CAST(event.event_hash AS BLOB))
                               )
                               FROM events AS event WHERE event.job_id = job.job_id
+                            ), 0)
+                          + COALESCE((
+                              SELECT 64
+                                  + length(CAST(attestation.job_id AS BLOB))
+                                  + length(CAST(attestation.receipt_sha256 AS BLOB))
+                                  + length(CAST(attestation.result_media_type AS BLOB))
+                                  + length(attestation.result_artifact)
+                                  + length(CAST(attestation.result_sha256 AS BLOB))
+                                  + length(attestation.envelope_json)
+                                  + length(CAST(attestation.envelope_sha256 AS BLOB))
+                                  + length(CAST(attestation.key_id AS BLOB))
+                              FROM job_attestations AS attestation
+                              WHERE attestation.job_id = job.job_id
+                            ), 0)
+                          + COALESCE((
+                              SELECT 64 + length(CAST(outbox.job_id AS BLOB))
+                              FROM attestation_outbox AS outbox
+                              WHERE outbox.job_id = job.job_id
                             ), 0),
                         CASE WHEN job.status IN ('queued','running') THEN ?1 ELSE 0 END,
                         job.admitted_mem_mb
@@ -1352,8 +1631,37 @@ impl Store {
                                 + length(CAST(event.event_hash AS BLOB))
                             ) FROM events AS event WHERE event.job_id = job.job_id
                           ), 0)
+                        + COALESCE((
+                            SELECT 64
+                                + length(CAST(attestation.job_id AS BLOB))
+                                + length(CAST(attestation.receipt_sha256 AS BLOB))
+                                + length(CAST(attestation.result_media_type AS BLOB))
+                                + length(attestation.result_artifact)
+                                + length(CAST(attestation.result_sha256 AS BLOB))
+                                + length(attestation.envelope_json)
+                                + length(CAST(attestation.envelope_sha256 AS BLOB))
+                                + length(CAST(attestation.key_id AS BLOB))
+                            FROM job_attestations AS attestation
+                            WHERE attestation.job_id = job.job_id
+                          ), 0)
+                        + COALESCE((
+                            SELECT 64 + length(CAST(outbox.job_id AS BLOB))
+                            FROM attestation_outbox AS outbox
+                            WHERE outbox.job_id = job.job_id
+                          ), 0)
                     )
-                    OR (job.status NOT IN ('queued','running') AND usage.reserved_bytes != 0)
+                    OR (job.status NOT IN ('queued','running')
+                        AND NOT EXISTS (
+                            SELECT 1 FROM attestation_outbox AS pending
+                            WHERE pending.job_id = job.job_id
+                        )
+                        AND usage.reserved_bytes != 0)
+                    OR (job.status NOT IN ('queued','running')
+                        AND EXISTS (
+                            SELECT 1 FROM attestation_outbox AS pending
+                            WHERE pending.job_id = job.job_id
+                        )
+                        AND usage.reserved_bytes > 20971520)
              )
              OR EXISTS(
                  SELECT 1 FROM job_storage_usage AS usage
@@ -1637,7 +1945,98 @@ impl Store {
             ));
         }
 
+        let invalid_attestations: i64 = sqlx::query(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM job_attestations AS attestation
+                 LEFT JOIN jobs AS job ON job.job_id = attestation.job_id
+                 WHERE job.job_id IS NULL
+                    OR job.status NOT IN ('succeeded','failed','timed_out','oom_killed','cancelled','error')
+                    OR job.receipt_json IS NULL
+                    OR COALESCE(json_type(job.receipt_json, '$.receipt_sha256'), '') != 'text'
+                    OR COALESCE(json_extract(job.receipt_json, '$.receipt_sha256'), '') != attestation.receipt_sha256
+                    OR typeof(attestation.job_id) != 'text'
+                    OR length(trim(attestation.job_id)) = 0
+                    OR typeof(attestation.receipt_sha256) != 'text'
+                    OR length(attestation.receipt_sha256) != 64
+                    OR attestation.receipt_sha256 GLOB '*[^0-9a-f]*'
+                    OR typeof(attestation.result_media_type) != 'text'
+                    OR length(trim(attestation.result_media_type)) NOT BETWEEN 1 AND 255
+                    OR typeof(attestation.result_artifact) != 'blob'
+                    OR length(attestation.result_artifact) NOT BETWEEN 1 AND 16777216
+                    OR NOT json_valid(CAST(attestation.result_artifact AS TEXT))
+                    OR typeof(attestation.result_sha256) != 'text'
+                    OR length(attestation.result_sha256) != 64
+                    OR attestation.result_sha256 GLOB '*[^0-9a-f]*'
+                    OR typeof(attestation.envelope_json) != 'blob'
+                    OR length(attestation.envelope_json) NOT BETWEEN 1 AND 2097152
+                    OR NOT json_valid(CAST(attestation.envelope_json AS TEXT))
+                    OR typeof(attestation.envelope_sha256) != 'text'
+                    OR length(attestation.envelope_sha256) != 64
+                    OR attestation.envelope_sha256 GLOB '*[^0-9a-f]*'
+                    OR typeof(attestation.key_id) != 'text'
+                    OR length(trim(attestation.key_id)) NOT BETWEEN 1 AND 256
+                    OR typeof(attestation.created_at_ms) != 'integer'
+                    OR attestation.created_at_ms < 0
+             ) OR EXISTS(
+                 SELECT 1
+                 FROM attestation_outbox AS outbox
+                 LEFT JOIN jobs AS job ON job.job_id = outbox.job_id
+                 WHERE job.job_id IS NULL
+                    OR job.status NOT IN ('succeeded','failed','timed_out','oom_killed','cancelled','error')
+                    OR job.receipt_json IS NULL
+                    OR COALESCE(json_type(job.receipt_json, '$.receipt_sha256'), '') != 'text'
+                    OR length(COALESCE(json_extract(job.receipt_json, '$.receipt_sha256'), '')) != 64
+                    OR COALESCE(json_extract(job.receipt_json, '$.receipt_sha256'), '') GLOB '*[^0-9a-f]*'
+                    OR typeof(outbox.job_id) != 'text'
+                    OR length(trim(outbox.job_id)) = 0
+                    OR typeof(outbox.pending_since_ms) != 'integer'
+                    OR outbox.pending_since_ms < 0
+                    OR typeof(outbox.attempt_count) != 'integer'
+                    OR outbox.attempt_count NOT BETWEEN 0 AND 2147483647
+                    OR typeof(outbox.next_attempt_ms) != 'integer'
+                    OR outbox.next_attempt_ms < 0
+                    OR EXISTS (
+                        SELECT 1 FROM job_attestations
+                        WHERE job_attestations.job_id = outbox.job_id
+                    )
+             ) AS invalid",
+        )
+        .fetch_one(&mut *conn)
+        .await?
+        .try_get("invalid")?;
+        if invalid_attestations != 0 {
+            return Err(sqlx::Error::Protocol(
+                "attestation rows are structurally invalid or disagree with terminal jobs"
+                    .to_string(),
+            ));
+        }
+
         Self::validate_current_utf8(conn).await?;
+        Self::validate_attestation_digests(conn).await?;
+        Ok(())
+    }
+
+    async fn validate_attestation_digests(conn: &mut SqliteConnection) -> StoreResult<()> {
+        let mut rows = sqlx::query(
+            "SELECT rowid AS storage_rowid, result_artifact, result_sha256,
+                    envelope_json, envelope_sha256
+             FROM job_attestations ORDER BY rowid ASC",
+        )
+        .fetch(&mut *conn);
+        while let Some(row) = rows.try_next().await? {
+            let rowid: i64 = row.try_get("storage_rowid")?;
+            let result: Vec<u8> = row.try_get("result_artifact")?;
+            let expected_result: String = row.try_get("result_sha256")?;
+            let envelope: Vec<u8> = row.try_get("envelope_json")?;
+            let expected_envelope: String = row.try_get("envelope_sha256")?;
+            if sha256_hex(&result) != expected_result || sha256_hex(&envelope) != expected_envelope
+            {
+                return Err(sqlx::Error::Protocol(format!(
+                    "job_attestations rowid {rowid} has an exact-byte digest mismatch"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1709,6 +2108,68 @@ impl Store {
                 ] {
                     validate_utf8_bytes("events", seq, column, &bytes)?;
                 }
+            }
+        }
+
+        {
+            let mut rows = sqlx::query(
+                "SELECT rowid AS storage_rowid,
+                        CAST(job_id AS BLOB) AS job_id_bytes,
+                        CAST(receipt_sha256 AS BLOB) AS receipt_sha256_bytes,
+                        CAST(result_media_type AS BLOB) AS result_media_type_bytes,
+                        result_artifact,
+                        CAST(result_sha256 AS BLOB) AS result_sha256_bytes,
+                        envelope_json,
+                        CAST(envelope_sha256 AS BLOB) AS envelope_sha256_bytes,
+                        CAST(key_id AS BLOB) AS key_id_bytes
+                 FROM job_attestations ORDER BY rowid ASC",
+            )
+            .fetch(&mut *conn);
+            while let Some(row) = rows.try_next().await? {
+                let rowid: i64 = row.try_get("storage_rowid")?;
+                for (column, bytes) in [
+                    ("job_id", row.try_get::<Vec<u8>, _>("job_id_bytes")?),
+                    (
+                        "receipt_sha256",
+                        row.try_get::<Vec<u8>, _>("receipt_sha256_bytes")?,
+                    ),
+                    (
+                        "result_media_type",
+                        row.try_get::<Vec<u8>, _>("result_media_type_bytes")?,
+                    ),
+                    (
+                        "result_artifact",
+                        row.try_get::<Vec<u8>, _>("result_artifact")?,
+                    ),
+                    (
+                        "result_sha256",
+                        row.try_get::<Vec<u8>, _>("result_sha256_bytes")?,
+                    ),
+                    ("envelope_json", row.try_get::<Vec<u8>, _>("envelope_json")?),
+                    (
+                        "envelope_sha256",
+                        row.try_get::<Vec<u8>, _>("envelope_sha256_bytes")?,
+                    ),
+                    ("key_id", row.try_get::<Vec<u8>, _>("key_id_bytes")?),
+                ] {
+                    validate_utf8_bytes("job_attestations", rowid, column, &bytes)?;
+                }
+            }
+        }
+
+        {
+            let mut rows = sqlx::query(
+                "SELECT rowid AS storage_rowid, CAST(job_id AS BLOB) AS job_id_bytes
+                 FROM attestation_outbox ORDER BY rowid ASC",
+            )
+            .fetch(&mut *conn);
+            while let Some(row) = rows.try_next().await? {
+                validate_utf8_bytes(
+                    "attestation_outbox",
+                    row.try_get("storage_rowid")?,
+                    "job_id",
+                    &row.try_get::<Vec<u8>, _>("job_id_bytes")?,
+                )?;
             }
         }
         Ok(())
@@ -2408,6 +2869,15 @@ impl Store {
             .bind(receipt_json)
             .execute(&mut *tx)
             .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO attestation_outbox(
+                 job_id, pending_since_ms, attempt_count, next_attempt_ms
+             ) VALUES (?1, ?2, 0, ?2)",
+        )
+        .bind(job_id)
+        .bind(finished_at)
+        .execute(&mut *tx)
+        .await?;
         reconcile_job_storage_tx(&mut tx, job_id, true, &self.db_path, self.limits).await?;
         Self::mark_row_writes_validated(&mut tx).await?;
         tx.commit().await?;
@@ -2636,6 +3106,384 @@ impl Store {
                 .map(|event| event.event_hash.clone()),
         };
         Ok(EventChainVerification { head, valid })
+    }
+
+    /// Oldest durable attestation work first. The outbox row is committed in
+    /// the terminal transaction, while signing and the immutable result row
+    /// intentionally happen later and can be retried after any crash.
+    pub async fn pending_attestation_job_ids(&self, limit: i64) -> StoreResult<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT attestation_outbox.job_id
+             FROM attestation_outbox
+             INNER JOIN jobs ON jobs.job_id = attestation_outbox.job_id
+             WHERE jobs.status IN ('succeeded','failed','timed_out','oom_killed','cancelled','error')
+               AND jobs.receipt_json IS NOT NULL
+               AND attestation_outbox.next_attempt_ms <= ?2
+               AND NOT EXISTS (
+                   SELECT 1 FROM retention_tombstones
+                   WHERE retention_tombstones.job_id = jobs.job_id
+               )
+             ORDER BY attestation_outbox.next_attempt_ms ASC,
+                      attestation_outbox.pending_since_ms ASC,
+                      attestation_outbox.job_id ASC
+             LIMIT ?1",
+        )
+        .bind(limit.clamp(1, 256))
+        .bind(now_ms())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(|row| row.try_get("job_id")).collect()
+    }
+
+    pub async fn attestation_source(
+        &self,
+        job_id: &str,
+    ) -> StoreResult<Option<AttestationSourceJob>> {
+        let row = sqlx::query(
+            "SELECT jobs.job_id, jobs.tenant, jobs.status, jobs.created_at_ms,
+                    jobs.started_at_ms, jobs.finished_at_ms, jobs.exit_code,
+                    jobs.receipt_json
+             FROM jobs
+             INNER JOIN attestation_outbox ON attestation_outbox.job_id = jobs.job_id
+             WHERE jobs.job_id = ?1
+               AND jobs.status IN ('succeeded','failed','timed_out','oom_killed','cancelled','error')
+               AND jobs.receipt_json IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM retention_tombstones
+                   WHERE retention_tombstones.job_id = jobs.job_id
+               )",
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let exit_code = row
+                .try_get::<Option<i64>, _>("exit_code")?
+                .map(i32::try_from)
+                .transpose()
+                .map_err(|_| {
+                    sqlx::Error::Protocol("exit_code is outside the i32 range".to_string())
+                })?;
+            Ok(AttestationSourceJob {
+                job_id: row.try_get("job_id")?,
+                tenant: row.try_get("tenant")?,
+                status: row.try_get("status")?,
+                created_at_ms: row.try_get("created_at_ms")?,
+                started_at_ms: row.try_get("started_at_ms")?,
+                finished_at_ms: row.try_get("finished_at_ms")?,
+                exit_code,
+                receipt_json: row.try_get("receipt_json")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Persist exact result and DSSE bytes iff the terminal receipt is still
+    /// byte-for-byte identical to the one that was signed. An existing exact
+    /// row is an idempotent replay; any differing row fails closed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn persist_attestation(
+        &self,
+        job_id: &str,
+        expected_receipt_json: &str,
+        receipt_sha256: &str,
+        result_media_type: &str,
+        result_artifact: &[u8],
+        result_sha256: &str,
+        envelope_json: &[u8],
+        envelope_sha256: &str,
+        key_id: &str,
+    ) -> StoreResult<PersistAttestationOutcome> {
+        if job_id.trim().is_empty()
+            || result_media_type.trim().is_empty()
+            || result_media_type.len() > 255
+            || key_id.trim().is_empty()
+            || key_id.len() > 256
+            || result_artifact.is_empty()
+            || result_artifact.len() > MAX_RESULT_ARTIFACT_BYTES
+            || envelope_json.is_empty()
+            || envelope_json.len() > MAX_ATTESTATION_ENVELOPE_BYTES
+            || !is_lower_sha256(receipt_sha256)
+            || !is_lower_sha256(result_sha256)
+            || !is_lower_sha256(envelope_sha256)
+        {
+            return Err(sqlx::Error::InvalidArgument(
+                "attestation fields exceed the strict v4 storage profile".to_string(),
+            ));
+        }
+        let receipt: Value = serde_json::from_str(expected_receipt_json)
+            .map_err(|error| sqlx::Error::InvalidArgument(error.to_string()))?;
+        if !receipt.is_object()
+            || compute_receipt_sha256(&receipt) != receipt_sha256
+            || receipt.get("receipt_sha256").and_then(Value::as_str) != Some(receipt_sha256)
+            || sha256_hex(result_artifact) != result_sha256
+            || sha256_hex(envelope_json) != envelope_sha256
+        {
+            return Err(sqlx::Error::InvalidArgument(
+                "attestation digests do not match their exact bytes".to_string(),
+            ));
+        }
+        let envelope: Value = serde_json::from_slice(envelope_json)
+            .map_err(|error| sqlx::Error::InvalidArgument(error.to_string()))?;
+        if !envelope.is_object() {
+            return Err(sqlx::Error::InvalidArgument(
+                "DSSE envelope must be a JSON object".to_string(),
+            ));
+        }
+
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        Self::begin_row_writes(&mut tx).await?;
+        if let Some(existing) = sqlx::query(
+            "SELECT receipt_sha256, result_media_type, result_artifact,
+                    result_sha256, envelope_json, envelope_sha256, key_id
+             FROM job_attestations WHERE job_id = ?1",
+        )
+        .bind(job_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            let exact = existing.try_get::<String, _>("receipt_sha256")? == receipt_sha256
+                && existing.try_get::<String, _>("result_media_type")? == result_media_type
+                && existing.try_get::<Vec<u8>, _>("result_artifact")? == result_artifact
+                && existing.try_get::<String, _>("result_sha256")? == result_sha256
+                && existing.try_get::<Vec<u8>, _>("envelope_json")? == envelope_json
+                && existing.try_get::<String, _>("envelope_sha256")? == envelope_sha256
+                && existing.try_get::<String, _>("key_id")? == key_id;
+            if !exact {
+                tx.rollback().await?;
+                return Err(sqlx::Error::Protocol(
+                    "immutable job attestation already exists with different bytes".to_string(),
+                ));
+            }
+            sqlx::query("DELETE FROM attestation_outbox WHERE job_id = ?1")
+                .bind(job_id)
+                .execute(&mut *tx)
+                .await?;
+            reconcile_job_storage_tx(&mut tx, job_id, true, &self.db_path, self.limits).await?;
+            Self::mark_row_writes_validated(&mut tx).await?;
+            tx.commit().await?;
+            return Ok(PersistAttestationOutcome::Existing);
+        }
+
+        let current = sqlx::query(
+            "SELECT status, receipt_json FROM jobs
+             WHERE job_id = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM retention_tombstones
+                   WHERE retention_tombstones.job_id = jobs.job_id
+               )",
+        )
+        .bind(job_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(current) = current else {
+            tx.rollback().await?;
+            return Ok(PersistAttestationOutcome::StaleReceipt);
+        };
+        let status: String = current.try_get("status")?;
+        let current_receipt: Option<String> = current.try_get("receipt_json")?;
+        if !is_terminal_status(&status) || current_receipt.as_deref() != Some(expected_receipt_json)
+        {
+            tx.rollback().await?;
+            return Ok(PersistAttestationOutcome::StaleReceipt);
+        }
+
+        sqlx::query(
+            "INSERT INTO job_attestations(
+                 job_id, receipt_sha256, result_media_type, result_artifact,
+                 result_sha256, envelope_json, envelope_sha256, key_id, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .bind(job_id)
+        .bind(receipt_sha256)
+        .bind(result_media_type)
+        .bind(result_artifact)
+        .bind(result_sha256)
+        .bind(envelope_json)
+        .bind(envelope_sha256)
+        .bind(key_id)
+        .bind(now_ms())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM attestation_outbox WHERE job_id = ?1")
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await?;
+        reconcile_job_storage_tx(&mut tx, job_id, true, &self.db_path, self.limits).await?;
+        Self::mark_row_writes_validated(&mut tx).await?;
+        tx.commit().await?;
+        Ok(PersistAttestationOutcome::Created)
+    }
+
+    /// Resolve one outbox item under an explicit server-wide off policy. The
+    /// terminal row remains discoverable and will be re-seeded on a later
+    /// startup if signing is enabled then.
+    pub async fn waive_pending_attestation(&self, job_id: &str) -> StoreResult<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        Self::begin_row_writes(&mut tx).await?;
+        let deleted = sqlx::query("DELETE FROM attestation_outbox WHERE job_id = ?1")
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await?;
+        if deleted.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        reconcile_job_storage_tx(&mut tx, job_id, true, &self.db_path, self.limits).await?;
+        Self::mark_row_writes_validated(&mut tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Move a failed item behind currently eligible work and persist a short
+    /// retry delay. A poison item therefore cannot starve every later
+    /// terminal job in the bounded outbox page.
+    pub async fn defer_pending_attestation(
+        &self,
+        job_id: &str,
+        delay_ms: u64,
+    ) -> StoreResult<bool> {
+        let delay_ms = i64::try_from(delay_ms.clamp(100, 60_000)).unwrap_or(60_000);
+        let next_attempt_ms = now_ms().saturating_add(delay_ms);
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        Self::begin_row_writes(&mut tx).await?;
+        let updated = sqlx::query(
+            "UPDATE attestation_outbox
+             SET attempt_count = MIN(attempt_count + 1, 2147483647),
+                 next_attempt_ms = ?2
+             WHERE job_id = ?1",
+        )
+        .bind(job_id)
+        .bind(next_attempt_ms)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        Self::mark_row_writes_validated(&mut tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    pub async fn attestation_metadata(
+        &self,
+        job_id: &str,
+    ) -> StoreResult<Option<AttestationMetadata>> {
+        let row = sqlx::query(
+            "SELECT job_attestations.job_id, job_attestations.receipt_sha256,
+                    job_attestations.result_media_type,
+                    job_attestations.result_sha256,
+                    length(job_attestations.result_artifact) AS result_size_bytes,
+                    job_attestations.envelope_sha256,
+                    length(job_attestations.envelope_json) AS envelope_size_bytes,
+                    job_attestations.key_id, job_attestations.created_at_ms
+             FROM job_attestations
+             INNER JOIN jobs ON jobs.job_id = job_attestations.job_id
+             WHERE job_attestations.job_id = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM retention_tombstones
+                   WHERE retention_tombstones.job_id = jobs.job_id
+               )",
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| row_to_attestation_metadata(&row)).transpose()
+    }
+
+    pub async fn get_attestation(&self, job_id: &str) -> StoreResult<Option<StoredAttestation>> {
+        let row = sqlx::query(
+            "SELECT job_attestations.job_id, job_attestations.receipt_sha256,
+                    job_attestations.result_media_type,
+                    job_attestations.result_sha256,
+                    length(job_attestations.result_artifact) AS result_size_bytes,
+                    job_attestations.envelope_sha256,
+                    length(job_attestations.envelope_json) AS envelope_size_bytes,
+                    job_attestations.key_id, job_attestations.created_at_ms,
+                    job_attestations.result_artifact, job_attestations.envelope_json
+             FROM job_attestations
+             INNER JOIN jobs ON jobs.job_id = job_attestations.job_id
+             WHERE job_attestations.job_id = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM retention_tombstones
+                   WHERE retention_tombstones.job_id = jobs.job_id
+               )",
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let metadata = row_to_attestation_metadata(&row)?;
+            Ok(StoredAttestation {
+                metadata,
+                result_artifact: row.try_get("result_artifact")?,
+                envelope_json: row.try_get("envelope_json")?,
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn attestation_envelope(
+        &self,
+        job_id: &str,
+    ) -> StoreResult<Option<(AttestationMetadata, Vec<u8>)>> {
+        let row = sqlx::query(
+            "SELECT job_attestations.job_id, job_attestations.receipt_sha256,
+                    job_attestations.result_media_type,
+                    job_attestations.result_sha256,
+                    length(job_attestations.result_artifact) AS result_size_bytes,
+                    job_attestations.envelope_sha256,
+                    length(job_attestations.envelope_json) AS envelope_size_bytes,
+                    job_attestations.key_id, job_attestations.created_at_ms,
+                    job_attestations.envelope_json
+             FROM job_attestations
+             INNER JOIN jobs ON jobs.job_id = job_attestations.job_id
+             WHERE job_attestations.job_id = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM retention_tombstones
+                   WHERE retention_tombstones.job_id = jobs.job_id
+               )",
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let metadata = row_to_attestation_metadata(&row)?;
+            Ok((metadata, row.try_get("envelope_json")?))
+        })
+        .transpose()
+    }
+
+    pub async fn attestation_result_artifact(
+        &self,
+        job_id: &str,
+    ) -> StoreResult<Option<(AttestationMetadata, Vec<u8>)>> {
+        let row = sqlx::query(
+            "SELECT job_attestations.job_id, job_attestations.receipt_sha256,
+                    job_attestations.result_media_type,
+                    job_attestations.result_sha256,
+                    length(job_attestations.result_artifact) AS result_size_bytes,
+                    job_attestations.envelope_sha256,
+                    length(job_attestations.envelope_json) AS envelope_size_bytes,
+                    job_attestations.key_id, job_attestations.created_at_ms,
+                    job_attestations.result_artifact
+             FROM job_attestations
+             INNER JOIN jobs ON jobs.job_id = job_attestations.job_id
+             WHERE job_attestations.job_id = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM retention_tombstones
+                   WHERE retention_tombstones.job_id = jobs.job_id
+               )",
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let metadata = row_to_attestation_metadata(&row)?;
+            Ok((metadata, row.try_get("result_artifact")?))
+        })
+        .transpose()
     }
 
     pub async fn get_job(&self, job_id: &str) -> StoreResult<Option<JobRow>> {
@@ -3090,6 +3938,15 @@ impl Store {
             .bind(receipt)
             .execute(&mut *tx)
             .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO attestation_outbox(
+                 job_id, pending_since_ms, attempt_count, next_attempt_ms
+             ) VALUES (?1, ?2, 0, ?2)",
+        )
+        .bind(job_id)
+        .bind(recovered_at)
+        .execute(&mut *tx)
+        .await?;
         reconcile_job_storage_tx(&mut tx, job_id, true, &self.db_path, self.limits).await?;
         Self::mark_row_writes_validated(&mut tx).await?;
         tx.commit().await?;
@@ -3698,7 +4555,17 @@ async fn storage_guards_current(conn: &mut SqliteConnection) -> StoreResult<bool
              'coop_jobs_validation_dirty_delete',
              'coop_events_validation_dirty_insert',
              'coop_events_validation_dirty_update',
-             'coop_events_validation_dirty_delete'
+             'coop_events_validation_dirty_delete',
+             'coop_attestations_storage_guard_insert',
+             'coop_attestations_storage_guard_update',
+             'coop_attestations_validation_dirty_insert',
+             'coop_attestations_validation_dirty_update',
+             'coop_attestations_validation_dirty_delete',
+             'coop_attestation_outbox_storage_guard_insert',
+             'coop_attestation_outbox_storage_guard_update',
+             'coop_attestation_outbox_validation_dirty_insert',
+             'coop_attestation_outbox_validation_dirty_update',
+             'coop_attestation_outbox_validation_dirty_delete'
          )",
     )
     .fetch_all(&mut *conn)
@@ -3725,6 +4592,15 @@ async fn storage_guards_current(conn: &mut SqliteConnection) -> StoreResult<bool
                     }
                     "coop_events_storage_guard_update" => {
                         sql.contains("NEW.seq != OLD.seq") && sql.contains("OLD.hash_version = 1")
+                    }
+                    "coop_attestations_storage_guard_update" => {
+                        sql.contains("NEW.receipt_sha256 != OLD.receipt_sha256")
+                            && sql.contains("NEW.envelope_json != OLD.envelope_json")
+                            && sql.contains("NEW.result_artifact != OLD.result_artifact")
+                    }
+                    "coop_attestation_outbox_storage_guard_update" => {
+                        sql.contains("NEW.job_id != OLD.job_id")
+                            && sql.contains("NEW.pending_since_ms != OLD.pending_since_ms")
                     }
                     name if name.contains("validation_dirty") => {
                         sql.contains("accounting_validation_revision = 0")
@@ -3987,7 +4863,7 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
          WHEN typeof(NEW.version) != 'integer' OR NEW.version <= 0
            OR typeof(NEW.applied_at_ms) != 'integer' OR NEW.applied_at_ms < 0
          BEGIN
-             SELECT RAISE(ABORT, 'invalid schema_migrations storage class [coop-storage-guard-r2]');
+             SELECT RAISE(ABORT, 'invalid schema_migrations storage class [coop-storage-guard-r3]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_schema_migrations_storage_guard_update
          BEFORE UPDATE ON schema_migrations
@@ -3995,11 +4871,11 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
            OR typeof(NEW.version) != 'integer' OR NEW.version <= 0
            OR typeof(NEW.applied_at_ms) != 'integer' OR NEW.applied_at_ms < 0
          BEGIN
-             SELECT RAISE(ABORT, 'invalid schema_migrations storage class [coop-storage-guard-r2]');
+             SELECT RAISE(ABORT, 'invalid schema_migrations storage class [coop-storage-guard-r3]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_schema_migrations_storage_guard_delete
          BEFORE DELETE ON schema_migrations BEGIN
-             SELECT RAISE(ABORT, 'schema migration history is immutable [coop-storage-guard-r2]');
+             SELECT RAISE(ABORT, 'schema migration history is immutable [coop-storage-guard-r3]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_storage_guard_insert
          BEFORE INSERT ON jobs
@@ -4029,7 +4905,7 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
                (NEW.started_at_ms IS NULL OR NEW.finished_at_ms IS NOT NULL))
            OR (NEW.status NOT IN ('queued','running') AND NEW.finished_at_ms IS NULL)
          BEGIN
-             SELECT RAISE(ABORT, 'invalid jobs storage class [coop-storage-guard-r2]');
+             SELECT RAISE(ABORT, 'invalid jobs storage class [coop-storage-guard-r3]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_storage_guard_update
          BEFORE UPDATE ON jobs
@@ -4063,7 +4939,7 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
                (NEW.started_at_ms IS NULL OR NEW.finished_at_ms IS NOT NULL))
            OR (NEW.status NOT IN ('queued','running') AND NEW.finished_at_ms IS NULL)
          BEGIN
-             SELECT RAISE(ABORT, 'invalid jobs storage class [coop-storage-guard-r2]');
+             SELECT RAISE(ABORT, 'invalid jobs storage class [coop-storage-guard-r3]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_storage_guard_insert
          BEFORE INSERT ON events
@@ -4076,7 +4952,7 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
            OR typeof(NEW.hash_version) != 'integer' OR NEW.hash_version NOT IN (0, 1)
            OR (NEW.hash_version = 1 AND length(NEW.event_hash) != 64)
          BEGIN
-             SELECT RAISE(ABORT, 'invalid events storage class [coop-storage-guard-r2]');
+             SELECT RAISE(ABORT, 'invalid events storage class [coop-storage-guard-r3]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_storage_guard_update
          BEFORE UPDATE ON events
@@ -4096,62 +4972,192 @@ async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResu
            OR typeof(NEW.hash_version) != 'integer' OR NEW.hash_version NOT IN (0, 1)
            OR (NEW.hash_version = 1 AND length(NEW.event_hash) != 64)
          BEGIN
-             SELECT RAISE(ABORT, 'invalid events storage class [coop-storage-guard-r2]');
+             SELECT RAISE(ABORT, 'invalid events storage class [coop-storage-guard-r3]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_sequence_guard_insert
          AFTER INSERT ON events
          WHEN typeof(NEW.seq) != 'integer'
            OR NEW.seq <= 0 OR NEW.seq >= 9223372036854775807
          BEGIN
-             SELECT RAISE(ABORT, 'invalid event sequence [coop-storage-guard-r2]');
+             SELECT RAISE(ABORT, 'invalid event sequence [coop-storage-guard-r3]');
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_validation_dirty_insert
          AFTER INSERT ON jobs BEGIN
              UPDATE store_integrity
              SET row_validation_revision = 0, accounting_validation_revision = 0
              WHERE singleton = 1
-               AND row_validation_revision != 3
-               AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
+               AND row_validation_revision != 4
+               AND 'coop-storage-guard-r3' = 'coop-storage-guard-r3';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_validation_dirty_update
          AFTER UPDATE ON jobs BEGIN
              UPDATE store_integrity
              SET row_validation_revision = 0, accounting_validation_revision = 0
              WHERE singleton = 1
-               AND row_validation_revision != 3
-               AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
+               AND row_validation_revision != 4
+               AND 'coop-storage-guard-r3' = 'coop-storage-guard-r3';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_jobs_validation_dirty_delete
          AFTER DELETE ON jobs BEGIN
              UPDATE store_integrity
              SET row_validation_revision = 0, accounting_validation_revision = 0
              WHERE singleton = 1
-               AND row_validation_revision != 3
-               AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
+               AND row_validation_revision != 4
+               AND 'coop-storage-guard-r3' = 'coop-storage-guard-r3';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_validation_dirty_insert
          AFTER INSERT ON events BEGIN
              UPDATE store_integrity
              SET row_validation_revision = 0, accounting_validation_revision = 0
              WHERE singleton = 1
-               AND row_validation_revision != 3
-               AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
+               AND row_validation_revision != 4
+               AND 'coop-storage-guard-r3' = 'coop-storage-guard-r3';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_validation_dirty_update
          AFTER UPDATE ON events BEGIN
              UPDATE store_integrity
              SET row_validation_revision = 0, accounting_validation_revision = 0
              WHERE singleton = 1
-               AND row_validation_revision != 3
-               AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
+               AND row_validation_revision != 4
+               AND 'coop-storage-guard-r3' = 'coop-storage-guard-r3';
          END",
         "CREATE TRIGGER IF NOT EXISTS coop_events_validation_dirty_delete
          AFTER DELETE ON events BEGIN
              UPDATE store_integrity
              SET row_validation_revision = 0, accounting_validation_revision = 0
              WHERE singleton = 1
-               AND row_validation_revision != 3
-               AND 'coop-storage-guard-r2' = 'coop-storage-guard-r2';
+               AND row_validation_revision != 4
+               AND 'coop-storage-guard-r3' = 'coop-storage-guard-r3';
+         END",
+        "CREATE TRIGGER IF NOT EXISTS coop_attestations_storage_guard_insert
+         BEFORE INSERT ON job_attestations
+         WHEN typeof(NEW.job_id) != 'text' OR length(trim(NEW.job_id)) = 0
+           OR typeof(NEW.receipt_sha256) != 'text'
+           OR length(NEW.receipt_sha256) != 64
+           OR NEW.receipt_sha256 GLOB '*[^0-9a-f]*'
+           OR typeof(NEW.result_media_type) != 'text'
+           OR length(trim(NEW.result_media_type)) NOT BETWEEN 1 AND 255
+           OR typeof(NEW.result_artifact) != 'blob'
+           OR length(NEW.result_artifact) NOT BETWEEN 1 AND 16777216
+           OR NOT json_valid(CAST(NEW.result_artifact AS TEXT))
+           OR typeof(NEW.result_sha256) != 'text'
+           OR length(NEW.result_sha256) != 64
+           OR NEW.result_sha256 GLOB '*[^0-9a-f]*'
+           OR typeof(NEW.envelope_json) != 'blob'
+           OR length(NEW.envelope_json) NOT BETWEEN 1 AND 2097152
+           OR NOT json_valid(CAST(NEW.envelope_json AS TEXT))
+           OR typeof(NEW.envelope_sha256) != 'text'
+           OR length(NEW.envelope_sha256) != 64
+           OR NEW.envelope_sha256 GLOB '*[^0-9a-f]*'
+           OR typeof(NEW.key_id) != 'text'
+           OR length(trim(NEW.key_id)) NOT BETWEEN 1 AND 256
+           OR typeof(NEW.created_at_ms) != 'integer' OR NEW.created_at_ms < 0
+         BEGIN
+             SELECT RAISE(ABORT, 'invalid job_attestations storage class [coop-storage-guard-r3]');
+         END",
+        "CREATE TRIGGER IF NOT EXISTS coop_attestations_storage_guard_update
+         BEFORE UPDATE ON job_attestations
+         WHEN NEW.job_id != OLD.job_id
+           OR NEW.receipt_sha256 != OLD.receipt_sha256
+           OR NEW.result_media_type != OLD.result_media_type
+           OR NEW.result_artifact != OLD.result_artifact
+           OR NEW.result_sha256 != OLD.result_sha256
+           OR NEW.envelope_json != OLD.envelope_json
+           OR NEW.envelope_sha256 != OLD.envelope_sha256
+           OR NEW.key_id != OLD.key_id
+           OR NEW.created_at_ms != OLD.created_at_ms
+           OR typeof(NEW.job_id) != 'text' OR length(trim(NEW.job_id)) = 0
+           OR typeof(NEW.receipt_sha256) != 'text'
+           OR length(NEW.receipt_sha256) != 64
+           OR NEW.receipt_sha256 GLOB '*[^0-9a-f]*'
+           OR typeof(NEW.result_media_type) != 'text'
+           OR length(trim(NEW.result_media_type)) NOT BETWEEN 1 AND 255
+           OR typeof(NEW.result_artifact) != 'blob'
+           OR length(NEW.result_artifact) NOT BETWEEN 1 AND 16777216
+           OR NOT json_valid(CAST(NEW.result_artifact AS TEXT))
+           OR typeof(NEW.result_sha256) != 'text'
+           OR length(NEW.result_sha256) != 64
+           OR NEW.result_sha256 GLOB '*[^0-9a-f]*'
+           OR typeof(NEW.envelope_json) != 'blob'
+           OR length(NEW.envelope_json) NOT BETWEEN 1 AND 2097152
+           OR NOT json_valid(CAST(NEW.envelope_json AS TEXT))
+           OR typeof(NEW.envelope_sha256) != 'text'
+           OR length(NEW.envelope_sha256) != 64
+           OR NEW.envelope_sha256 GLOB '*[^0-9a-f]*'
+           OR typeof(NEW.key_id) != 'text'
+           OR length(trim(NEW.key_id)) NOT BETWEEN 1 AND 256
+           OR typeof(NEW.created_at_ms) != 'integer' OR NEW.created_at_ms < 0
+         BEGIN
+             SELECT RAISE(ABORT, 'invalid job_attestations storage class [coop-storage-guard-r3]');
+         END",
+        "CREATE TRIGGER IF NOT EXISTS coop_attestations_validation_dirty_insert
+         AFTER INSERT ON job_attestations BEGIN
+             UPDATE store_integrity
+             SET row_validation_revision = 0, accounting_validation_revision = 0
+             WHERE singleton = 1
+               AND row_validation_revision != 4
+               AND 'coop-storage-guard-r3' = 'coop-storage-guard-r3';
+         END",
+        "CREATE TRIGGER IF NOT EXISTS coop_attestations_validation_dirty_update
+         AFTER UPDATE ON job_attestations BEGIN
+             UPDATE store_integrity
+             SET row_validation_revision = 0, accounting_validation_revision = 0
+             WHERE singleton = 1
+               AND row_validation_revision != 4
+               AND 'coop-storage-guard-r3' = 'coop-storage-guard-r3';
+         END",
+        "CREATE TRIGGER IF NOT EXISTS coop_attestations_validation_dirty_delete
+         AFTER DELETE ON job_attestations BEGIN
+             UPDATE store_integrity
+             SET row_validation_revision = 0, accounting_validation_revision = 0
+             WHERE singleton = 1
+               AND row_validation_revision != 4
+               AND 'coop-storage-guard-r3' = 'coop-storage-guard-r3';
+         END",
+        "CREATE TRIGGER IF NOT EXISTS coop_attestation_outbox_storage_guard_insert
+         BEFORE INSERT ON attestation_outbox
+         WHEN typeof(NEW.job_id) != 'text' OR length(trim(NEW.job_id)) = 0
+           OR typeof(NEW.pending_since_ms) != 'integer' OR NEW.pending_since_ms < 0
+           OR typeof(NEW.attempt_count) != 'integer'
+           OR NEW.attempt_count NOT BETWEEN 0 AND 2147483647
+           OR typeof(NEW.next_attempt_ms) != 'integer' OR NEW.next_attempt_ms < 0
+         BEGIN
+             SELECT RAISE(ABORT, 'invalid attestation_outbox storage class [coop-storage-guard-r3]');
+         END",
+        "CREATE TRIGGER IF NOT EXISTS coop_attestation_outbox_storage_guard_update
+         BEFORE UPDATE ON attestation_outbox
+         WHEN NEW.job_id != OLD.job_id OR NEW.pending_since_ms != OLD.pending_since_ms
+           OR typeof(NEW.job_id) != 'text' OR length(trim(NEW.job_id)) = 0
+           OR typeof(NEW.pending_since_ms) != 'integer' OR NEW.pending_since_ms < 0
+           OR typeof(NEW.attempt_count) != 'integer'
+           OR NEW.attempt_count NOT BETWEEN 0 AND 2147483647
+           OR typeof(NEW.next_attempt_ms) != 'integer' OR NEW.next_attempt_ms < 0
+         BEGIN
+             SELECT RAISE(ABORT, 'invalid attestation_outbox storage class [coop-storage-guard-r3]');
+         END",
+        "CREATE TRIGGER IF NOT EXISTS coop_attestation_outbox_validation_dirty_insert
+         AFTER INSERT ON attestation_outbox BEGIN
+             UPDATE store_integrity
+             SET row_validation_revision = 0, accounting_validation_revision = 0
+             WHERE singleton = 1
+               AND row_validation_revision != 4
+               AND 'coop-storage-guard-r3' = 'coop-storage-guard-r3';
+         END",
+        "CREATE TRIGGER IF NOT EXISTS coop_attestation_outbox_validation_dirty_update
+         AFTER UPDATE ON attestation_outbox BEGIN
+             UPDATE store_integrity
+             SET row_validation_revision = 0, accounting_validation_revision = 0
+             WHERE singleton = 1
+               AND row_validation_revision != 4
+               AND 'coop-storage-guard-r3' = 'coop-storage-guard-r3';
+         END",
+        "CREATE TRIGGER IF NOT EXISTS coop_attestation_outbox_validation_dirty_delete
+         AFTER DELETE ON attestation_outbox BEGIN
+             UPDATE store_integrity
+             SET row_validation_revision = 0, accounting_validation_revision = 0
+             WHERE singleton = 1
+               AND row_validation_revision != 4
+               AND 'coop-storage-guard-r3' = 'coop-storage-guard-r3';
          END",
     ] {
         sqlx::query(statement).execute(&mut *conn).await?;
@@ -4473,6 +5479,26 @@ fn row_to_event(row: sqlx::sqlite::SqliteRow) -> StoreResult<EventRow> {
     })
 }
 
+fn row_to_attestation_metadata(row: &sqlx::sqlite::SqliteRow) -> StoreResult<AttestationMetadata> {
+    let result_size = row.try_get::<i64, _>("result_size_bytes")?;
+    let envelope_size = row.try_get::<i64, _>("envelope_size_bytes")?;
+    Ok(AttestationMetadata {
+        job_id: row.try_get("job_id")?,
+        receipt_sha256: row.try_get("receipt_sha256")?,
+        result_media_type: row.try_get("result_media_type")?,
+        result_sha256: row.try_get("result_sha256")?,
+        result_size_bytes: u64::try_from(result_size).map_err(|_| {
+            sqlx::Error::Protocol("result artifact length became negative".to_string())
+        })?,
+        envelope_sha256: row.try_get("envelope_sha256")?,
+        envelope_size_bytes: u64::try_from(envelope_size).map_err(|_| {
+            sqlx::Error::Protocol("attestation envelope length became negative".to_string())
+        })?,
+        key_id: row.try_get("key_id")?,
+        created_at_ms: row.try_get("created_at_ms")?,
+    })
+}
+
 fn is_terminal_status(status: &str) -> bool {
     matches!(
         status,
@@ -4569,6 +5595,13 @@ fn sha256_hex(value: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value);
     digest_hex(hasher.finalize())
+}
+
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn digest_hex(digest: impl IntoIterator<Item = u8>) -> String {

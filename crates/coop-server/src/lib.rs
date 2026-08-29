@@ -1,3 +1,4 @@
+pub mod attestation;
 pub mod auth;
 pub mod bus;
 pub mod config;
@@ -147,6 +148,9 @@ pub struct AppState {
     /// O(1) readiness snapshot fed by one bounded background store probe.
     pub readiness: Arc<readiness::ReadinessCache>,
     pub jwt_verifier: Option<Arc<auth::JwtVerifier>>,
+    /// Optional Ed25519 signer plus the public verification material exposed
+    /// to authenticated clients. Exact artifacts/envelopes live in Store.
+    pub attestations: Arc<attestation::AttestationService>,
     pub sandbox_mode: coop_exec::SandboxMode,
     pub execution_provider: Arc<dyn coop_exec::ExecutionProvider>,
     /// F-005: install a seccomp-BPF allowlist in sandboxed jobs (see Config).
@@ -225,6 +229,9 @@ pub async fn build_app(
         Some(jwt) => Some(Arc::new(auth::JwtVerifier::build(jwt).await?)),
         None => None,
     };
+    // Load and validate private key material before executor discovery or any
+    // background task starts. Errors never include the key bytes.
+    let attestations = Arc::new(attestation::AttestationService::from_config(&cfg)?);
 
     // N-1: tenant isolation requires the jobs root to be server-private
     // (0700). The binary path enforces this in main(), but any embedder that
@@ -325,6 +332,7 @@ pub async fn build_app(
         metrics_token_digest,
         readiness: Arc::new(readiness::ReadinessCache::new()),
         jwt_verifier,
+        attestations,
         sandbox_mode,
         execution_provider,
         seccomp: seccomp_enabled,
@@ -361,6 +369,7 @@ pub async fn build_app(
     readiness::prime(&state).await;
     let app = routes::router(state.clone());
     std::mem::drop(readiness::spawn_monitor(state.clone()));
+    std::mem::drop(attestation::spawn_worker(state.clone()));
     Ok((app, state, queue_rx))
 }
 

@@ -2027,6 +2027,8 @@ mod admission_tests {
         let jobs_root = base.join("jobs");
         std::fs::create_dir_all(&base).expect("create test directory");
         let cfg = crate::config::Config {
+            attestation_mode: crate::config::AttestationMode::Off,
+            attestation_key_file: None,
             addr: "127.0.0.1:0".to_string(),
             db_path: db.to_string_lossy().into_owned(),
             api_keys: std::collections::HashMap::new(),

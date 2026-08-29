@@ -17,6 +17,7 @@ path = "src/main.rs"
 coop-types = { workspace = true }
 coop-store = { workspace = true }
 coop-exec = { workspace = true }
+coop-attestation = { workspace = true }
 axum = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }

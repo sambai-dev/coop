@@ -9,6 +9,12 @@ pub const DEFAULT_STORAGE_GLOBAL_MB: u64 = 16 * 1024;
 pub const DEFAULT_STORAGE_TENANT_MB: u64 = 4 * 1024;
 pub const DEFAULT_STORAGE_FREE_RESERVE_MB: u64 = 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestationMode {
+    Off,
+    Sign,
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub addr: String,
@@ -17,6 +23,11 @@ pub struct Config {
     /// Optional, separately scoped bearer credential for the global operator
     /// metrics endpoint. It is never accepted by tenant API middleware.
     pub metrics_token: Option<String>,
+    /// Signing is enabled only with an operator-supplied Ed25519 key file.
+    /// Production defaults fail closed; `Off` must be explicitly selected to
+    /// acknowledge that terminal jobs will not receive signed attestations.
+    pub attestation_mode: AttestationMode,
+    pub attestation_key_file: Option<String>,
     pub credentials: crate::auth::CredentialStore,
     pub jwt: Option<crate::auth::JwtConfig>,
     pub workers: usize,
@@ -77,6 +88,11 @@ impl std::fmt::Debug for Config {
             .field(
                 "metrics_token",
                 &self.metrics_token.as_ref().map(|_| "configured, redacted"),
+            )
+            .field("attestation_mode", &self.attestation_mode)
+            .field(
+                "attestation_key_file",
+                &self.attestation_key_file.as_ref().map(|_| "configured"),
             )
             .field("credentials", &self.credentials)
             .field("jwt", &self.jwt)
@@ -661,6 +677,57 @@ impl Config {
             );
         }
 
+        let attestation_key_file = getenv("COOP_ATTESTATION_KEY_FILE")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let attestation_mode = match getenv("COOP_ATTESTATION_MODE")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .as_deref()
+        {
+            None if attestation_key_file.is_some() => AttestationMode::Sign,
+            None if production => {
+                return Err(
+                    "production requires COOP_ATTESTATION_KEY_FILE for signed terminal evidence; set COOP_ATTESTATION_MODE=off only as an explicit policy decision to disable signing"
+                        .to_string(),
+                )
+            }
+            None => AttestationMode::Off,
+            Some("sign" | "signed" | "on" | "enabled") => {
+                if attestation_key_file.is_none() {
+                    return Err(
+                        "COOP_ATTESTATION_MODE=sign requires COOP_ATTESTATION_KEY_FILE"
+                            .to_string(),
+                    );
+                }
+                AttestationMode::Sign
+            }
+            Some("off" | "disabled" | "none") => {
+                if attestation_key_file.is_some() {
+                    return Err(
+                        "COOP_ATTESTATION_MODE=off must not also configure COOP_ATTESTATION_KEY_FILE"
+                            .to_string(),
+                    );
+                }
+                AttestationMode::Off
+            }
+            Some(_) => {
+                return Err(
+                    "COOP_ATTESTATION_MODE must be either sign or off".to_string(),
+                )
+            }
+        };
+        if production {
+            if let Some(path) = attestation_key_file.as_deref() {
+                if !Path::new(path).is_absolute() {
+                    return Err(
+                        "COOP_ATTESTATION_KEY_FILE must be an absolute path in production"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
         let sandbox = env_or(getenv, "COOP_SANDBOX", "auto");
         let unsafe_allow_naive = env_true(getenv, "COOP_UNSAFE_ALLOW_NAIVE");
         let unsafe_allow_public_dev = env_true(getenv, "COOP_UNSAFE_ALLOW_PUBLIC_DEV");
@@ -733,6 +800,8 @@ impl Config {
             db_path: env_or(getenv, "COOP_DB", "coop.db"),
             api_keys,
             metrics_token,
+            attestation_mode,
+            attestation_key_file,
             credentials,
             jwt,
             workers: parse_number(getenv, "COOP_WORKERS", "4", 1usize, 256usize)?,
@@ -910,7 +979,10 @@ mod tests {
     #[test]
     fn prod_mode_with_explicit_keys_does_not_get_dev_default() {
         let cfg = Config::from_sources(
-            &source(&[("COOP_API_KEYS", "acme:correct-horse-battery-staple")]),
+            &source(&[
+                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("COOP_ATTESTATION_MODE", "off"),
+            ]),
             true,
         )
         .unwrap();
@@ -921,6 +993,54 @@ mod tests {
             Some("acme")
         );
         assert!(!cfg.api_keys.contains_key("coop-dev-key"));
+    }
+
+    #[test]
+    fn production_attestation_policy_is_fail_closed_and_off_is_explicit() {
+        let base = [("COOP_API_KEYS", "acme:correct-horse-battery-staple")];
+        let error = Config::from_sources(&source(&base), true).unwrap_err();
+        assert!(error.contains("COOP_ATTESTATION_KEY_FILE"), "{error}");
+        assert!(error.contains("COOP_ATTESTATION_MODE=off"), "{error}");
+
+        let off = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("COOP_ATTESTATION_MODE", "off"),
+            ]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(off.attestation_mode, AttestationMode::Off);
+        assert!(off.attestation_key_file.is_none());
+
+        let missing_key = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("COOP_ATTESTATION_MODE", "sign"),
+            ]),
+            true,
+        )
+        .unwrap_err();
+        assert!(missing_key.contains("requires COOP_ATTESTATION_KEY_FILE"));
+
+        let ambiguous = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("COOP_ATTESTATION_MODE", "off"),
+                ("COOP_ATTESTATION_KEY_FILE", "/var/lib/coop/signing.pem"),
+            ]),
+            true,
+        )
+        .unwrap_err();
+        assert!(ambiguous.contains("must not also configure"), "{ambiguous}");
+        assert!(Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("COOP_ATTESTATION_MODE", "maybe"),
+            ]),
+            true,
+        )
+        .is_err());
     }
 
     #[test]
@@ -994,6 +1114,7 @@ mod tests {
             &source(&[
                 ("COOP_API_KEYS", "acme:s3cr3t-value-that-is-long"),
                 ("COOP_METRICS_TOKEN", "metrics-secret-value"),
+                ("COOP_ATTESTATION_MODE", "off"),
             ]),
             true,
         )
@@ -1076,6 +1197,7 @@ mod tests {
             &source(&[
                 ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
                 ("COOP_SECCOMP", "off"),
+                ("COOP_ATTESTATION_MODE", "off"),
             ]),
             true,
         )
