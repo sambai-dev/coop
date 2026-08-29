@@ -14,6 +14,9 @@ pub struct Config {
     pub addr: String,
     pub db_path: String,
     pub api_keys: HashMap<String, String>,
+    /// Optional, separately scoped bearer credential for the global operator
+    /// metrics endpoint. It is never accepted by tenant API middleware.
+    pub metrics_token: Option<String>,
     pub workers: usize,
     pub tenant_concurrency: usize,
     pub tenant_queue_capacity: usize,
@@ -58,6 +61,10 @@ impl std::fmt::Debug for Config {
             .field(
                 "api_keys",
                 &format!("{} key(s), redacted", self.api_keys.len()),
+            )
+            .field(
+                "metrics_token",
+                &self.metrics_token.as_ref().map(|_| "configured, redacted"),
             )
             .field("workers", &self.workers)
             .field("tenant_concurrency", &self.tenant_concurrency)
@@ -522,6 +529,24 @@ impl Config {
             return Err("COOP_API_KEYS did not contain any usable tenant keys".to_string());
         }
 
+        let metrics_token = getenv("COOP_METRICS_TOKEN")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if metrics_token.as_ref().is_some_and(|token| token.len() < 16) {
+            return Err(
+                "COOP_METRICS_TOKEN must contain at least 16 characters when configured"
+                    .to_string(),
+            );
+        }
+        if metrics_token
+            .as_ref()
+            .is_some_and(|token| api_keys.contains_key(token))
+        {
+            return Err(
+                "COOP_METRICS_TOKEN must be different from every tenant API key".to_string(),
+            );
+        }
+
         let sandbox = env_or(getenv, "COOP_SANDBOX", "auto");
         let unsafe_allow_naive = env_true(getenv, "COOP_UNSAFE_ALLOW_NAIVE");
         let unsafe_allow_public_dev = env_true(getenv, "COOP_UNSAFE_ALLOW_PUBLIC_DEV");
@@ -593,6 +618,7 @@ impl Config {
             addr: env_or(getenv, "COOP_ADDR", "127.0.0.1:7300"),
             db_path: env_or(getenv, "COOP_DB", "coop.db"),
             api_keys,
+            metrics_token,
             workers: parse_number(getenv, "COOP_WORKERS", "4", 1usize, 256usize)?,
             tenant_concurrency: parse_number(
                 getenv,
@@ -775,7 +801,10 @@ mod tests {
     #[test]
     fn debug_output_never_contains_plaintext_keys() {
         let cfg = Config::from_sources(
-            &source(&[("COOP_API_KEYS", "acme:s3cr3t-value-that-is-long")]),
+            &source(&[
+                ("COOP_API_KEYS", "acme:s3cr3t-value-that-is-long"),
+                ("COOP_METRICS_TOKEN", "metrics-secret-value"),
+            ]),
             true,
         )
         .unwrap();
@@ -784,7 +813,41 @@ mod tests {
             !rendered.contains("s3cr3t-value-that-is-long"),
             "leaked: {rendered}"
         );
+        assert!(
+            !rendered.contains("metrics-secret-value"),
+            "leaked: {rendered}"
+        );
         assert!(rendered.contains("redacted"), "{rendered}");
+    }
+
+    #[test]
+    fn metrics_token_is_optional_but_must_be_strong_when_configured() {
+        let cfg = Config::from_sources(&source(&[]), false).unwrap();
+        assert!(cfg.metrics_token.is_none());
+
+        let error = Config::from_sources(&source(&[("COOP_METRICS_TOKEN", "too-short")]), false)
+            .unwrap_err();
+        assert!(error.contains("COOP_METRICS_TOKEN"), "{error}");
+
+        let cfg = Config::from_sources(
+            &source(&[("COOP_METRICS_TOKEN", "separate-operator-secret")]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.metrics_token.as_deref(),
+            Some("separate-operator-secret")
+        );
+
+        let error = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "tenant:shared-secret-value"),
+                ("COOP_METRICS_TOKEN", "shared-secret-value"),
+            ]),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("different"), "{error}");
     }
 
     #[test]

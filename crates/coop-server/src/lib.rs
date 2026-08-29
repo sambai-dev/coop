@@ -1,8 +1,11 @@
 pub mod auth;
 pub mod bus;
 pub mod config;
+pub mod metrics;
 pub mod openapi;
 pub mod ratelimit;
+pub mod readiness;
+pub(crate) mod request_context;
 pub mod routes;
 pub mod scheduler;
 pub mod transport;
@@ -39,6 +42,7 @@ pub struct LifetimeAdmission {
     global: Arc<Semaphore>,
     tenants: Arc<DashMap<String, Arc<Semaphore>>>,
     per_tenant: usize,
+    global_capacity: usize,
     accepting: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -62,6 +66,7 @@ impl LifetimeAdmission {
             global: Arc::new(Semaphore::new(global)),
             tenants: Arc::new(DashMap::new()),
             per_tenant,
+            global_capacity: global,
             accepting: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
@@ -104,6 +109,15 @@ impl LifetimeAdmission {
             slots.close();
         }
     }
+
+    pub fn capacity(&self) -> usize {
+        self.global_capacity
+    }
+
+    pub fn depth(&self) -> usize {
+        self.global_capacity
+            .saturating_sub(self.global.available_permits())
+    }
 }
 
 #[derive(Clone)]
@@ -123,6 +137,15 @@ pub struct AppState {
     /// server-clamped MiB request until execution/finalization returns.
     pub memory_slots: Arc<Semaphore>,
     pub rate: Arc<ratelimit::RateLimiter>,
+    /// Fixed-cardinality, process-local operational telemetry. This registry
+    /// intentionally contains no tenant, job, request, trace, or raw path
+    /// dimensions.
+    pub metrics: Arc<metrics::Metrics>,
+    /// Digest of the separately scoped global scrape credential. `None`
+    /// disables `/metrics` without affecting tenant API availability.
+    pub metrics_token_digest: Option<[u8; 32]>,
+    /// O(1) readiness snapshot fed by one bounded background store probe.
+    pub readiness: Arc<readiness::ReadinessCache>,
     pub sandbox_mode: coop_exec::SandboxMode,
     /// F-005: install a seccomp-BPF allowlist in sandboxed jobs (see Config).
     pub seccomp: bool,
@@ -142,6 +165,10 @@ pub struct AppState {
     /// Entries are removed when the job finishes.
     pub cancels: Arc<DashMap<String, RunningJob>>,
     pub stream_tickets: Arc<DashMap<String, auth::StreamTicket>>,
+    /// Request correlation retained only while this process owns a job. The
+    /// durable integration boundary is documented separately; no source,
+    /// output, tenant secret, baggage, or raw trace state is retained here.
+    pub(crate) job_traces: Arc<DashMap<String, request_context::JobTraceContext>>,
     pub started_at: std::time::Instant,
     pub shutdown: watch::Sender<bool>,
     /// False only while the binary is reconciling durable startup state.
@@ -186,6 +213,7 @@ pub async fn build_app(
         );
     }
     let rate_per_min = cfg.rate_per_min;
+    let metrics_token_digest = cfg.metrics_token.as_deref().map(metrics::token_digest);
     let workers = cfg.workers;
     let memory_budget_mb = cfg.memory_budget_mb;
     let (admission, queue_rx) =
@@ -262,6 +290,9 @@ pub async fn build_app(
         tenant_sems: Arc::new(DashMap::new()),
         memory_slots: Arc::new(Semaphore::new(memory_budget_mb as usize)),
         rate: Arc::new(ratelimit::RateLimiter::new(rate_per_min)),
+        metrics: Arc::new(metrics::Metrics::new()),
+        metrics_token_digest,
+        readiness: Arc::new(readiness::ReadinessCache::new()),
         sandbox_mode,
         seccomp: seccomp_enabled,
         resolved_naive_interpreters: Arc::new(resolved_naive_interpreters),
@@ -269,6 +300,7 @@ pub async fn build_app(
         execution_start_gate: Arc::new(coop_exec::ExecutionStartGate::default()),
         cancels: Arc::new(DashMap::new()),
         stream_tickets: Arc::new(DashMap::new()),
+        job_traces: Arc::new(DashMap::new()),
         started_at: std::time::Instant::now(),
         shutdown,
         startup_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -293,7 +325,9 @@ pub async fn build_app(
         "worker pool configured"
     );
 
+    readiness::prime(&state).await;
     let app = routes::router(state.clone());
+    readiness::spawn_monitor(state.clone());
     Ok((app, state, queue_rx))
 }
 

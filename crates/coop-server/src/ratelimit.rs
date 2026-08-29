@@ -75,6 +75,10 @@ pub async fn middleware(
         }
         response
     } else {
+        state.metrics.reject(
+            crate::metrics::AdmissionScope::Rate,
+            crate::metrics::AdmissionReason::RateLimited,
+        );
         crate::routes::api_error_with_retry(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit_exceeded",

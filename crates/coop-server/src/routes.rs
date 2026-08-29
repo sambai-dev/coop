@@ -22,6 +22,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
+use tracing::Instrument as _;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -54,7 +55,8 @@ pub(crate) fn api_error_with_retry(
     retryable: bool,
     retry_after_secs: Option<u64>,
 ) -> Response {
-    let request_id = Uuid::now_v7().to_string();
+    let request_id =
+        crate::request_context::current_request_id().unwrap_or_else(|| Uuid::now_v7().to_string());
     let mut response = (
         status,
         Json(ErrorEnvelope {
@@ -303,11 +305,6 @@ const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
 const STREAM_SEND_DEADLINE: Duration = Duration::from_secs(5);
 const STREAM_CLOSE_DEADLINE: Duration = Duration::from_millis(250);
 const LARGE_RESPONSE_CHUNK_BYTES: usize = 64 * 1_024;
-// Job ids are generated as UUIDv7 values, so this deliberately invalid id can
-// never collide with a durable row. An indexed summary miss is a constant-work
-// SQLite liveness probe; readiness must not aggregate the retained jobs table.
-const STORAGE_LIVENESS_PROBE_JOB_ID: &str = "__coop_storage_liveness_probe__";
-
 fn idempotency_request(
     headers: &HeaderMap,
     spec: &JobSpec,
@@ -574,6 +571,19 @@ fn stream_admission_error(error: crate::TryLifetimeError) -> Response {
     }
 }
 
+fn record_lifetime_rejection(
+    state: &AppState,
+    scope: crate::metrics::AdmissionScope,
+    error: crate::TryLifetimeError,
+) {
+    let reason = match error {
+        crate::TryLifetimeError::Closed => crate::metrics::AdmissionReason::Closed,
+        crate::TryLifetimeError::GlobalFull => crate::metrics::AdmissionReason::GlobalFull,
+        crate::TryLifetimeError::TenantFull => crate::metrics::AdmissionReason::TenantFull,
+    };
+    state.metrics.reject(scope, reason);
+}
+
 fn guarded_json_response<T: Serialize>(
     status: StatusCode,
     value: &T,
@@ -709,6 +719,7 @@ struct PendingSubmission {
     spec_json: String,
     requested_mem_mb: u32,
     idempotency: Option<coop_store::IdempotencyRequest>,
+    job_trace: crate::request_context::JobTraceContext,
 }
 
 fn spawn_submission_commit(
@@ -717,7 +728,8 @@ fn spawn_submission_commit(
     body_permit: crate::LifetimePermit,
     pending: PendingSubmission,
 ) -> tokio::task::JoinHandle<coop_store::StoreResult<SubmissionAcceptance>> {
-    tokio::spawn(async move {
+    let accept_span = pending.job_trace.accept_span(&pending.job_id);
+    let future = async move {
         let PendingSubmission {
             job_id,
             tenant,
@@ -725,7 +737,9 @@ fn spawn_submission_commit(
             spec_json,
             requested_mem_mb,
             idempotency,
+            job_trace,
         } = pending;
+        let started_at = std::time::Instant::now();
         let persisted = state
             .store
             .create_job_with_event_idempotent(
@@ -737,13 +751,22 @@ fn spawn_submission_commit(
                 idempotency.as_ref(),
             )
             .await;
+        state.metrics.observe_storage(
+            crate::metrics::StorageOperation::Accept,
+            started_at.elapsed(),
+            persisted.is_ok(),
+        );
         let result = match persisted {
             Ok(coop_store::CreateJobOutcome::Created(event)) => {
                 state.bus.register(&job_id);
                 state.bus.send(&job_id, wire_event(event));
                 reservation.send(job_id.clone());
+                state.job_traces.insert(job_id.clone(), job_trace);
+                state
+                    .metrics
+                    .submitted(crate::metrics::Language::classify(&language));
                 Ok(SubmissionAcceptance {
-                    job_id,
+                    job_id: job_id.clone(),
                     replayed: false,
                 })
             }
@@ -759,7 +782,14 @@ fn spawn_submission_commit(
                 // a commit acknowledgement lost after the row became durable.
                 let mut delay = Duration::from_millis(10);
                 loop {
-                    match state.store.get_job_summary(&job_id).await {
+                    let read_started_at = std::time::Instant::now();
+                    let summary = state.store.get_job_summary(&job_id).await;
+                    state.metrics.observe_storage(
+                        crate::metrics::StorageOperation::Read,
+                        read_started_at.elapsed(),
+                        summary.is_ok(),
+                    );
+                    match summary {
                         Ok(Some(row))
                             if row.tenant == tenant
                                 && row.language == language
@@ -768,8 +798,12 @@ fn spawn_submission_commit(
                             tracing::warn!(%job_id, "reconciled an ambiguously acknowledged durable job acceptance");
                             state.bus.register(&job_id);
                             reservation.send(job_id.clone());
+                            state.job_traces.insert(job_id.clone(), job_trace);
+                            state
+                                .metrics
+                                .submitted(crate::metrics::Language::classify(&language));
                             break Ok(SubmissionAcceptance {
-                                job_id,
+                                job_id: job_id.clone(),
                                 replayed: false,
                             });
                         }
@@ -778,7 +812,14 @@ fn spawn_submission_commit(
                                 drop(reservation);
                                 break Err(commit_error);
                             };
-                            match state.store.lookup_idempotency(&tenant, request).await {
+                            let read_started_at = std::time::Instant::now();
+                            let lookup = state.store.lookup_idempotency(&tenant, request).await;
+                            state.metrics.observe_storage(
+                                crate::metrics::StorageOperation::Read,
+                                read_started_at.elapsed(),
+                                lookup.is_ok(),
+                            );
+                            match lookup {
                                 Ok(coop_store::IdempotencyLookup::Replay { job_id }) => {
                                     drop(reservation);
                                     break Ok(SubmissionAcceptance {
@@ -810,11 +851,16 @@ fn spawn_submission_commit(
                 }
             }
         };
+        if result.is_err() {
+            state.bus.remove(&job_id);
+            state.job_traces.remove(&job_id);
+        }
         // Keep parsed request memory and both submission capacity budgets
         // alive until durable commit/reconciliation and scheduler handoff.
         drop(body_permit);
         result
-    })
+    };
+    tokio::spawn(future.instrument(accept_span))
 }
 
 pub fn router(state: AppState) -> Router {
@@ -844,10 +890,15 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(dashboard))
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
+        .route("/metrics", get(operator_metrics))
         .route("/openapi.json", get(crate::openapi::serve))
         .merge(api)
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::request_context::middleware,
+        ))
         .with_state(state)
 }
 
@@ -926,6 +977,10 @@ pub async fn submit(
         }
     }
     if *state.shutdown.borrow() {
+        state.metrics.reject(
+            crate::metrics::AdmissionScope::Scheduler,
+            crate::metrics::AdmissionReason::Shutdown,
+        );
         return api_error_with_retry(
             StatusCode::SERVICE_UNAVAILABLE,
             "shutting_down",
@@ -938,6 +993,10 @@ pub async fn submit(
         .startup_ready
         .load(std::sync::atomic::Ordering::Acquire)
     {
+        state.metrics.reject(
+            crate::metrics::AdmissionScope::Scheduler,
+            crate::metrics::AdmissionReason::Startup,
+        );
         return api_error_with_retry(
             StatusCode::SERVICE_UNAVAILABLE,
             "startup_recovery",
@@ -1010,31 +1069,43 @@ pub async fn submit(
     let permit = match state.admission.try_reserve(&tenant.0, mem_mb) {
         Ok(permit) => permit,
         Err(crate::scheduler::TryAdmissionError::GlobalFull) => {
+            state.metrics.reject(
+                crate::metrics::AdmissionScope::Queue,
+                crate::metrics::AdmissionReason::GlobalFull,
+            );
             return api_error_with_retry(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "queue_saturated",
                 "job queue is saturated; retry later",
                 true,
                 Some(1),
-            )
+            );
         }
         Err(crate::scheduler::TryAdmissionError::TenantFull) => {
+            state.metrics.reject(
+                crate::metrics::AdmissionScope::Queue,
+                crate::metrics::AdmissionReason::TenantFull,
+            );
             return api_error_with_retry(
                 StatusCode::TOO_MANY_REQUESTS,
                 "tenant_queue_saturated",
                 "this tenant has reached its queued-job capacity",
                 true,
                 Some(1),
-            )
+            );
         }
         Err(crate::scheduler::TryAdmissionError::Closed) => {
+            state.metrics.reject(
+                crate::metrics::AdmissionScope::Scheduler,
+                crate::metrics::AdmissionReason::Closed,
+            );
             return api_error_with_retry(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "scheduler_unavailable",
                 "job scheduler is unavailable",
                 true,
                 Some(1),
-            )
+            );
         }
     };
 
@@ -1059,6 +1130,7 @@ pub async fn submit(
             spec_json,
             requested_mem_mb: mem_mb,
             idempotency,
+            job_trace: crate::request_context::current_job_context(),
         },
     );
     let accepted = match commit.await {
@@ -1263,7 +1335,10 @@ pub async fn get_job(
     // Acquire before selecting the multi-megabyte spec/receipt columns.
     let permit = match acquire_large_response(&state, &tenant.0) {
         Ok(permit) => permit,
-        Err(error) => return large_response_error(error),
+        Err(error) => {
+            record_lifetime_rejection(&state, crate::metrics::AdmissionScope::LargeResponse, error);
+            return large_response_error(error);
+        }
     };
     match state.store.get_job(&id).await {
         Ok(Some(row)) if row.tenant == tenant.0 => match job_detail(&state, &row) {
@@ -1553,7 +1628,7 @@ pub async fn metrics(
         Err(e) => return internal_error("count jobs for metrics", e),
     }
     body.push_str(&format!(
-        "# HELP coop_running_jobs Jobs currently executing.\n# TYPE coop_running_jobs gauge\ncoop_running_jobs {}\n",
+        "# HELP coop_job_lifecycle_owners_current Tenant jobs currently owned by the scheduler across pre-start, execution, and finalization.\n# TYPE coop_job_lifecycle_owners_current gauge\ncoop_job_lifecycle_owners_current {}\n",
         state
             .cancels
             .iter()
@@ -1563,6 +1638,86 @@ pub async fn metrics(
     (
         StatusCode::OK,
         [("content-type", "text/plain; version=0.0.4")],
+        body,
+    )
+        .into_response()
+}
+
+/// Global process metrics. This surface has a credential separate from tenant
+/// API keys, never emits tenant/job/request/trace labels, and performs no store
+/// I/O while serving a scrape.
+pub async fn operator_metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(expected) = state.metrics_token_digest.as_ref() else {
+        return no_store(api_error(
+            StatusCode::NOT_FOUND,
+            "metrics_disabled",
+            "global operator metrics are not configured",
+            false,
+        ));
+    };
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, credential)| {
+            scheme.eq_ignore_ascii_case("bearer") && !credential.is_empty()
+        })
+        .map(|(_, credential)| credential);
+    if !presented.is_some_and(|token| crate::metrics::token_matches(expected, token)) {
+        let mut response = api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_metrics_token",
+            "a valid operator metrics bearer token is required",
+            false,
+        );
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer realm=\"coop-metrics\""),
+        );
+        return no_store(response);
+    }
+
+    let format = crate::metrics::negotiate(headers.get(header::ACCEPT));
+    let startup = state
+        .startup_ready
+        .load(std::sync::atomic::Ordering::Acquire);
+    let storage = state.readiness.storage_ready();
+    let scheduler = !*state.shutdown.borrow();
+    let accepting = startup && storage && scheduler;
+    let snapshot = crate::metrics::RuntimeSnapshot {
+        capacity: crate::metrics::CapacitySnapshot {
+            queue_used: state.admission.depth(),
+            queue_limit: state.admission.capacity(),
+            submit_bodies_used: state.submit_body_admission.depth(),
+            submit_bodies_limit: state.submit_body_admission.capacity(),
+            streams_used: state.stream_admission.depth(),
+            streams_limit: state.stream_admission.capacity(),
+            result_waits_used: state.result_wait_admission.depth(),
+            result_waits_limit: state.result_wait_admission.capacity(),
+            large_responses_used: state.large_response_admission.depth(),
+            large_responses_limit: state.large_response_admission.capacity(),
+        },
+        readiness: crate::metrics::ReadinessSnapshot {
+            ready: accepting,
+            startup,
+            storage,
+            // Scheduler supervision publishes shutdown after retaining a fatal
+            // diagnosis, so this remains a cached, O(1) component.
+            scheduler,
+            accepting,
+        },
+    };
+    let body = state.metrics.render(format, snapshot);
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(format.content_type()),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (header::VARY, HeaderValue::from_static("accept")),
+        ],
         body,
     )
         .into_response()
@@ -1645,7 +1800,10 @@ pub async fn replay(
     // Bound both event materialization and the subsequent transfer.
     let permit = match acquire_large_response(&state, &tenant.0) {
         Ok(permit) => permit,
-        Err(error) => return large_response_error(error),
+        Err(error) => {
+            record_lifetime_rejection(&state, crate::metrics::AdmissionScope::LargeResponse, error);
+            return large_response_error(error);
+        }
     };
     match state.store.events_after(&id, after, limit).await {
         Ok(events) => {
@@ -1722,7 +1880,14 @@ pub async fn job_result(
         if !*shutdown.borrow() {
             _wait_permit = Some(match state.result_wait_admission.try_acquire(&tenant.0) {
                 Ok(permit) => permit,
-                Err(error) => return result_wait_error(error),
+                Err(error) => {
+                    record_lifetime_rejection(
+                        &state,
+                        crate::metrics::AdmissionScope::ResultWait,
+                        error,
+                    );
+                    return result_wait_error(error);
+                }
             });
             // During readiness-gated startup recovery, durable queued rows
             // can briefly predate their in-process completion watch. Poll the
@@ -1808,7 +1973,10 @@ pub async fn job_result(
     // completion burst cannot materialize more than the response cap.
     let permit = match acquire_large_response(&state, &tenant.0) {
         Ok(permit) => permit,
-        Err(error) => return large_response_error(error),
+        Err(error) => {
+            record_lifetime_rejection(&state, crate::metrics::AdmissionScope::LargeResponse, error);
+            return large_response_error(error);
+        }
     };
     match state.store.events_for(&id).await {
         Ok(events) => {
@@ -1924,7 +2092,10 @@ pub async fn stream(
     };
     let stream_permit = match state.stream_admission.try_acquire(&tenant.0) {
         Ok(permit) => permit,
-        Err(error) => return stream_admission_error(error),
+        Err(error) => {
+            record_lifetime_rejection(&state, crate::metrics::AdmissionScope::Stream, error);
+            return stream_admission_error(error);
+        }
     };
     ws.max_message_size(MAX_INBOUND_STREAM_MESSAGE_BYTES)
         .max_frame_size(MAX_INBOUND_STREAM_MESSAGE_BYTES)
@@ -2275,7 +2446,11 @@ async fn job_terminal(store: &coop_store::Store, job_id: &str) -> coop_store::St
     responses((status = 200, description = "Process liveness"))
 )]
 pub async fn health() -> Response {
-    Json(serde_json::json!({ "ok": true })).into_response()
+    let mut response = Json(serde_json::json!({ "ok": true })).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 #[utoipa::path(
@@ -2292,40 +2467,40 @@ pub async fn ready(State(state): State<AppState>) -> Response {
         .startup_ready
         .load(std::sync::atomic::Ordering::Acquire)
     {
-        return api_error_with_retry(
+        return no_store(api_error_with_retry(
             StatusCode::SERVICE_UNAVAILABLE,
             "startup_recovery",
             "durable startup recovery is still in progress",
             true,
             Some(1),
-        );
+        ));
     }
-    match state
-        .store
-        .get_job_summary(STORAGE_LIVENESS_PROBE_JOB_ID)
-        .await
-    {
-        Ok(_) if !*state.shutdown.borrow() => {
-            Json(serde_json::json!({ "ok": true })).into_response()
-        }
-        Ok(_) => api_error_with_retry(
+    if *state.shutdown.borrow() {
+        return no_store(api_error_with_retry(
             StatusCode::SERVICE_UNAVAILABLE,
             "shutting_down",
             "server is shutting down",
             true,
             Some(1),
-        ),
-        Err(e) => {
-            tracing::error!(error = %e, "readiness storage check failed");
-            api_error_with_retry(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "storage_unavailable",
-                "event store is unavailable",
-                true,
-                Some(1),
-            )
-        }
+        ));
     }
+    if !state.readiness.storage_ready() {
+        return no_store(api_error_with_retry(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "the cached event-store readiness probe is unhealthy or stale",
+            true,
+            Some(1),
+        ));
+    }
+    no_store(Json(serde_json::json!({ "ok": true })).into_response())
+}
+
+fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 fn execution_capabilities(state: &AppState) -> ExecutionCapabilities {
@@ -2402,11 +2577,7 @@ pub async fn status(
     State(state): State<AppState>,
     Extension(tenant): Extension<Tenant>,
 ) -> Response {
-    let storage_ready = state
-        .store
-        .get_job_summary(STORAGE_LIVENESS_PROBE_JOB_ID)
-        .await
-        .is_ok();
+    let storage_ready = state.readiness.storage_ready();
     Json(StatusResponse {
         version: crate::VERSION.to_string(),
         sandbox: state.sandbox_mode.as_str().to_string(),

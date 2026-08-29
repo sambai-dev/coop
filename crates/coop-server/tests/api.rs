@@ -26,6 +26,7 @@ fn test_config(db: &std::path::Path) -> Config {
         addr: "127.0.0.1:0".to_string(),
         db_path: db.to_string_lossy().into_owned(),
         api_keys,
+        metrics_token: Some("test-metrics-token".to_string()),
         workers: 2,
         tenant_concurrency: 4,
         tenant_queue_capacity: 64,
@@ -1397,7 +1398,151 @@ async fn metrics_endpoint_reports_job_counts() {
         .expect("body");
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("coop_jobs_current"), "{text}");
-    assert!(text.contains("coop_running_jobs"), "{text}");
+    assert!(text.contains("coop_job_lifecycle_owners_current"), "{text}");
+    assert!(!text.contains("coop_running_jobs"), "{text}");
+}
+
+#[tokio::test]
+async fn global_metrics_are_separately_authorized_bounded_and_negotiated() {
+    let app = spawn_app().await;
+
+    for key in [None, Some("test-key")] {
+        let response = app
+            .clone()
+            .oneshot(request("GET", "/metrics", key, None))
+            .await
+            .expect("metrics response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.headers().contains_key("x-request-id"));
+        assert_eq!(
+            response
+                .headers()
+                .get(header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer realm=\"coop-metrics\"")
+        );
+    }
+
+    let openmetrics = Request::builder()
+        .method("GET")
+        .uri("/metrics")
+        .header(header::AUTHORIZATION, "Bearer test-metrics-token")
+        .header(header::ACCEPT, "application/openmetrics-text;version=1.0.0")
+        .body(Body::empty())
+        .unwrap();
+    let response = app
+        .clone()
+        .oneshot(openmetrics)
+        .await
+        .expect("OpenMetrics response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/openmetrics-text; version=1.0.0; charset=utf-8")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("metrics body");
+    let text = String::from_utf8(bytes.to_vec()).expect("UTF-8 metrics");
+    assert!(text.ends_with("# EOF\n"), "{text}");
+    for family in [
+        "coop_http_server_request_duration_seconds",
+        "coop_admission_rejections_total",
+        "coop_queue_depth",
+        "coop_executions_active",
+        "coop_storage_errors_total",
+        "coop_output_truncations_total",
+        "coop_recovered_jobs_total",
+        "coop_retention_runs_total",
+        "coop_capacity_used",
+        "coop_build_info",
+    ] {
+        assert!(text.contains(family), "missing {family}");
+    }
+    for forbidden in ["tenant=", "job_id=", "request_id=", "trace_id="] {
+        assert!(!text.contains(forbidden), "leaked {forbidden}");
+    }
+
+    let legacy = Request::builder()
+        .method("GET")
+        .uri("/metrics")
+        .header(header::AUTHORIZATION, "Bearer test-metrics-token")
+        .header(header::ACCEPT, "text/plain;version=0.0.4")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(legacy).await.expect("legacy metrics response");
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/plain; version=0.0.4; charset=utf-8")
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("legacy body");
+    assert!(!bytes.ends_with(b"# EOF\n"));
+}
+
+#[tokio::test]
+async fn ingress_request_id_covers_success_early_error_and_ignores_caller_value() {
+    let app = spawn_app().await;
+    let success = app
+        .clone()
+        .oneshot(request("GET", "/healthz", None, None))
+        .await
+        .expect("health response");
+    let success_id = success
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("success request ID");
+    assert_eq!(
+        uuid::Uuid::parse_str(success_id)
+            .expect("UUID request ID")
+            .get_version_num(),
+        7
+    );
+
+    let unauthorized = Request::builder()
+        .method("GET")
+        .uri("/v1/whoami")
+        .header("x-request-id", "caller-controlled")
+        .header(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        )
+        .header("baggage", "secret=must-not-propagate")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(unauthorized).await.expect("auth response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let header_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .expect("error request ID")
+        .to_string();
+    assert_ne!(header_id, "caller-controlled");
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("error body");
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["request_id"], header_id);
+    assert!(!body.to_string().contains("must-not-propagate"));
+    assert!(!body
+        .to_string()
+        .contains("4bf92f3577b34da6a3ce929d0e0e4736"));
 }
 
 // ---------------------------------------------------------------------------

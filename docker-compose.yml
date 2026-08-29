@@ -13,6 +13,7 @@ services:
     environment:
       COOP_ENV: production
       COOP_API_KEYS: "${COOP_API_KEYS:?copy .env.example to .env and replace the key}"
+      COOP_METRICS_TOKEN: "${COOP_METRICS_TOKEN:-}"
       COOP_SANDBOX: ns
       COOP_ROOTFS: /opt/coop/rootfs
       COOP_SANDBOX_HELPER: /usr/local/bin/coop-sandbox-init
@@ -28,6 +29,7 @@ services:
       COOP_STORAGE_FREE_RESERVE_MB: "${COOP_STORAGE_FREE_RESERVE_MB:-1024}"
       COOP_RETENTION_HOURS: "${COOP_RETENTION_HOURS:-168}"
       COOP_SWEEP_INTERVAL_SECS: "${COOP_SWEEP_INTERVAL_SECS:-3600}"
+      COOP_LOG_FORMAT: "${COOP_LOG_FORMAT:-json}"
       RUST_LOG: "${RUST_LOG:-info,coop_server=info}"
     volumes:
       - coop-data:/data

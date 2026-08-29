@@ -102,6 +102,7 @@ async fn spawn_app_with_root() -> (Router, String) {
         addr: "127.0.0.1:0".to_string(),
         db_path: db.to_string_lossy().into_owned(),
         api_keys,
+        metrics_token: None,
         workers: 2,
         tenant_concurrency: 4,
         tenant_queue_capacity: 64,

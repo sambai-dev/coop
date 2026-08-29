@@ -298,6 +298,7 @@ struct FinishedOp {
 
 struct JobSink {
     tx: mpsc::Sender<Op>,
+    metrics: Arc<crate::metrics::Metrics>,
     stdout_dropped: Arc<std::sync::atomic::AtomicBool>,
     stderr_dropped: Arc<std::sync::atomic::AtomicBool>,
     deferred_controls: Arc<std::sync::Mutex<Vec<Op>>>,
@@ -321,6 +322,10 @@ impl Sink for JobSink {
     }
 
     fn truncated(&self, stream: Stream) {
+        self.metrics.truncation(match stream {
+            Stream::Stdout => crate::metrics::TruncationKind::Stdout,
+            Stream::Stderr => crate::metrics::TruncationKind::Stderr,
+        });
         if let Err(error) = self.tx.try_send(Op::Truncated(stream)) {
             defer_control(&self.deferred_controls, error.into_inner());
         }
@@ -343,6 +348,17 @@ fn defer_control(queue: &std::sync::Mutex<Vec<Op>>, op: Op) {
 struct CancelGuard {
     map: Arc<dashmap::DashMap<String, crate::RunningJob>>,
     job_id: String,
+}
+
+struct JobTraceGuard {
+    map: Arc<dashmap::DashMap<String, crate::request_context::JobTraceContext>>,
+    job_id: String,
+}
+
+impl Drop for JobTraceGuard {
+    fn drop(&mut self) {
+        self.map.remove(&self.job_id);
+    }
 }
 
 impl Drop for CancelGuard {
@@ -645,7 +661,20 @@ impl WorkerPool {
     }
 }
 
-#[tracing::instrument(name = "job", skip_all, fields(job_id = %queued.job_id))]
+#[tracing::instrument(
+    name = "job",
+    skip_all,
+    fields(
+        job_id = %queued.job_id,
+        request_id = tracing::field::Empty,
+        trace_id = tracing::field::Empty,
+        span_id = tracing::field::Empty,
+        parent_span_id = tracing::field::Empty,
+        trace_flags = tracing::field::Empty,
+        linked_trace_id = tracing::field::Empty,
+        linked_span_id = tracing::field::Empty,
+    )
+)]
 async fn handle_job(
     state: AppState,
     mut queued: QueuedJob,
@@ -654,6 +683,13 @@ async fn handle_job(
     _memory_permit: OwnedSemaphorePermit,
 ) {
     let job_id = queued.job_id.clone();
+    if let Some(context) = state.job_traces.get(&job_id) {
+        context.record_on_current_job_span();
+    }
+    let _job_trace_guard = JobTraceGuard {
+        map: Arc::clone(&state.job_traces),
+        job_id: job_id.clone(),
+    };
     let Some(row) = load_queued_job_retrying(&state, &job_id).await else {
         return;
     };
@@ -901,6 +937,9 @@ async fn handle_job(
     let stdout_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stderr_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let deferred_controls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let execution_observation = state
+        .metrics
+        .start_execution(crate::metrics::Language::classify(&spec.language));
     let coop_exec::ExecutionReport {
         outcome: result,
         provenance,
@@ -908,6 +947,7 @@ async fn handle_job(
         ctx,
         Arc::new(JobSink {
             tx: op_tx.clone(),
+            metrics: Arc::clone(&state.metrics),
             stdout_dropped: Arc::clone(&stdout_dropped),
             stderr_dropped: Arc::clone(&stderr_dropped),
             deferred_controls: Arc::clone(&deferred_controls),
@@ -931,6 +971,9 @@ async fn handle_job(
         (Stream::Stderr, &stderr_dropped),
     ] {
         if dropped.load(std::sync::atomic::Ordering::Relaxed) {
+            state
+                .metrics
+                .truncation(crate::metrics::TruncationKind::Evidence);
             let _ = op_tx.send(Op::EvidenceIncomplete).await;
             let _ = op_tx.send(Op::Truncated(stream)).await;
         }
@@ -939,6 +982,7 @@ async fn handle_job(
     match result {
         Ok(outcome) => {
             let status = coop_types::JobStatus::from(outcome.status);
+            execution_observation.finish(crate::metrics::JobOutcome::classify(status.as_str()));
             finish_via(
                 op_tx,
                 status.as_str(),
@@ -958,6 +1002,7 @@ async fn handle_job(
             );
         }
         Err(e) => {
+            execution_observation.finish(crate::metrics::JobOutcome::Error);
             tracing::error!(error = %e, "executor failure");
             let _ = op_tx
                 .send(Op::Violation("executor_error", executor_error_detail(&e)))
@@ -993,7 +1038,14 @@ async fn load_queued_job_retrying(state: &AppState, job_id: &str) -> Option<coop
         if *state.shutdown.borrow() {
             return None;
         }
-        match state.store.get_job(job_id).await {
+        let started_at = std::time::Instant::now();
+        let result = state.store.get_job(job_id).await;
+        state.metrics.observe_storage(
+            crate::metrics::StorageOperation::Read,
+            started_at.elapsed(),
+            result.is_ok(),
+        );
+        match result {
             Ok(row) => {
                 if row.is_none() {
                     tracing::warn!(job_id, "queued job vanished from store");
@@ -1039,11 +1091,17 @@ async fn start_job_retrying(
             finalize_queued_cancel_retrying(state, row).await;
             return Ok(StartOutcome::NotStarted);
         }
-        match state
+        let started_at = std::time::Instant::now();
+        let result = state
             .store
             .start_with_event_if_queued(&row.job_id, effective_spec)
-            .await
-        {
+            .await;
+        state.metrics.observe_storage(
+            crate::metrics::StorageOperation::Start,
+            started_at.elapsed(),
+            result.is_ok(),
+        );
+        match result {
             Ok(Some(event)) => return Ok(StartOutcome::Started(Some(event))),
             Ok(None) => match reconcile_start(state, &row.job_id).await {
                 Some(StartOutcome::Started(_)) => return Ok(StartOutcome::Started(None)),
@@ -1219,11 +1277,19 @@ pub fn spawn_retention_sweeper(state: AppState) {
             let mut events_deleted = 0_u64;
             let mut more_remaining = false;
             let mut made_progress = false;
+            let mut failed = false;
             for _ in 0..16 {
                 if *shutdown.borrow() {
                     break;
                 }
-                match state.store.prune_older_than_batch(max_age_ms, 250).await {
+                let started_at = std::time::Instant::now();
+                let result = state.store.prune_older_than_batch(max_age_ms, 250).await;
+                state.metrics.observe_storage(
+                    crate::metrics::StorageOperation::Retention,
+                    started_at.elapsed(),
+                    result.is_ok(),
+                );
+                match result {
                     Ok(report) => {
                         jobs_deleted += report.jobs_deleted;
                         events_deleted += report.events_deleted;
@@ -1236,6 +1302,7 @@ pub fn spawn_retention_sweeper(state: AppState) {
                         tokio::task::yield_now().await;
                     }
                     Err(e) => {
+                        failed = true;
                         tracing::warn!(error = %e, "retention sweep failed");
                         more_remaining = false;
                         break;
@@ -1243,6 +1310,13 @@ pub fn spawn_retention_sweeper(state: AppState) {
                 }
             }
             catch_up = more_remaining && made_progress;
+            if failed {
+                state.metrics.retention_failed();
+            } else {
+                state
+                    .metrics
+                    .retention_succeeded(jobs_deleted, events_deleted);
+            }
             if jobs_deleted > 0 || events_deleted > 0 {
                 tracing::info!(
                     jobs_deleted,
@@ -1484,7 +1558,14 @@ async fn flush_event_batch(
         return;
     }
     let expected = pending.len();
-    match state.store.append_events_batch(job_id, pending).await {
+    let started_at = std::time::Instant::now();
+    let result = state.store.append_events_batch(job_id, pending).await;
+    state.metrics.observe_storage(
+        crate::metrics::StorageOperation::Events,
+        started_at.elapsed(),
+        result.is_ok(),
+    );
+    match result {
         Ok(events) => {
             if events.len() != expected {
                 evidence.persistence_complete = false;
@@ -1545,7 +1626,8 @@ async fn finalize_job(state: &AppState, job_id: &str, terminal: TerminalEvidence
 
     delay = Duration::from_millis(10);
     loop {
-        match state
+        let started_at = std::time::Instant::now();
+        let result = state
             .store
             .finalize_with_event_and_effective_spec(
                 job_id,
@@ -1555,8 +1637,13 @@ async fn finalize_job(state: &AppState, job_id: &str, terminal: TerminalEvidence
                 built.effective_spec.as_ref(),
                 built.receipt.as_ref(),
             )
-            .await
-        {
+            .await;
+        state.metrics.observe_storage(
+            crate::metrics::StorageOperation::Finalize,
+            started_at.elapsed(),
+            result.is_ok(),
+        );
+        match result {
             Ok(Some(event)) => {
                 state.bus.send(job_id, wire_event(event));
                 state.bus.complete(job_id);
@@ -1765,6 +1852,7 @@ mod admission_tests {
             addr: "127.0.0.1:0".to_string(),
             db_path: db.to_string_lossy().into_owned(),
             api_keys: std::collections::HashMap::new(),
+            metrics_token: None,
             workers: 1,
             tenant_concurrency: 1,
             tenant_queue_capacity: 64,
@@ -2001,6 +2089,7 @@ mod admission_tests {
         let stdout_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sink = JobSink {
             tx,
+            metrics: Arc::new(crate::metrics::Metrics::new()),
             stdout_dropped: Arc::clone(&stdout_dropped),
             stderr_dropped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             deferred_controls: Arc::new(std::sync::Mutex::new(Vec::new())),

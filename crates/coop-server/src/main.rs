@@ -25,16 +25,64 @@ enum RuntimeStop {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    init_tracing();
 
     if let Err(error) = run().await {
         tracing::error!(%error, "coop terminated");
         eprintln!("error: {error}");
         std::process::exit(1);
+    }
+}
+
+fn init_tracing() {
+    let filter =
+        || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let production = coop_server::config::is_production();
+    let configured = std::env::var("COOP_LOG_FORMAT").ok();
+    let (format, invalid) = select_log_format(configured.as_deref(), production);
+    if invalid {
+        let fallback = if production { "json" } else { "compact" };
+        eprintln!("warning: unsupported COOP_LOG_FORMAT; using privacy-safe {fallback} output");
+    }
+    match format {
+        LogFormat::Json => tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_target(true)
+            .init(),
+        LogFormat::Compact => tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .compact()
+            .with_target(true)
+            .init(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogFormat {
+    Json,
+    Compact,
+}
+
+fn select_log_format(configured: Option<&str>, production: bool) -> (LogFormat, bool) {
+    let default = if production {
+        LogFormat::Json
+    } else {
+        LogFormat::Compact
+    };
+    let Some(configured) = configured.map(str::trim).filter(|value| !value.is_empty()) else {
+        return (default, false);
+    };
+    if configured.eq_ignore_ascii_case("json") {
+        (LogFormat::Json, false)
+    } else if configured.eq_ignore_ascii_case("compact") || configured.eq_ignore_ascii_case("text")
+    {
+        (LogFormat::Compact, false)
+    } else {
+        (default, true)
     }
 }
 
@@ -103,6 +151,10 @@ async fn run() -> Result<(), String> {
     // stopped cannot be resumed, so finalize it with restart evidence. Queued
     // jobs remain accepted and are re-enqueued below.
     let recovered = recover_stale_running_retrying(&state).await?;
+    state.metrics.recovered(
+        coop_server::metrics::RecoveryKind::InterruptedRunning,
+        recovered,
+    );
     if recovered > 0 {
         tracing::warn!(
             recovered,
@@ -165,6 +217,10 @@ async fn run() -> Result<(), String> {
             recovery_finished = true;
             match classify_recovery_completion(completion) {
                 Ok(restored) => {
+                    state.metrics.recovered(
+                        coop_server::metrics::RecoveryKind::RestoredQueued,
+                        restored as u64,
+                    );
                     tracing::info!(restored, "durable queued-job recovery complete");
                     tokio::select! {
                         biased;
@@ -300,7 +356,14 @@ fn classify_recovery_shutdown_completion(
 async fn recover_stale_running_retrying(state: &coop_server::AppState) -> Result<u64, String> {
     let mut delay = Duration::from_millis(20);
     for attempt in 1..=STORAGE_RETRY_ATTEMPTS {
-        match state.store.recover_stale_running().await {
+        let started_at = std::time::Instant::now();
+        let result = state.store.recover_stale_running().await;
+        state.metrics.observe_storage(
+            coop_server::metrics::StorageOperation::Recovery,
+            started_at.elapsed(),
+            result.is_ok(),
+        );
+        match result {
             Ok(recovered) => return Ok(recovered),
             Err(error) if attempt == STORAGE_RETRY_ATTEMPTS => {
                 return Err(format!(
@@ -362,11 +425,17 @@ async fn queued_page_retrying(
         if *state.shutdown.borrow() {
             return Err("shutdown requested".to_string());
         }
-        match state
+        let started_at = std::time::Instant::now();
+        let result = state
             .store
             .queued_jobs_page(cursor, RECOVERY_PAGE_SIZE)
-            .await
-        {
+            .await;
+        state.metrics.observe_storage(
+            coop_server::metrics::StorageOperation::Recovery,
+            started_at.elapsed(),
+            result.is_ok(),
+        );
+        match result {
             Ok(page) => return Ok(page),
             Err(error) if attempt == STORAGE_RETRY_ATTEMPTS => {
                 return Err(format!(
@@ -655,6 +724,24 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_format_is_json_by_default_in_production_and_explicitly_overridable() {
+        assert_eq!(select_log_format(None, true), (LogFormat::Json, false));
+        assert_eq!(select_log_format(None, false), (LogFormat::Compact, false));
+        assert_eq!(
+            select_log_format(Some(" compact "), true),
+            (LogFormat::Compact, false)
+        );
+        assert_eq!(
+            select_log_format(Some("JSON"), false),
+            (LogFormat::Json, false)
+        );
+        assert_eq!(
+            select_log_format(Some("unsafe-unknown"), true),
+            (LogFormat::Json, true)
+        );
+    }
 
     #[test]
     fn retained_worker_failure_upgrades_operator_stop_to_fatal() {
