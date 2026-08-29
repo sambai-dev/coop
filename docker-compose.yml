@@ -15,9 +15,14 @@ services:
       COOP_ENV: production
       COOP_API_KEYS: "${COOP_API_KEYS:?copy .env.example to .env and replace the key}"
       COOP_METRICS_TOKEN: "${COOP_METRICS_TOKEN:-}"
-      COOP_SANDBOX: ns
+      COOP_SANDBOX: "${COOP_SANDBOX:-gvisor}"
       COOP_ROOTFS: /opt/coop/rootfs
       COOP_SANDBOX_HELPER: /usr/local/bin/coop-sandbox-init
+      COOP_GVISOR_RUNSC: /usr/local/bin/runsc
+      COOP_GVISOR_ROOTFS_SHA256: "${COOP_GVISOR_ROOTFS_SHA256:-}"
+      COOP_GVISOR_PLATFORM: "${COOP_GVISOR_PLATFORM:-systrap}"
+      COOP_ATTESTATION_MODE: sign
+      COOP_ATTESTATION_KEY_FILE: /run/secrets/coop-attestation-key.pem
       COOP_SECCOMP: auto
       COOP_WORKERS: "${COOP_WORKERS:-4}"
       COOP_TENANT_CONCURRENCY: "${COOP_TENANT_CONCURRENCY:-2}"
@@ -34,10 +39,18 @@ services:
       RUST_LOG: "${RUST_LOG:-info,coop_server=info}"
     volumes:
       - coop-data:/data
+      - type: bind
+        source: ./.coop-runtime/runsc
+        target: /usr/local/bin/runsc
+        read_only: true
+    secrets:
+      - source: coop_attestation_key
+        target: coop-attestation-key.pem
     mem_limit: "${COOP_CONTAINER_MEMORY_LIMIT:-8g}"
-    # The in-tree x86_64 Linux namespace backend needs host-level namespace and
-    # cgroup privileges. This is NOT a safe public-cloud container boundary.
-    # Run this profile only on a dedicated x86_64 VM; see the boundary docs.
+    # Per-job gVisor still needs host cgroup/runtime setup from the outer
+    # container. The outer service is host-equivalent even though each tenant
+    # job crosses a separate runsc application-kernel boundary. Run this
+    # profile only on a dedicated x86_64 VM; see the boundary docs.
     privileged: true
     cgroup: host
     healthcheck:
@@ -53,3 +66,7 @@ services:
 
 volumes:
   coop-data:
+
+secrets:
+  coop_attestation_key:
+    file: ./.coop-runtime/attestation-key.pem

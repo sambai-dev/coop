@@ -8,6 +8,7 @@ reviewed_sha256=048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c
 runsc=${COOP_GVISOR_RUNSC:-/usr/local/bin/runsc}
 rootfs=${COOP_ROOTFS:-/opt/coop/rootfs}
 server=${COOP_GVISOR_SERVER_BIN:-target/debug/coop}
+verify_bin=${COOP_VERIFY_BIN:-"$(dirname "$server")/coop-verify"}
 port=${COOP_GVISOR_SMOKE_PORT:-7397}
 key=coop-gvisor-smoke-key-with-more-than-16-characters
 
@@ -16,6 +17,7 @@ test "$(uname -m)" = x86_64
 test "$(id -u)" = 0
 test -x "$runsc"
 test -x "$server"
+test -x "$verify_bin"
 test -x "$rootfs/usr/local/bin/coop-oci-init"
 test -f "$rootfs/.coop-rootfs.manifest"
 test -r /sys/fs/cgroup/cgroup.controllers
@@ -32,6 +34,8 @@ case "$base" in
   *) echo "unsafe gVisor smoke directory: $base" >&2; exit 1 ;;
 esac
 install -d -o root -g root -m 0700 "$base/jobs"
+"$verify_bin" generate-key --output "$base/attestation.pem"
+test "$(stat -c %a "$base/attestation.pem")" = 600
 rootfs_digest=$(sha256sum "$rootfs/.coop-rootfs.manifest" | awk '{print $1}')
 server_pid=
 
@@ -63,6 +67,8 @@ start_server() {
   COOP_GVISOR_RUNSC="$runsc" \
   COOP_GVISOR_ROOTFS_SHA256="$rootfs_digest" \
   COOP_GVISOR_PLATFORM=systrap \
+  COOP_ATTESTATION_MODE=sign \
+  COOP_ATTESTATION_KEY_FILE="$base/attestation.pem" \
   COOP_API_KEYS="smoke:$key" \
   RUST_LOG=info,coop_exec=debug \
     "$server" >>"$base/server.log" 2>&1 &

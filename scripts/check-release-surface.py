@@ -225,10 +225,12 @@ def check_pins_and_packaging() -> int:
         )
 
     for required in [
-        "cargo build --locked --release -p coop-server -p coop-exec --bins",
+        'COOP_GIT_REVISION="${VCS_REF}" cargo build --locked --release',
+        "-p coop-server -p coop-exec -p coop-attestation --bins",
         'COOP_GIT_REVISION="${VCS_REF}" cargo build',
         "coop-sandbox-init /usr/local/bin/coop-sandbox-init",
         "coop-oci-init /usr/local/bin/coop-oci-init",
+        "coop-verify /usr/local/bin/coop-verify",
         "COOP_ROOTFS=/opt/coop/rootfs",
         "COOP_SANDBOX_HELPER=/usr/local/bin/coop-sandbox-init",
         "install -d -o root -g root -m 0700 /data /var/lib/coop/jobs /opt/coop",
@@ -242,7 +244,7 @@ def check_pins_and_packaging() -> int:
         for line in read(".dockerignore").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
-    for required in ["target", "target-*"]:
+    for required in ["target", "target-*", ".coop-runtime"]:
         require(required in dockerignore_lines, f"Docker context does not exclude {required}")
 
     snapshot_match = re.search(r"^ARG DEBIAN_SNAPSHOT=(\S+)$", dockerfile, re.MULTILINE)
@@ -351,6 +353,7 @@ def check_pins_and_packaging() -> int:
     )
     require("coop-sandbox-init" in release, "Linux release artifact omits the sandbox helper")
     require("coop-oci-init" in release, "Linux release artifact omits the gVisor OCI init")
+    require("coop-verify" in release, "release artifacts omit the offline attestation verifier")
     gvisor_smoke = read("scripts/smoke-gvisor.sh")
     for required in [
         "release-20260817.0",
@@ -378,6 +381,10 @@ def check_pins_and_packaging() -> int:
         'test "$(uname -m)" = x86_64',
         "scripts/verify-production.py",
         "COOP_VERIFY_MINIMUM_ISOLATION",
+        "reviewed_runsc_sha256",
+        "COOP_GVISOR_ROOTFS_SHA256",
+        "attestation-key.pem",
+        "gvisor-application-kernel",
         "target.write_text",
         "target.chmod(0o600)",
     ]:
@@ -388,6 +395,8 @@ def check_pins_and_packaging() -> int:
         "scripts/verify-python-adapter.py",
         "COOP_VERIFY_LANGUAGES=python,node,bash",
         "COOP_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel",
+        "COOP_ATTESTATION_MODE=sign",
+        "COOP_ATTESTATION_KEY_FILE",
     ]:
         require(required in container_smoke, f"container smoke contract missing: {required}")
     production_verifier = read("scripts/verify-production.py")
@@ -444,7 +453,15 @@ def check_pins_and_packaging() -> int:
     compose = read("docker-compose.yml")
     require("127.0.0.1:7300:7300" in compose, "Compose must publish Coop on loopback only")
     require("COOP_API_KEYS: \"${COOP_API_KEYS:?" in compose, "Compose must require an API key")
-    require("privileged: true" in compose, "namespace Compose posture changed; re-review boundary docs")
+    for contract in [
+        'COOP_SANDBOX: "${COOP_SANDBOX:-gvisor}"',
+        "COOP_GVISOR_RUNSC: /usr/local/bin/runsc",
+        "COOP_GVISOR_ROOTFS_SHA256",
+        "COOP_ATTESTATION_MODE: sign",
+        "coop_attestation_key",
+        "privileged: true",
+    ]:
+        require(contract in compose, f"Compose production contract missing: {contract}")
     require(read(".env.example").split("COOP_API_KEYS=", 1)[1].splitlines()[0] == "", ".env example must not contain a key")
     return action_count
 

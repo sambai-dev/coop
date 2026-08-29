@@ -5,12 +5,14 @@ After=network-online.target
 Wants=network-online.target
 ConditionPathIsDirectory=/opt/coop/rootfs
 ConditionFileIsExecutable=/usr/local/bin/coop-sandbox-init
+ConditionFileIsExecutable=/usr/local/bin/runsc
+ConditionPathExists=/etc/coop/attestation-key.pem
 ConditionArchitecture=x86-64
 
 [Service]
 Type=simple
-# The Linux x86_64 namespace backend currently needs privileged namespace,
-# mount, uid/gid, and cgroup operations. Keep it on a dedicated x86_64 VM.
+# Per-job gVisor and the namespace fallback need privileged runtime, mount,
+# uid/gid, and cgroup operations. Keep this service on a dedicated x86_64 VM.
 User=root
 Group=root
 EnvironmentFile=/etc/coop/coop.env
@@ -41,7 +43,7 @@ ProtectControlGroups=no
 RestrictNamespaces=user mnt pid net ipc uts
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_SYS_CHROOT CAP_MKNOD CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL
 ReadWritePaths=/var/lib/coop /sys/fs/cgroup
-ReadOnlyPaths=/opt/coop/rootfs /usr/local/bin/coop /usr/local/bin/coop-sandbox-init
+ReadOnlyPaths=/opt/coop/rootfs /usr/local/bin/coop /usr/local/bin/coop-sandbox-init /usr/local/bin/runsc /etc/coop/attestation-key.pem
 
 [Install]
 WantedBy=multi-user.target

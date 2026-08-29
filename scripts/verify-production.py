@@ -7,12 +7,15 @@ import hashlib
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Mapping, Optional, cast
+from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 
 MAX_JSON_BYTES = 4 * 1024 * 1024
+MAX_ATTESTATION_BYTES = 2 * 1024 * 1024
+MAX_RESULT_ARTIFACT_BYTES = 16 * 1024 * 1024
 ISOLATION_CLASSES = frozenset(
     {
         "none",
@@ -44,6 +47,11 @@ class VerificationError(RuntimeError):
     pass
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
 class Api:
     def __init__(self, base_url: str, key: str) -> None:
         parts = urllib.parse.urlsplit(base_url)
@@ -65,6 +73,7 @@ class Api:
             (parts.scheme, parts.netloc, parts.path.rstrip("/"), "", "")
         )
         self.key = key
+        self._opener = urllib.request.build_opener(_NoRedirect())
 
     def request(
         self,
@@ -90,7 +99,7 @@ class Api:
             headers=headers,
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with self._opener.open(request, timeout=timeout) as response:
                 raw = response.read(MAX_JSON_BYTES + 1)
         except urllib.error.HTTPError as exc:
             raw = exc.read(64 * 1024)
@@ -111,6 +120,36 @@ class Api:
         if not isinstance(value, dict):
             raise VerificationError(f"{method} {path} did not return a JSON object")
         return cast(Dict[str, Any], value)
+
+    def request_bytes(
+        self,
+        path: str,
+        *,
+        accept: str,
+        max_bytes: int,
+        timeout: float = 10,
+    ) -> Tuple[bytes, Mapping[str, str]]:
+        request = urllib.request.Request(
+            self.base_url + "/" + path.lstrip("/"),
+            method="GET",
+            headers={
+                "Accept": accept,
+                "Authorization": f"Bearer {self.key}",
+                "User-Agent": "coop-production-verifier/1",
+            },
+        )
+        try:
+            with self._opener.open(request, timeout=timeout) as response:
+                raw = response.read(max_bytes + 1)
+                headers = {name.lower(): value for name, value in response.headers.items()}
+        except urllib.error.HTTPError as exc:
+            detail = exc.read(64 * 1024).decode("utf-8", errors="replace")
+            raise VerificationError(f"GET {path} returned HTTP {exc.code}: {detail}") from None
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            raise VerificationError(f"GET {path} failed: {exc}") from None
+        if len(raw) > max_bytes:
+            raise VerificationError(f"GET {path} exceeded {max_bytes} bytes")
+        return raw, headers
 
 
 def require(condition: bool, message: str) -> None:
@@ -274,7 +313,128 @@ def verify_receipt(detail: Mapping[str, Any], minimum_isolation: str) -> None:
     )
 
 
-def verify_canary(api: Api, language: str, minimum_isolation: str) -> str:
+def verify_attested_result(
+    api: Api,
+    job_id: str,
+    detail: Dict[str, Any],
+    result: Mapping[str, Any],
+    attestation_capabilities: Mapping[str, Any],
+) -> Dict[str, Any]:
+    encoded_job_id = urllib.parse.quote(job_id, safe="")
+    deadline = time.monotonic() + 15
+    while True:
+        status = detail.get("attestation")
+        if isinstance(status, dict) and status.get("available") is True:
+            break
+        if time.monotonic() >= deadline:
+            raise VerificationError(f"{job_id}: signed attestation was not available in time")
+        time.sleep(0.1)
+        detail = api.request("GET", f"/v1/jobs/{encoded_job_id}")
+
+    status = cast(Dict[str, Any], detail["attestation"])
+    key_id = status.get("key_id")
+    require(
+        isinstance(key_id, str) and key_id == attestation_capabilities.get("key_id"),
+        f"{job_id}: attestation key id differs from capabilities",
+    )
+    require(
+        status.get("receipt_sha256") == detail.get("receipt_sha256"),
+        f"{job_id}: attestation is not bound to the terminal receipt",
+    )
+    envelope_path = status.get("envelope_url")
+    result_path = status.get("result_artifact_url")
+    require(
+        envelope_path == f"/v1/jobs/{job_id}/attestation",
+        f"{job_id}: unexpected attestation URL",
+    )
+    require(
+        result_path == f"/v1/jobs/{job_id}/result-artifact",
+        f"{job_id}: unexpected result-artifact URL",
+    )
+
+    envelope, envelope_headers = api.request_bytes(
+        cast(str, envelope_path),
+        accept="application/vnd.dsse.envelope.v1+json",
+        max_bytes=MAX_ATTESTATION_BYTES,
+    )
+    artifact, artifact_headers = api.request_bytes(
+        cast(str, result_path),
+        accept="application/vnd.coop.execution-result.v1+json",
+        max_bytes=MAX_RESULT_ARTIFACT_BYTES,
+    )
+    for label, data, headers, expected_digest, expected_size, expected_type in [
+        (
+            "attestation envelope",
+            envelope,
+            envelope_headers,
+            status.get("envelope_sha256"),
+            status.get("envelope_size_bytes"),
+            "application/vnd.dsse.envelope.v1+json",
+        ),
+        (
+            "result artifact",
+            artifact,
+            artifact_headers,
+            status.get("result_sha256"),
+            status.get("result_size_bytes"),
+            "application/vnd.coop.execution-result.v1+json",
+        ),
+    ]:
+        require_sha256(expected_digest, f"{job_id}: invalid {label} digest")
+        actual_digest = hashlib.sha256(data).hexdigest()
+        require(actual_digest == expected_digest, f"{job_id}: {label} digest mismatch")
+        require(
+            headers.get("x-content-sha256") == expected_digest,
+            f"{job_id}: {label} response digest header mismatch",
+        )
+        require(
+            headers.get("content-type") == expected_type,
+            f"{job_id}: {label} content type mismatch",
+        )
+        require(expected_size == len(data), f"{job_id}: {label} size mismatch")
+        require(
+            headers.get("content-length") == str(len(data)),
+            f"{job_id}: {label} Content-Length mismatch",
+        )
+
+    try:
+        envelope_document = json.loads(envelope.decode("utf-8"))
+        artifact_document = json.loads(artifact.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise VerificationError(f"{job_id}: attestation bytes are not valid UTF-8 JSON: {exc}") from None
+    require(isinstance(envelope_document, dict), f"{job_id}: DSSE envelope is not an object")
+    require(
+        envelope_document.get("payloadType") == "application/vnd.in-toto+json",
+        f"{job_id}: unexpected DSSE payload type",
+    )
+    signatures = envelope_document.get("signatures")
+    require(
+        isinstance(signatures, list)
+        and bool(signatures)
+        and all(isinstance(signature, dict) for signature in signatures),
+        f"{job_id}: DSSE signatures are missing",
+    )
+    require(isinstance(artifact_document, dict), f"{job_id}: result artifact is not an object")
+    require(artifact_document.get("schema_version") == 1, f"{job_id}: result artifact version differs")
+    require(artifact_document.get("job_id") == job_id, f"{job_id}: result artifact job differs")
+    require(
+        artifact_document.get("receipt_sha256") == detail.get("receipt_sha256"),
+        f"{job_id}: result artifact receipt differs",
+    )
+    for field in ["status", "exit_code", "stdout", "stderr", "truncated", "violations"]:
+        require(
+            artifact_document.get(field) == result.get(field),
+            f"{job_id}: result artifact {field} differs from the API result",
+        )
+    return status
+
+
+def verify_canary(
+    api: Api,
+    language: str,
+    minimum_isolation: str,
+    attestation_capabilities: Mapping[str, Any],
+) -> str:
     code, expected = CANARIES[language]
     submitted = api.request(
         "POST",
@@ -336,6 +496,7 @@ def verify_canary(api: Api, language: str, minimum_isolation: str) -> str:
         f"{language}: effective isolation class does not satisfy the minimum",
     )
     verify_receipt(detail, minimum_isolation)
+    verify_attested_result(api, job_id, detail, result, attestation_capabilities)
     return job_id
 
 
@@ -394,9 +555,52 @@ def main() -> None:
             isinstance(features, dict) and features.get("receipts") is True,
             "receipt capability is unavailable",
         )
+        require(
+            features.get("signed_attestations") is True,
+            "signed-attestation capability is unavailable",
+        )
+        attestation_capabilities = capabilities.get("attestations")
+        require(
+            isinstance(attestation_capabilities, dict)
+            and attestation_capabilities.get("enabled") is True,
+            "attestation signer is not enabled",
+        )
+        require(
+            attestation_capabilities.get("algorithm") == "Ed25519",
+            "unexpected attestation algorithm",
+        )
+        require(
+            attestation_capabilities.get("envelope_format")
+            == "DSSE/in-toto Statement v1",
+            "unexpected attestation envelope format",
+        )
+        require(
+            attestation_capabilities.get("public_key_url")
+            == "/v1/attestation/public-key",
+            "attestation public-key URL is missing",
+        )
+        public_key = api.request("GET", "/v1/attestation/public-key")
+        require(
+            public_key.get("algorithm") == "Ed25519"
+            and public_key.get("key_id") == attestation_capabilities.get("key_id"),
+            "attestation public key differs from capabilities",
+        )
+        require(
+            isinstance(public_key.get("public_key_pem"), str)
+            and public_key["public_key_pem"].startswith("-----BEGIN PUBLIC KEY-----\n")
+            and public_key["public_key_pem"].endswith("-----END PUBLIC KEY-----\n"),
+            "attestation public key is not canonical PEM",
+        )
+        require(
+            isinstance(public_key.get("trust_notice"), str)
+            and "not a trust anchor" in public_key["trust_notice"],
+            "attestation key response omits its trust warning",
+        )
 
         jobs = {
-            language: verify_canary(api, language, minimum_isolation)
+            language: verify_canary(
+                api, language, minimum_isolation, attestation_capabilities
+            )
             for language in languages
         }
         print(
@@ -407,6 +611,7 @@ def main() -> None:
                     "backend": execution.get("backend"),
                     "isolation_class": observed_class,
                     "minimum_isolation": minimum_isolation,
+                    "attestation_key_id": attestation_capabilities.get("key_id"),
                     "languages": languages,
                     "canary_job_ids": jobs,
                 },

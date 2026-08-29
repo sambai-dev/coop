@@ -5,6 +5,8 @@
 *.db-wal
 /data
 /.coop-dev
+/.coop-runtime
+/.tmp
 node_modules/
 __pycache__/
 *.pyc

@@ -6,6 +6,8 @@ target
 target-*
 data
 .coop-dev
+.coop-runtime
+.tmp
 *.db
 *.db-shm
 *.db-wal

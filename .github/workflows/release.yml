@@ -187,6 +187,7 @@ jobs:
           docker run --rm --entrypoint /bin/sh coop:release-candidate -ec '
             test -x /usr/local/bin/coop
             test -x /usr/local/bin/coop-sandbox-init
+            test -x /usr/local/bin/coop-verify
             test -x /opt/coop/rootfs/usr/bin/python3
             test -x /opt/coop/rootfs/usr/bin/node
             test -x /opt/coop/rootfs/usr/bin/bash
@@ -256,7 +257,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked -p coop-server --bin coop -p coop-exec --bin coop-sandbox-init --bin coop-oci-init
+          cargo build --locked -p coop-server --bin coop -p coop-exec --bin coop-sandbox-init --bin coop-oci-init -p coop-attestation --bin coop-verify
           bash scripts/prepare-test-rootfs.sh target/debug/coop-sandbox-init target/debug/coop-oci-init
       - name: Install reviewed gVisor runtime
         shell: bash
@@ -350,7 +351,7 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
       - name: Build locked release binary
-        run: cargo build --locked --release -p coop-server -p coop-exec --bins --target ${{ matrix.target }}
+        run: cargo build --locked --release -p coop-server -p coop-exec -p coop-attestation --bins --target ${{ matrix.target }}
       - name: Validate release target
         shell: bash
         run: |
@@ -372,6 +373,7 @@ jobs:
           dir="coop-${{ matrix.target }}"
           mkdir "$dir"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$dir/"
+          cp "target/${{ matrix.target }}/release/coop-verify" "$dir/"
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
             cp "target/${{ matrix.target }}/release/coop-sandbox-init" "$dir/"
             cp "target/${{ matrix.target }}/release/coop-oci-init" "$dir/"
@@ -388,6 +390,7 @@ jobs:
           $dir = "coop-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $dir | Out-Null
           Copy-Item -LiteralPath "target/${{ matrix.target }}/release/${{ matrix.binary }}" -Destination $dir
+          Copy-Item -LiteralPath "target/${{ matrix.target }}/release/coop-verify.exe" -Destination $dir
           Copy-Item -LiteralPath README.md, LICENSE, SECURITY.md, AUDIT.md, CHANGELOG.md -Destination $dir
           Copy-Item -LiteralPath docs, deploy, sdks, integrations -Destination $dir -Recurse
           Compress-Archive -Path $dir -DestinationPath "${dir}.zip"

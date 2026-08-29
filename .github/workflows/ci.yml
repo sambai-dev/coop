@@ -201,6 +201,7 @@ jobs:
           docker run --rm --entrypoint /bin/sh coop:ci -ec '
             test -x /usr/local/bin/coop
             test -x /usr/local/bin/coop-sandbox-init
+            test -x /usr/local/bin/coop-verify
             test -x /opt/coop/rootfs/usr/bin/python3
             test -x /opt/coop/rootfs/usr/bin/node
             test -x /opt/coop/rootfs/usr/bin/bash
@@ -270,7 +271,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked -p coop-server --bin coop -p coop-exec --bin coop-sandbox-init --bin coop-oci-init
+          cargo build --locked -p coop-server --bin coop -p coop-exec --bin coop-sandbox-init --bin coop-oci-init -p coop-attestation --bin coop-verify
           bash scripts/prepare-test-rootfs.sh target/debug/coop-sandbox-init target/debug/coop-oci-init
       - name: Install reviewed gVisor runtime
         shell: bash

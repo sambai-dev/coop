@@ -148,6 +148,82 @@ class IsolationVerificationTests(unittest.TestCase):
         detail = {"receipt": receipt, "receipt_sha256": digest}
         verify.verify_receipt(detail, "gvisor-application-kernel")
 
+    def test_attested_result_downloads_remain_exact_and_digest_bound(self) -> None:
+        job_id = "job-1"
+        receipt_sha256 = "a" * 64
+        result = {
+            "status": "succeeded",
+            "exit_code": 0,
+            "stdout": "hello",
+            "stderr": "",
+            "truncated": False,
+            "violations": [],
+        }
+        artifact = json.dumps(
+            {
+                "schema_version": 1,
+                "job_id": job_id,
+                "receipt_sha256": receipt_sha256,
+                **result,
+            },
+            separators=(",", ":"),
+        ).encode()
+        envelope = json.dumps(
+            {
+                "payloadType": "application/vnd.in-toto+json",
+                "payload": "e30=",
+                "signatures": [{"keyid": "sha256:key", "sig": "AA=="}],
+            },
+            separators=(",", ":"),
+        ).encode()
+        artifact_digest = hashlib.sha256(artifact).hexdigest()
+        envelope_digest = hashlib.sha256(envelope).hexdigest()
+        detail = {
+            "receipt_sha256": receipt_sha256,
+            "attestation": {
+                "available": True,
+                "key_id": "sha256:key",
+                "receipt_sha256": receipt_sha256,
+                "result_sha256": artifact_digest,
+                "result_size_bytes": len(artifact),
+                "envelope_sha256": envelope_digest,
+                "envelope_size_bytes": len(envelope),
+                "envelope_url": f"/v1/jobs/{job_id}/attestation",
+                "result_artifact_url": f"/v1/jobs/{job_id}/result-artifact",
+            },
+        }
+
+        class FakeApi:
+            def request(self, method: str, path: str):  # pragma: no cover - poll fallback
+                raise AssertionError((method, path))
+
+            def request_bytes(self, path: str, *, accept: str, max_bytes: int):
+                del max_bytes
+                if path.endswith("/attestation"):
+                    self.assert_accept = accept
+                    return envelope, {
+                        "content-type": "application/vnd.dsse.envelope.v1+json",
+                        "content-length": str(len(envelope)),
+                        "x-content-sha256": envelope_digest,
+                    }
+                return artifact, {
+                    "content-type": "application/vnd.coop.execution-result.v1+json",
+                    "content-length": str(len(artifact)),
+                    "x-content-sha256": artifact_digest,
+                }
+
+        status = verify.verify_attested_result(
+            FakeApi(), job_id, detail, result, {"key_id": "sha256:key"}
+        )
+        self.assertEqual(status["result_sha256"], artifact_digest)
+
+        broken = json.loads(json.dumps(detail))
+        broken["attestation"]["result_sha256"] = "0" * 64
+        with self.assertRaisesRegex(verify.VerificationError, "result artifact digest mismatch"):
+            verify.verify_attested_result(
+                FakeApi(), job_id, broken, result, {"key_id": "sha256:key"}
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

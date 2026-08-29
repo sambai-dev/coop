@@ -18,12 +18,21 @@ fi
 test "$(uname -m)" = x86_64
 command -v docker >/dev/null
 command -v curl >/dev/null
+command -v openssl >/dev/null
 command -v python3 >/dev/null
 command -v seq >/dev/null
 
 suffix="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$$"
 name="coop-container-smoke-${suffix}"
 key="ci-smoke-key-0123456789abcdef"
+secrets_dir=$(mktemp -d "${TMPDIR:-/tmp}/coop-container-smoke.XXXXXX")
+case "$secrets_dir" in
+  "${TMPDIR:-/tmp}"/coop-container-smoke.*) ;;
+  *) echo "unsafe smoke secret directory: $secrets_dir" >&2; exit 1 ;;
+esac
+umask 0077
+openssl genpkey -algorithm ED25519 -out "$secrets_dir/attestation.pem"
+chmod 0600 "$secrets_dir/attestation.pem"
 
 cleanup() {
   local status=$?
@@ -32,6 +41,7 @@ cleanup() {
     docker logs --tail 200 "$name" >&2 2>/dev/null || true
   fi
   docker rm --force --volumes "$name" >/dev/null 2>&1 || true
+  rm -rf -- "$secrets_dir"
   exit "$status"
 }
 trap cleanup EXIT
@@ -42,9 +52,12 @@ docker run --detach \
   --cgroupns=host \
   --publish 127.0.0.1::7300 \
   --env "COOP_API_KEYS=smoke:${key}" \
+  --env COOP_ATTESTATION_MODE=sign \
+  --env COOP_ATTESTATION_KEY_FILE=/run/secrets/coop-attestation-key.pem \
   --env COOP_SANDBOX=ns \
   --env COOP_SECCOMP=auto \
   --env COOP_WORKERS=1 \
+  --volume "$secrets_dir/attestation.pem:/run/secrets/coop-attestation-key.pem:ro" \
   "$image" >/dev/null
 
 mapping=$(docker port "$name" 7300/tcp)

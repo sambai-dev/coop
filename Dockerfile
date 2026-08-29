@@ -6,7 +6,8 @@ ARG VCS_REF=unknown
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN COOP_GIT_REVISION="${VCS_REF}" cargo build --locked --release -p coop-server -p coop-exec --bins
+RUN COOP_GIT_REVISION="${VCS_REF}" cargo build --locked --release \
+      -p coop-server -p coop-exec -p coop-attestation --bins
 
 # Both the service image and private job rootfs use the same digest-pinned
 # Debian base and immutable package snapshot. Package resolution therefore
@@ -60,6 +61,7 @@ RUN python3 /tmp/build-rootfs-manifest.py /opt/coop/rootfs >/dev/null \
     && rm /tmp/build-rootfs-manifest.py
 COPY --from=build /src/target/release/coop /usr/local/bin/coop
 COPY --from=build /src/target/release/coop-sandbox-init /usr/local/bin/coop-sandbox-init
+COPY --from=build /src/target/release/coop-verify /usr/local/bin/coop-verify
 
 ENV COOP_ENV=production \
     COOP_ADDR=0.0.0.0:7300 \
