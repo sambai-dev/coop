@@ -16,7 +16,9 @@ use crate::{
     ext_for, ExecContext, ExecOutcome, ExecTelemetry, ExecutionProvenance, ExecutionProvider,
     ExecutionReport, ProviderFuture, ProviderPreflight, SandboxMode, Sink, Stream,
 };
-use coop_types::{IsolationClass, LimitEnforcement, Limits, OutcomeStatus};
+use coop_types::{
+    IsolationClass, LimitEnforcement, Limits, OutcomeStatus, MAX_CODE_BYTES, MAX_STDIN_BYTES,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -248,6 +250,26 @@ impl GvisorProvider {
         ctx: ExecContext,
         sink: Arc<dyn Sink>,
     ) -> Result<(ExecOutcome, String, bool), RunFailure> {
+        // Keep the provider boundary safe for direct callers as well as the
+        // HTTP server. Payload staging and the stdin writer live outside the
+        // guest cgroup, so reject oversized input before allocating runtime
+        // state, writing the jobs filesystem, or cloning stdin.
+        if ctx.code.len() > MAX_CODE_BYTES {
+            return Err(RunFailure::before_ready(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("code exceeds {MAX_CODE_BYTES} bytes"),
+            )));
+        }
+        if ctx
+            .stdin
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_STDIN_BYTES)
+        {
+            return Err(RunFailure::before_ready(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("stdin exceeds {MAX_STDIN_BYTES} bytes"),
+            )));
+        }
         let rootfs =
             validate_rootfs(&self.rootfs, &ctx.workdir).map_err(RunFailure::before_ready)?;
         let interpreter =
@@ -1878,6 +1900,61 @@ mod tests {
         };
         validate_lease(&lease, "job-abc").unwrap();
         assert!(validate_lease(&lease, "job-other").is_err());
+    }
+
+    fn direct_context(workdir: PathBuf) -> ExecContext {
+        ExecContext {
+            job_key: "direct-input-bound".to_string(),
+            language: "python".to_string(),
+            code: "print('ok')".to_string(),
+            stdin: None,
+            limits: Limits::default(),
+            workdir,
+            rootfs: None,
+            helper_path: None,
+            interpreter_override: None,
+            cancel: None,
+            start_gate: None,
+            seccomp: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_provider_rejects_oversized_code_before_staging() {
+        let (provider, runtime_dir, _) = fake_provider();
+        let base = runtime_dir.parent().unwrap();
+        let workdir = base.join("oversized-code-workdir");
+        let mut ctx = direct_context(workdir.clone());
+        ctx.code = "x".repeat(MAX_CODE_BYTES + 1);
+
+        let report = provider
+            .execute(ctx, Arc::new(PreflightSink::default()))
+            .await;
+        let error = report.outcome.expect_err("oversized code must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("code exceeds"));
+        assert!(!workdir.exists(), "provider staged oversized code");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn direct_provider_rejects_oversized_stdin_before_cloning() {
+        let (provider, runtime_dir, _) = fake_provider();
+        let base = runtime_dir.parent().unwrap();
+        let workdir = base.join("oversized-stdin-workdir");
+        let mut ctx = direct_context(workdir.clone());
+        ctx.stdin = Some("x".repeat(MAX_STDIN_BYTES + 1));
+
+        let report = provider
+            .execute(ctx, Arc::new(PreflightSink::default()))
+            .await;
+        let error = report
+            .outcome
+            .expect_err("oversized stdin must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("stdin exceeds"));
+        assert!(!workdir.exists(), "provider staged oversized stdin");
+        let _ = fs::remove_dir_all(base);
     }
 
     #[tokio::test]
