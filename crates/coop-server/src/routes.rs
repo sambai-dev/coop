@@ -1106,7 +1106,7 @@ pub async fn submit(
             StatusCode::UNPROCESSABLE_ENTITY,
             "minimum_isolation_unsatisfied",
             format!(
-                "the configured provider {:?} cannot satisfy requested minimum isolation {:?}",
+                "the configured provider {} cannot satisfy requested minimum isolation {}",
                 state.execution_provider.isolation_class(),
                 spec.requirements.minimum_isolation
             ),

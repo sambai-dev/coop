@@ -39,6 +39,19 @@ pub enum IsolationClass {
 }
 
 impl IsolationClass {
+    /// Stable API spelling used in JSON, configuration, logs, and errors.
+    pub const fn as_str(self) -> &'static str {
+        use IsolationClass::*;
+        match self {
+            None => "none",
+            LinuxSharedKernel => "linux-shared-kernel",
+            GvisorApplicationKernel => "gvisor-application-kernel",
+            WasmCapability => "wasm-capability",
+            HardwareVm => "hardware-vm",
+            ConfidentialVm => "confidential-vm",
+        }
+    }
+
     /// Whether this observed provider class satisfies a requested minimum.
     pub const fn satisfies(self, minimum: Self) -> bool {
         use IsolationClass::*;
@@ -55,6 +68,12 @@ impl IsolationClass {
             HardwareVm => matches!(self, HardwareVm | ConfidentialVm),
             ConfidentialVm => matches!(self, ConfidentialVm),
         }
+    }
+}
+
+impl std::fmt::Display for IsolationClass {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -305,5 +324,9 @@ mod tests {
         })
         .unwrap();
         assert_eq!(encoded["minimum_isolation"], "gvisor-application-kernel");
+        assert_eq!(
+            IsolationClass::GvisorApplicationKernel.to_string(),
+            "gvisor-application-kernel"
+        );
     }
 }
