@@ -1024,7 +1024,12 @@ fn internal_error(context: &str, e: impl std::fmt::Display) -> Response {
     path = "/v1/jobs",
     request_body = JobSpec,
     responses(
-        (status = 201, description = "Job accepted", body = SubmitResponse),
+        (status = 201, description = "Job accepted or safely replayed", body = SubmitResponse,
+            headers(
+                ("Location" = String, description = "Canonical tenant-scoped job detail path"),
+                ("Idempotency-Replayed" = bool, description = "True when this response replayed a prior matching idempotent submission")
+            )
+        ),
         (status = 400, description = "Invalid job spec", body = ErrorEnvelope),
         (status = 401, description = "Missing or invalid API key", body = ErrorEnvelope),
         (status = 408, description = "Request body read deadline exceeded", body = ErrorEnvelope),

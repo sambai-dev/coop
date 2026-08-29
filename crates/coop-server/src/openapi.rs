@@ -119,6 +119,14 @@ mod tests {
             serde_json::json!([])
         );
         let submit_responses = &value["paths"]["/v1/jobs"]["post"]["responses"];
+        assert_eq!(
+            submit_responses["201"]["headers"]["Location"]["schema"]["type"],
+            "string"
+        );
+        assert_eq!(
+            submit_responses["201"]["headers"]["Idempotency-Replayed"]["schema"]["type"],
+            "boolean"
+        );
         for status in ["408", "415", "422", "429", "503", "507"] {
             assert!(
                 submit_responses.get(status).is_some(),
