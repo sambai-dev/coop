@@ -1993,10 +1993,16 @@ GcZ0izY/30012ajdHY+/QK5lsMoxTnn0skdS+spLxaS5ZEO4qvPVb8RAoCkWMMal
         config.sandbox = "off".to_string();
         config.jobs_root = jobs.to_string_lossy().into_owned();
         config.db_path = db.to_string_lossy().into_owned();
-        let store = Arc::new(coop_store::Store::open(&db).await.unwrap());
+        let mut configured_state = config.clone();
+        configured_state.jwt = Some(jwt_config());
+        let store = Arc::new(
+            coop_store::Store::open_with_limits(&db, config.storage_limits())
+                .await
+                .unwrap(),
+        );
         let (unused, mut state, _queue_rx) = crate::build_app(config, store).await.unwrap();
         drop(unused);
-        Arc::get_mut(&mut state.cfg).unwrap().jwt = Some(jwt_config());
+        state.cfg = Arc::new(configured_state);
         state.jwt_verifier = Some(Arc::new(verifier));
         let app = crate::routes::router(state);
 

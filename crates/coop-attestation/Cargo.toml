@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Portable signed execution attestations for Coop"
+publish = false
 
 [lib]
 name = "coop_attestation"
