@@ -1738,6 +1738,34 @@ impl Store {
         Ok(row.get("version"))
     }
 
+    /// Constant-work readiness probe for the exact schema this binary needs.
+    /// Referencing both required data tables makes a missing/corrupt schema a
+    /// failed probe without scanning tenant rows or maintaining probe data.
+    pub async fn readiness_probe(&self) -> StoreResult<()> {
+        let row = sqlx::query(
+            "SELECT
+                 COALESCE((SELECT MAX(version) FROM schema_migrations), 0) AS history_version,
+                 (SELECT user_version FROM pragma_user_version) AS user_version,
+                 EXISTS(SELECT 1 FROM jobs WHERE job_id = ?1) AS jobs_readable,
+                 EXISTS(SELECT 1 FROM events WHERE job_id = ?1) AS events_readable",
+        )
+        .bind("__coop_readiness_schema_probe__")
+        .fetch_one(&self.pool)
+        .await?;
+        let history_version: i64 = row.get("history_version");
+        let user_version: i64 = row.get("user_version");
+        // Read both values so SQLite must resolve and execute the required
+        // table references even though the sentinel can never match a job ID.
+        let _: i64 = row.get("jobs_readable");
+        let _: i64 = row.get("events_readable");
+        if history_version != CURRENT_SCHEMA_VERSION || user_version != CURRENT_SCHEMA_VERSION {
+            return Err(sqlx::Error::Protocol(format!(
+                "readiness schema mismatch: expected {CURRENT_SCHEMA_VERSION}, history={history_version}, user_version={user_version}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Explicit, O(database-bytes) physical/value integrity check. Ordinary
     /// opens repeat this scan only when the durable validation revision or
     /// owned storage guards are absent/stale; callers can invoke this method

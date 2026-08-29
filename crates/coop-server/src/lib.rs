@@ -327,7 +327,7 @@ pub async fn build_app(
 
     readiness::prime(&state).await;
     let app = routes::router(state.clone());
-    readiness::spawn_monitor(state.clone());
+    std::mem::drop(readiness::spawn_monitor(state.clone()));
     Ok((app, state, queue_rx))
 }
 

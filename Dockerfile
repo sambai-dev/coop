@@ -1,10 +1,12 @@
 # Keep this version in sync with rust-toolchain.toml and CI.
 FROM rust:1.89.0-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6 AS build
 
+ARG VCS_REF=unknown
+
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --locked --release -p coop-server -p coop-exec --bins
+RUN COOP_GIT_REVISION="${VCS_REF}" cargo build --locked --release -p coop-server -p coop-exec --bins
 
 # Both the service image and private job rootfs use the same digest-pinned
 # Debian base and immutable package snapshot. Package resolution therefore

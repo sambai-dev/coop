@@ -398,6 +398,7 @@ impl FromRequest<AppState> for SubmitPayload {
         extract_submit_payload(
             req,
             &state.submit_body_admission,
+            Some(state.metrics.as_ref()),
             &tenant,
             SUBMIT_BODY_READ_DEADLINE,
         )
@@ -408,6 +409,7 @@ impl FromRequest<AppState> for SubmitPayload {
 async fn extract_submit_payload(
     req: Request,
     admission: &crate::LifetimeAdmission,
+    metrics: Option<&crate::metrics::Metrics>,
     tenant: &str,
     deadline: Duration,
 ) -> Result<SubmitPayload, Response> {
@@ -415,31 +417,52 @@ async fn extract_submit_payload(
     let permit = match admission.try_acquire(tenant) {
         Ok(permit) => permit,
         Err(crate::TryLifetimeError::Closed) => {
+            if let Some(metrics) = metrics {
+                record_lifetime_rejection(
+                    metrics,
+                    crate::metrics::AdmissionScope::SubmitBody,
+                    crate::TryLifetimeError::Closed,
+                );
+            }
             return Err(api_error_with_retry(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "shutting_down",
                 "server is shutting down",
                 true,
                 Some(1),
-            ))
+            ));
         }
         Err(crate::TryLifetimeError::GlobalFull) => {
+            if let Some(metrics) = metrics {
+                record_lifetime_rejection(
+                    metrics,
+                    crate::metrics::AdmissionScope::SubmitBody,
+                    crate::TryLifetimeError::GlobalFull,
+                );
+            }
             return Err(api_error_with_retry(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "submit_body_capacity",
                 "too many request bodies are currently being read",
                 true,
                 Some(1),
-            ))
+            ));
         }
         Err(crate::TryLifetimeError::TenantFull) => {
+            if let Some(metrics) = metrics {
+                record_lifetime_rejection(
+                    metrics,
+                    crate::metrics::AdmissionScope::SubmitBody,
+                    crate::TryLifetimeError::TenantFull,
+                );
+            }
             return Err(api_error_with_retry(
                 StatusCode::TOO_MANY_REQUESTS,
                 "tenant_submit_body_capacity",
                 "this tenant has too many request bodies currently being read",
                 true,
                 Some(1),
-            ))
+            ));
         }
     };
 
@@ -572,7 +595,7 @@ fn stream_admission_error(error: crate::TryLifetimeError) -> Response {
 }
 
 fn record_lifetime_rejection(
-    state: &AppState,
+    metrics: &crate::metrics::Metrics,
     scope: crate::metrics::AdmissionScope,
     error: crate::TryLifetimeError,
 ) {
@@ -581,7 +604,7 @@ fn record_lifetime_rejection(
         crate::TryLifetimeError::GlobalFull => crate::metrics::AdmissionReason::GlobalFull,
         crate::TryLifetimeError::TenantFull => crate::metrics::AdmissionReason::TenantFull,
     };
-    state.metrics.reject(scope, reason);
+    metrics.reject(scope, reason);
 }
 
 fn guarded_json_response<T: Serialize>(
@@ -1336,7 +1359,11 @@ pub async fn get_job(
     let permit = match acquire_large_response(&state, &tenant.0) {
         Ok(permit) => permit,
         Err(error) => {
-            record_lifetime_rejection(&state, crate::metrics::AdmissionScope::LargeResponse, error);
+            record_lifetime_rejection(
+                state.metrics.as_ref(),
+                crate::metrics::AdmissionScope::LargeResponse,
+                error,
+            );
             return large_response_error(error);
         }
     };
@@ -1801,7 +1828,11 @@ pub async fn replay(
     let permit = match acquire_large_response(&state, &tenant.0) {
         Ok(permit) => permit,
         Err(error) => {
-            record_lifetime_rejection(&state, crate::metrics::AdmissionScope::LargeResponse, error);
+            record_lifetime_rejection(
+                state.metrics.as_ref(),
+                crate::metrics::AdmissionScope::LargeResponse,
+                error,
+            );
             return large_response_error(error);
         }
     };
@@ -1882,7 +1913,7 @@ pub async fn job_result(
                 Ok(permit) => permit,
                 Err(error) => {
                     record_lifetime_rejection(
-                        &state,
+                        state.metrics.as_ref(),
                         crate::metrics::AdmissionScope::ResultWait,
                         error,
                     );
@@ -1974,7 +2005,11 @@ pub async fn job_result(
     let permit = match acquire_large_response(&state, &tenant.0) {
         Ok(permit) => permit,
         Err(error) => {
-            record_lifetime_rejection(&state, crate::metrics::AdmissionScope::LargeResponse, error);
+            record_lifetime_rejection(
+                state.metrics.as_ref(),
+                crate::metrics::AdmissionScope::LargeResponse,
+                error,
+            );
             return large_response_error(error);
         }
     };
@@ -2093,7 +2128,11 @@ pub async fn stream(
     let stream_permit = match state.stream_admission.try_acquire(&tenant.0) {
         Ok(permit) => permit,
         Err(error) => {
-            record_lifetime_rejection(&state, crate::metrics::AdmissionScope::Stream, error);
+            record_lifetime_rejection(
+                state.metrics.as_ref(),
+                crate::metrics::AdmissionScope::Stream,
+                error,
+            );
             return stream_admission_error(error);
         }
     };
@@ -3009,6 +3048,7 @@ mod tests {
             extract_submit_payload(
                 submit_request(axum::body::Body::from_stream(stalled)),
                 &held_admission,
+                None,
                 "tenant-a",
                 Duration::from_secs(5),
             )
@@ -3019,6 +3059,7 @@ mod tests {
         let tenant_error = extract_submit_payload(
             submit_request(axum::body::Body::from(r#"{"language":"bash","code":":"}"#)),
             &admission,
+            None,
             "tenant-a",
             Duration::from_secs(1),
         )
@@ -3030,6 +3071,7 @@ mod tests {
         let other = extract_submit_payload(
             submit_request(axum::body::Body::from(r#"{"language":"bash","code":":"}"#)),
             &admission,
+            None,
             "tenant-b",
             Duration::from_secs(1),
         )
@@ -3043,6 +3085,7 @@ mod tests {
         let timeout = extract_submit_payload(
             submit_request(axum::body::Body::from_stream(never)),
             &timeout_admission,
+            None,
             "tenant-a",
             Duration::from_millis(10),
         )
@@ -3060,6 +3103,7 @@ mod tests {
             extract_submit_payload(
                 submit_request(axum::body::Body::from(r#"{"language":"bash","code":":"}"#,)),
                 &timeout_admission,
+                None,
                 "tenant-a",
                 Duration::from_secs(1),
             )
@@ -3082,6 +3126,7 @@ mod tests {
         let response = extract_submit_payload(
             submit_request(axum::body::Body::from_stream(body)),
             &admission,
+            None,
             "tenant-b",
             Duration::from_secs(1),
         )
@@ -3094,6 +3139,62 @@ mod tests {
             0,
             "a rejected request body must never be polled"
         );
+    }
+
+    #[tokio::test]
+    async fn submit_body_rejections_record_closed_global_and_tenant_reasons() {
+        let metrics = crate::metrics::Metrics::new();
+        let admission = crate::LifetimeAdmission::new(2, 1);
+        let _tenant_a = admission.try_acquire("tenant-a").unwrap();
+        let tenant = extract_submit_payload(
+            submit_request(axum::body::Body::empty()),
+            &admission,
+            Some(&metrics),
+            "tenant-a",
+            Duration::from_secs(1),
+        )
+        .await
+        .err()
+        .expect("tenant body capacity rejects");
+        assert_eq!(tenant.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let _tenant_b = admission.try_acquire("tenant-b").unwrap();
+        let global = extract_submit_payload(
+            submit_request(axum::body::Body::empty()),
+            &admission,
+            Some(&metrics),
+            "tenant-c",
+            Duration::from_secs(1),
+        )
+        .await
+        .err()
+        .expect("global body capacity rejects");
+        assert_eq!(global.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let closed_admission = crate::LifetimeAdmission::new(1, 1);
+        closed_admission.close();
+        let closed = extract_submit_payload(
+            submit_request(axum::body::Body::empty()),
+            &closed_admission,
+            Some(&metrics),
+            "tenant-a",
+            Duration::from_secs(1),
+        )
+        .await
+        .err()
+        .expect("closed body admission rejects");
+        assert_eq!(closed.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        for (reason, expected) in [
+            (crate::metrics::AdmissionReason::TenantFull, 1),
+            (crate::metrics::AdmissionReason::GlobalFull, 1),
+            (crate::metrics::AdmissionReason::Closed, 1),
+        ] {
+            assert_eq!(
+                metrics.rejection_count(crate::metrics::AdmissionScope::SubmitBody, reason),
+                expected
+            );
+        }
     }
 
     #[tokio::test]
@@ -3111,6 +3212,8 @@ mod tests {
         let durable = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let durable_after_commit = Arc::clone(&durable);
         let durable_for_reconcile = Arc::clone(&durable);
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+        let detached_metrics = Arc::clone(&metrics);
 
         // This is the exact ownership pattern used by submit(): the HTTP
         // waiter owns only a JoinHandle, while the detached continuation owns
@@ -3133,7 +3236,10 @@ mod tests {
                 },
             )
             .await
-            .map(|committed| committed.publish_and_handoff(|_| {}));
+            .map(|committed| {
+                committed.publish_and_handoff(|_| {});
+                detached_metrics.submitted(crate::metrics::Language::Python);
+            });
             drop(body_permit);
             result
         });
@@ -3143,6 +3249,11 @@ mod tests {
         waiter.abort();
         let _ = waiter.await;
         assert_eq!(admission.depth(), 1, "queue lease survives handler abort");
+        assert_eq!(
+            metrics.submitted_count(crate::metrics::Language::Python),
+            0,
+            "an uncommitted attempt is not submitted"
+        );
         assert_eq!(
             body_admission.try_acquire("tenant-a").err(),
             Some(crate::TryLifetimeError::GlobalFull),
@@ -3157,6 +3268,11 @@ mod tests {
         assert!(durable.load(std::sync::atomic::Ordering::Acquire));
         assert_eq!(queued.job_id, "committed-job");
         assert_eq!(queued.tenant, "tenant-a");
+        assert_eq!(
+            metrics.submitted_count(crate::metrics::Language::Python),
+            1,
+            "detached durable success counts exactly once"
+        );
         assert_eq!(
             admission.depth(),
             1,
@@ -3184,21 +3300,31 @@ mod tests {
         let mut too_large =
             submit_request(axum::body::Body::from(r#"{"language":"bash","code":":"}"#));
         DefaultBodyLimit::max(8).apply(&mut too_large);
-        let response =
-            extract_submit_payload(too_large, &admission, "tenant-a", Duration::from_secs(1))
-                .await
-                .err()
-                .expect("tiny encoded limit rejects the body");
+        let response = extract_submit_payload(
+            too_large,
+            &admission,
+            None,
+            "tenant-a",
+            Duration::from_secs(1),
+        )
+        .await
+        .err()
+        .expect("tiny encoded limit rejects the body");
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
         let mut wrong_type =
             submit_request(axum::body::Body::from(r#"{"language":"bash","code":":"}"#));
         wrong_type.headers_mut().remove(header::CONTENT_TYPE);
-        let response =
-            extract_submit_payload(wrong_type, &admission, "tenant-a", Duration::from_secs(1))
-                .await
-                .err()
-                .expect("JSON extractor requires JSON content type");
+        let response = extract_submit_payload(
+            wrong_type,
+            &admission,
+            None,
+            "tenant-a",
+            Duration::from_secs(1),
+        )
+        .await
+        .err()
+        .expect("JSON extractor requires JSON content type");
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 
@@ -3208,11 +3334,16 @@ mod tests {
         let never = futures_util::stream::pending::<Result<axum::body::Bytes, Infallible>>();
         let mut request = submit_request(axum::body::Body::from_stream(never));
         *request.version_mut() = Version::HTTP_2;
-        let response =
-            extract_submit_payload(request, &admission, "tenant-a", Duration::from_millis(10))
-                .await
-                .err()
-                .expect("stalled HTTP/2 stream times out");
+        let response = extract_submit_payload(
+            request,
+            &admission,
+            None,
+            "tenant-a",
+            Duration::from_millis(10),
+        )
+        .await
+        .err()
+        .expect("stalled HTTP/2 stream times out");
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
         assert!(!response.headers().contains_key(header::CONNECTION));
     }

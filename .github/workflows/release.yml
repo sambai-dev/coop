@@ -13,6 +13,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  COOP_GIT_REVISION: ${{ github.sha }}
   RUST_BACKTRACE: "1"
 
 jobs:
@@ -36,6 +37,13 @@ jobs:
             echo "Configure the protected release environment/tag rules described in docs/releasing.md, then set COOP_RELEASE_GOVERNANCE=enabled" >&2
             exit 1
           fi
+      - name: Require a concrete build revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$COOP_GIT_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          checkout_revision=$(git rev-parse --verify 'HEAD^{commit}')
+          test "$COOP_GIT_REVISION" = "$checkout_revision"
       - name: Verify tag equals workspace version
         id: version
         shell: bash

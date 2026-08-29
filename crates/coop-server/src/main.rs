@@ -29,7 +29,6 @@ async fn main() {
 
     if let Err(error) = run().await {
         tracing::error!(%error, "coop terminated");
-        eprintln!("error: {error}");
         std::process::exit(1);
     }
 }
@@ -40,10 +39,6 @@ fn init_tracing() {
     let production = coop_server::config::is_production();
     let configured = std::env::var("COOP_LOG_FORMAT").ok();
     let (format, invalid) = select_log_format(configured.as_deref(), production);
-    if invalid {
-        let fallback = if production { "json" } else { "compact" };
-        eprintln!("warning: unsupported COOP_LOG_FORMAT; using privacy-safe {fallback} output");
-    }
     match format {
         LogFormat::Json => tracing_subscriber::fmt()
             .with_env_filter(filter())
@@ -58,6 +53,13 @@ fn init_tracing() {
             .compact()
             .with_target(true)
             .init(),
+    }
+    if invalid {
+        let fallback = if production { "json" } else { "compact" };
+        tracing::warn!(
+            fallback,
+            "unsupported COOP_LOG_FORMAT; using privacy-safe fallback"
+        );
     }
 }
 

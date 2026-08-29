@@ -92,6 +92,62 @@ async fn create_v1_schema(connection: &mut SqliteConnection) {
 }
 
 #[test]
+fn readiness_probe_requires_current_versions_and_both_data_tables() {
+    sqlx::test_block_on(async {
+        for missing in ["jobs", "events"] {
+            let db = test_db(&format!("readiness-missing-{missing}"));
+            let store = Store::open(&db).await.unwrap();
+            store.readiness_probe().await.unwrap();
+            let mut connection = raw_connection(&db).await;
+            sqlx::query(&format!("DROP TABLE {missing}"))
+                .execute(&mut connection)
+                .await
+                .unwrap();
+            assert_eq!(
+                store.schema_version().await.unwrap(),
+                2,
+                "the old version-only probe falsely stayed green"
+            );
+            assert!(
+                store.readiness_probe().await.is_err(),
+                "missing {missing} must fail readiness"
+            );
+        }
+
+        let db = test_db("readiness-version");
+        let store = Store::open(&db).await.unwrap();
+        let mut connection = raw_connection(&db).await;
+        sqlx::query("PRAGMA user_version = 1")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let error = store.readiness_probe().await.unwrap_err();
+        assert!(error.to_string().contains("schema mismatch"), "{error}");
+        let unchanged: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(unchanged, 1, "readiness must not migrate or repair schema");
+
+        sqlx::query("PRAGMA user_version = 2")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM schema_migrations WHERE version = 2")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        assert!(store.readiness_probe().await.is_err());
+        let history: i64 =
+            sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        assert_eq!(history, 1, "readiness must not repair migration history");
+    });
+}
+
+#[test]
 fn migrates_v01_database_without_fabricating_event_hashes() {
     sqlx::test_block_on(async {
         let db = test_db("migration");

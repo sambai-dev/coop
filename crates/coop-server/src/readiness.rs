@@ -61,12 +61,18 @@ impl ReadinessCache {
     }
 }
 
-pub fn spawn_monitor(state: AppState) {
+pub fn spawn_monitor(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut shutdown = state.shutdown.subscribe();
+        if *shutdown.borrow() {
+            return;
+        }
         let mut ticker = tokio::time::interval(PROBE_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            if *shutdown.borrow() {
+                return;
+            }
             tokio::select! {
                 biased;
                 changed = shutdown.changed() => {
@@ -80,7 +86,7 @@ pub fn spawn_monitor(state: AppState) {
 
             probe_once(&state).await;
         }
-    });
+    })
 }
 
 pub async fn prime(state: &AppState) {
@@ -89,7 +95,7 @@ pub async fn prime(state: &AppState) {
 
 async fn probe_once(state: &AppState) {
     let started_at = Instant::now();
-    let result = state.store.schema_version().await;
+    let result = state.store.readiness_probe().await;
     state.metrics.observe_storage(
         StorageOperation::Readiness,
         started_at.elapsed(),

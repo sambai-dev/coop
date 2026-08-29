@@ -526,6 +526,21 @@ async fn shutdown_is_sticky_and_queued_work_does_not_start_after_it() {
 }
 
 #[tokio::test]
+async fn readiness_monitor_exits_when_shutdown_was_already_sticky() {
+    let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
+    let cfg = test_config(&db);
+    let store = Arc::new(Store::open(&db).await.expect("open store"));
+    let (_app, state, _queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    state.begin_shutdown();
+
+    let monitor = coop_server::readiness::spawn_monitor(state);
+    tokio::time::timeout(Duration::from_millis(100), monitor)
+        .await
+        .expect("sticky shutdown stops monitor before its first tick")
+        .expect("monitor joins cleanly");
+}
+
+#[tokio::test]
 async fn long_result_wait_returns_promptly_when_shutdown_begins() {
     let db = std::env::temp_dir().join(format!("coop-test-{}.db", uuid::Uuid::now_v7()));
     let cfg = test_config(&db);
@@ -1400,6 +1415,32 @@ async fn metrics_endpoint_reports_job_counts() {
     assert!(text.contains("coop_jobs_current"), "{text}");
     assert!(text.contains("coop_job_lifecycle_owners_current"), "{text}");
     assert!(!text.contains("coop_running_jobs"), "{text}");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/metrics")
+                .header(header::AUTHORIZATION, "Bearer test-metrics-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("global metrics");
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("global metrics body");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains(
+            "coop_http_server_requests_total{method=\"GET\",route=\"/v1/metrics\",status_class=\"2xx\"} 1"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("coop_jobs_submitted_total{language=\"python\"} 1"),
+        "{text}"
+    );
 }
 
 #[tokio::test]

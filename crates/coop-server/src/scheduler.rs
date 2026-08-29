@@ -1278,8 +1278,10 @@ pub fn spawn_retention_sweeper(state: AppState) {
             let mut more_remaining = false;
             let mut made_progress = false;
             let mut failed = false;
+            let mut interrupted = false;
             for _ in 0..16 {
                 if *shutdown.borrow() {
+                    interrupted = true;
                     break;
                 }
                 let started_at = std::time::Instant::now();
@@ -1311,7 +1313,11 @@ pub fn spawn_retention_sweeper(state: AppState) {
             }
             catch_up = more_remaining && made_progress;
             if failed {
-                state.metrics.retention_failed();
+                state.metrics.retention_failed(jobs_deleted, events_deleted);
+            } else if interrupted {
+                state
+                    .metrics
+                    .retention_interrupted(jobs_deleted, events_deleted);
             } else {
                 state
                     .metrics

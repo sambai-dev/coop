@@ -226,6 +226,7 @@ def check_pins_and_packaging() -> int:
 
     for required in [
         "cargo build --locked --release -p coop-server -p coop-exec --bins",
+        'COOP_GIT_REVISION="${VCS_REF}" cargo build',
         "coop-sandbox-init /usr/local/bin/coop-sandbox-init",
         "COOP_ROOTFS=/opt/coop/rootfs",
         "COOP_SANDBOX_HELPER=/usr/local/bin/coop-sandbox-init",
@@ -248,6 +249,10 @@ def check_pins_and_packaging() -> int:
     snapshot = snapshot_match.group(1)
     for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"]:
         workflow_source = read(workflow)
+        require(
+            "COOP_GIT_REVISION: ${{ github.sha }}" in workflow_source,
+            f"{workflow} does not embed the checked-out revision",
+        )
         require(
             "cargo install cargo-audit --version 0.22.2 --locked" in workflow_source,
             f"{workflow} does not install the exact locked cargo-audit release",
@@ -310,6 +315,15 @@ def check_pins_and_packaging() -> int:
             )
 
     release = read(".github/workflows/release.yml")
+    for revision_contract in [
+        '[[ "$COOP_GIT_REVISION" =~ ^[0-9a-f]{40}$ ]]',
+        "checkout_revision=$(git rev-parse --verify 'HEAD^{commit}')",
+        'test "$COOP_GIT_REVISION" = "$checkout_revision"',
+    ]:
+        require(
+            revision_contract in release,
+            f"release preflight omits revision contract: {revision_contract}",
+        )
     workflow_text = read(".github/workflows/ci.yml") + release
     for moving_or_retiring in ["macos-14", "ubuntu-latest", "windows-latest"]:
         require(

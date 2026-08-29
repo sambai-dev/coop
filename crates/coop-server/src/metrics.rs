@@ -137,6 +137,7 @@ pub enum HttpRoute {
     Ready,
     OpenApi,
     Metrics,
+    TenantMetrics,
     Jobs,
     Job,
     Replay,
@@ -158,6 +159,7 @@ impl HttpRoute {
             Some("/readyz") => Self::Ready,
             Some("/openapi.json") => Self::OpenApi,
             Some("/metrics") => Self::Metrics,
+            Some("/v1/metrics") => Self::TenantMetrics,
             Some("/v1/jobs") => Self::Jobs,
             Some("/v1/jobs/{id}") => Self::Job,
             Some("/v1/jobs/{id}/replay") => Self::Replay,
@@ -179,6 +181,7 @@ impl HttpRoute {
             Self::Ready => "/readyz",
             Self::OpenApi => "/openapi.json",
             Self::Metrics => "/metrics",
+            Self::TenantMetrics => "/v1/metrics",
             Self::Jobs => "/v1/jobs",
             Self::Job => "/v1/jobs/{id}",
             Self::Replay => "/v1/jobs/{id}/replay",
@@ -200,6 +203,7 @@ const ROUTE_METHODS: &[(HttpRoute, HttpMethod)] = &[
     (HttpRoute::Ready, HttpMethod::Get),
     (HttpRoute::OpenApi, HttpMethod::Get),
     (HttpRoute::Metrics, HttpMethod::Get),
+    (HttpRoute::TenantMetrics, HttpMethod::Get),
     (HttpRoute::Jobs, HttpMethod::Get),
     (HttpRoute::Jobs, HttpMethod::Post),
     (HttpRoute::Job, HttpMethod::Get),
@@ -646,6 +650,11 @@ impl Metrics {
         self.jobs_submitted[language as usize].fetch_add(1, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
+    pub(crate) fn submitted_count(&self, language: Language) -> u64 {
+        self.jobs_submitted[language as usize].load(Ordering::Relaxed)
+    }
+
     pub fn start_execution(
         self: &std::sync::Arc<Self>,
         language: Language,
@@ -662,6 +671,12 @@ impl Metrics {
     pub fn reject(&self, scope: AdmissionScope, reason: AdmissionReason) {
         let index = scope as usize * AdmissionReason::ALL.len() + reason as usize;
         self.admission_rejections[index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rejection_count(&self, scope: AdmissionScope, reason: AdmissionReason) -> u64 {
+        let index = scope as usize * AdmissionReason::ALL.len() + reason as usize;
+        self.admission_rejections[index].load(Ordering::Relaxed)
     }
 
     pub fn observe_storage(&self, operation: StorageOperation, duration: Duration, ok: bool) {
@@ -699,9 +714,21 @@ impl Metrics {
             .store(unix_seconds(), Ordering::Relaxed);
     }
 
-    pub fn retention_failed(&self) {
+    pub fn retention_failed(&self, jobs_deleted: u64, events_deleted: u64) {
         self.retention_runs.fetch_add(1, Ordering::Relaxed);
         self.retention_errors.fetch_add(1, Ordering::Relaxed);
+        self.retention_jobs_deleted
+            .fetch_add(jobs_deleted, Ordering::Relaxed);
+        self.retention_events_deleted
+            .fetch_add(events_deleted, Ordering::Relaxed);
+    }
+
+    pub fn retention_interrupted(&self, jobs_deleted: u64, events_deleted: u64) {
+        self.retention_runs.fetch_add(1, Ordering::Relaxed);
+        self.retention_jobs_deleted
+            .fetch_add(jobs_deleted, Ordering::Relaxed);
+        self.retention_events_deleted
+            .fetch_add(events_deleted, Ordering::Relaxed);
     }
 
     pub fn render(&self, format: ExpositionFormat, snapshot: RuntimeSnapshot) -> String {
@@ -1416,6 +1443,12 @@ mod tests {
         assert!(body.contains("coop_executions_active 0"));
         assert!(body.contains("coop_queue_depth 3"));
         assert!(body.contains("coop_build_info"));
+        let expected_revision =
+            escape_label_value(option_env!("COOP_GIT_REVISION").unwrap_or("unknown"));
+        assert!(
+            body.contains(&format!("revision=\"{expected_revision}\"")),
+            "{body}"
+        );
         for forbidden in ["tenant=", "job_id=", "request_id=", "trace_id=", "url="] {
             assert!(!body.contains(forbidden), "leaked label {forbidden}");
         }
@@ -1444,6 +1477,10 @@ mod tests {
             HttpRoute::Unmatched
         );
         assert_eq!(HttpRoute::classify(None), HttpRoute::Unmatched);
+        assert_eq!(
+            HttpRoute::classify(Some("/v1/metrics")),
+            HttpRoute::TenantMetrics
+        );
     }
 
     #[test]
@@ -1459,6 +1496,41 @@ mod tests {
         assert_eq!(
             escape_label_value("rev\"\\line\nnext\t"),
             "rev\\\"\\\\line\\nnext_"
+        );
+    }
+
+    #[test]
+    fn failed_later_retention_batch_keeps_partial_totals_without_advancing_success() {
+        let metrics = Metrics::new();
+        metrics.retention_succeeded(2, 3);
+        let last_success = metrics
+            .retention_last_success_seconds
+            .load(Ordering::Relaxed);
+        assert!(last_success > 0);
+
+        metrics.retention_failed(5, 7);
+        assert_eq!(metrics.retention_runs.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.retention_errors.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.retention_jobs_deleted.load(Ordering::Relaxed), 7);
+        assert_eq!(metrics.retention_events_deleted.load(Ordering::Relaxed), 10);
+        assert_eq!(
+            metrics
+                .retention_last_success_seconds
+                .load(Ordering::Relaxed),
+            last_success,
+            "a partial failed sweep is not a successful sweep"
+        );
+
+        metrics.retention_interrupted(1, 1);
+        assert_eq!(metrics.retention_runs.load(Ordering::Relaxed), 3);
+        assert_eq!(metrics.retention_errors.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.retention_jobs_deleted.load(Ordering::Relaxed), 8);
+        assert_eq!(metrics.retention_events_deleted.load(Ordering::Relaxed), 11);
+        assert_eq!(
+            metrics
+                .retention_last_success_seconds
+                .load(Ordering::Relaxed),
+            last_success
         );
     }
 }
