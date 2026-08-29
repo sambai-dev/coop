@@ -98,6 +98,7 @@ fn readiness_probe_requires_current_versions_and_both_data_tables() {
             let db = test_db(&format!("readiness-missing-{missing}"));
             let store = Store::open(&db).await.unwrap();
             store.readiness_probe().await.unwrap();
+            let current_version = store.schema_version().await.unwrap();
             let mut connection = raw_connection(&db).await;
             sqlx::query(&format!("DROP TABLE {missing}"))
                 .execute(&mut connection)
@@ -105,7 +106,7 @@ fn readiness_probe_requires_current_versions_and_both_data_tables() {
                 .unwrap();
             assert_eq!(
                 store.schema_version().await.unwrap(),
-                2,
+                current_version,
                 "the old version-only probe falsely stayed green"
             );
             assert!(
@@ -116,6 +117,7 @@ fn readiness_probe_requires_current_versions_and_both_data_tables() {
 
         let db = test_db("readiness-version");
         let store = Store::open(&db).await.unwrap();
+        let current_version = store.schema_version().await.unwrap();
         let mut connection = raw_connection(&db).await;
         sqlx::query("PRAGMA user_version = 1")
             .execute(&mut connection)
@@ -129,11 +131,12 @@ fn readiness_probe_requires_current_versions_and_both_data_tables() {
             .unwrap();
         assert_eq!(unchanged, 1, "readiness must not migrate or repair schema");
 
-        sqlx::query("PRAGMA user_version = 2")
+        sqlx::query(&format!("PRAGMA user_version = {current_version}"))
             .execute(&mut connection)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM schema_migrations WHERE version = 2")
+        sqlx::query("DELETE FROM schema_migrations WHERE version = ?1")
+            .bind(current_version)
             .execute(&mut connection)
             .await
             .unwrap();
@@ -143,7 +146,11 @@ fn readiness_probe_requires_current_versions_and_both_data_tables() {
                 .fetch_one(&mut connection)
                 .await
                 .unwrap();
-        assert_eq!(history, 1, "readiness must not repair migration history");
+        assert_eq!(
+            history,
+            current_version - 1,
+            "readiness must not repair migration history"
+        );
     });
 }
 
