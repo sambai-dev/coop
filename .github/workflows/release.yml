@@ -188,6 +188,7 @@ jobs:
             test -x /usr/local/bin/coop
             test -x /usr/local/bin/coop-sandbox-init
             test -x /usr/local/bin/coop-verify
+            test -x /usr/local/bin/coop-container-entrypoint
             test -x /opt/coop/rootfs/usr/bin/python3
             test -x /opt/coop/rootfs/usr/bin/node
             test -x /opt/coop/rootfs/usr/bin/bash
@@ -200,6 +201,12 @@ jobs:
             test "$(stat -c %U:%G /data)" = root:root
             test "$(stat -c %a /var/lib/coop/jobs)" = 700
             test "$(stat -c %U:%G /var/lib/coop/jobs)" = root:root
+            test "$(stat -c %a /run/coop-bootstrap)" = 700
+            test "$(stat -c %U:%G /run/coop-bootstrap)" = root:root
+            test "$(stat -c %a /run/coop-runtime)" = 700
+            test "$(stat -c %U:%G /run/coop-runtime)" = root:root
+            test "$(stat -c %a /run/coop-secrets)" = 700
+            test "$(stat -c %U:%G /run/coop-secrets)" = root:root
           '
       - name: Smoke final image through the namespace backend
         env:

@@ -21,6 +21,11 @@ command -v curl >/dev/null
 command -v openssl >/dev/null
 command -v python3 >/dev/null
 command -v seq >/dev/null
+image_id=$(docker image inspect --format '{{.Id}}' "$image")
+if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "Docker did not resolve an immutable image ID for $image" >&2
+  exit 1
+fi
 
 suffix="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$$"
 name="coop-container-smoke-${suffix}"
@@ -33,6 +38,9 @@ esac
 umask 0077
 openssl genpkey -algorithm ED25519 -out "$secrets_dir/attestation.pem"
 chmod 0600 "$secrets_dir/attestation.pem"
+openssl pkey -in "$secrets_dir/attestation.pem" -pubout \
+  -out "$secrets_dir/attestation-public-key.pem"
+chmod 0644 "$secrets_dir/attestation-public-key.pem"
 
 cleanup() {
   local status=$?
@@ -53,12 +61,14 @@ docker run --detach \
   --publish 127.0.0.1::7300 \
   --env "COOP_API_KEYS=smoke:${key}" \
   --env COOP_ATTESTATION_MODE=sign \
-  --env COOP_ATTESTATION_KEY_FILE=/run/secrets/coop-attestation-key.pem \
+  --env COOP_ATTESTATION_KEY_SOURCE=/run/coop-bootstrap/attestation-key.pem \
+  --env COOP_ATTESTATION_KEY_FILE=/run/coop-secrets/attestation-key.pem \
   --env COOP_SANDBOX=ns \
   --env COOP_SECCOMP=auto \
   --env COOP_WORKERS=1 \
-  --volume "$secrets_dir/attestation.pem:/run/secrets/coop-attestation-key.pem:ro" \
-  "$image" >/dev/null
+  --tmpfs /run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0 \
+  --volume "$secrets_dir/attestation.pem:/run/coop-bootstrap/attestation-key.pem:ro" \
+  "$image_id" >/dev/null
 
 mapping=$(docker port "$name" 7300/tcp)
 port="${mapping##*:}"
@@ -83,6 +93,8 @@ COOP_CLIENT_KEY="$key" \
 COOP_VERIFY_BASE_URL="$base" \
 COOP_VERIFY_LANGUAGES=python,node,bash \
 COOP_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel \
+COOP_VERIFY_CONTAINER_IMAGE="$image_id" \
+COOP_VERIFY_PUBLIC_KEY_FILE="$secrets_dir/attestation-public-key.pem" \
 python3 scripts/verify-production.py
 
 COOP_CLIENT_KEY="$key" \

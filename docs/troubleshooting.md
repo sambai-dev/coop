@@ -19,6 +19,14 @@ Read the first error line; startup checks are intentionally fail closed.
 - seccomp rejected: production does not permit `COOP_SECCOMP=off`.
 - subprocess rejected: do not use it for untrusted work; the explicit acknowledgement is `COOP_UNSAFE_ALLOW_NAIVE=true`.
 
+For Compose, do not point the server directly at the host-owned private key or
+`runsc`. File-backed secrets and bind mounts preserve the host UID, while the
+production readers require root-owned in-container files. The supplied image
+entrypoint stages both inputs into root-owned tmpfs paths and the bootstrap
+validates that mapping through the exact built image. If the staging preflight
+fails under rootless Docker or `userns-remap`, use the supported rootful
+dedicated-VM posture; do not loosen file modes or ownership checks.
+
 ## `/healthz` is green but jobs fail
 
 Liveness only proves that the HTTP process responds. Check authenticated `/v1/status`, startup logs, disk space, interpreter paths inside the private rootfs, cgroup controllers, and a canary receipt.
@@ -61,6 +69,18 @@ attestation retry/key/storage warnings and the signer capability. Do not call
 an unavailable envelope “verified.” `COOP_ATTESTATION_MODE=off` intentionally
 produces no signature; after enabling a key, only retained terminal jobs can be
 backfilled. Preserve historical public keys when rotating.
+
+## Production verification rejects the attestation
+
+`scripts/verify-production.py` requires an absolute
+`COOP_VERIFY_PUBLIC_KEY_FILE` obtained independently of the server. For the
+Compose bootstrap, use `.coop-runtime/attestation-public-key.pem` and set
+`COOP_VERIFY_CONTAINER_IMAGE` to the immutable built image ID. For a binary
+installation, set `COOP_VERIFY_BIN` to the packaged verifier. A missing pin,
+nonzero verifier exit, wrong key, modified envelope/result byte, unexpected
+subject, or incomplete authenticated event chain fails the gate. Do not fix a
+failure by downloading `/v1/attestation/public-key` from the deployment being
+checked; that endpoint is discovery material, not a trust anchor.
 
 ## SQLite is busy or disk is full
 

@@ -143,10 +143,15 @@ COOP_PRODUCTION_VM_ACKNOWLEDGED=true scripts/bootstrap-production.sh
 ```
 
 The bootstrap creates `.env` and `.coop-runtime/` with owner-only permissions
-and never replaces existing credentials or key material. On later runs it
-verifies the exact runtime/key, updates the rootfs digest, deploys, and repeats
-the same production verifier. The acknowledgement is deliberate: it does not
-make the privileged outer service safe on a general-purpose host.
+and never replaces existing credentials or private key material. It also
+derives `.coop-runtime/attestation-public-key.pem` locally as the explicit
+operator trust pin. The image entrypoint stages the host-owned key and `runsc`
+into root-owned container-local paths before Coop starts, preserving the
+strict ownership boundary of a rootful deployment. On later runs the bootstrap
+validates the exact staged runtime/key and existing pin, updates the rootfs
+digest, deploys, and repeats the same production verifier with the packaged
+`coop-verify`. The acknowledgement is deliberate: it does not make the
+privileged outer service safe on a general-purpose host.
 
 Compose is loopback-only. Each submitted job crosses its own gVisor application-kernel boundary, but `privileged: true` still gives the **outer Coop container** host-equivalent authority for runtime and cgroup setup. Use this configuration only inside a dedicated, disposable x86_64 VM. It is not a safe control-plane deployment on a general-purpose Docker host. See [deployment choices](docs/deployment.md).
 

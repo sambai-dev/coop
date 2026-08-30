@@ -53,6 +53,8 @@ LABEL org.opencontainers.image.title="Coop" \
 # Interpreters exist both outside and inside the job rootfs. Jobs pivot into
 # the private /opt/coop/rootfs tree before exec.
 RUN install -d -o root -g root -m 0700 /data /var/lib/coop/jobs /opt/coop \
+    && install -d -o root -g root -m 0700 \
+      /run/coop-bootstrap /run/coop-runtime /run/coop-secrets \
     && install -d -o root -g root -m 0755 /opt/coop/rootfs
 
 COPY --from=complete-sandbox-rootfs / /opt/coop/rootfs
@@ -62,6 +64,7 @@ RUN python3 /tmp/build-rootfs-manifest.py /opt/coop/rootfs >/dev/null \
 COPY --from=build /src/target/release/coop /usr/local/bin/coop
 COPY --from=build /src/target/release/coop-sandbox-init /usr/local/bin/coop-sandbox-init
 COPY --from=build /src/target/release/coop-verify /usr/local/bin/coop-verify
+COPY --chmod=0755 scripts/container-entrypoint.sh /usr/local/bin/coop-container-entrypoint
 
 ENV COOP_ENV=production \
     COOP_ADDR=0.0.0.0:7300 \
@@ -79,4 +82,5 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7300/readyz', timeout=2).read()"]
 
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["/usr/local/bin/coop"]
+ENTRYPOINT ["/usr/local/bin/coop-container-entrypoint"]
+CMD ["/usr/local/bin/coop"]

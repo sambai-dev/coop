@@ -8,6 +8,7 @@ All notable changes are documented here. Coop follows semantic versioning while 
 
 - Add a per-job gVisor OCI provider with a pinned `runsc`, immutable private-rootfs manifest, nonce-bound workload readiness, cgroup limits, denied networking, complete cancel/timeout/delete handling, and crash/provider-switch reconciliation.
 - Make the guarded Compose bootstrap provision and verify the reviewed runtime, rootfs digest, Ed25519 key, and gVisor host prerequisites before serving traffic; retain namespaces as an explicitly weaker shared-kernel fallback.
+- Stage host-owned `runsc` and file-backed signing-key inputs into root-owned container tmpfs paths so strict production ownership checks work for a non-root Docker operator without being weakened.
 - Add atomic per-tenant queue leases, fair dispatch, a weighted aggregate memory budget, transactional tenant/global logical-storage quotas, a filesystem reserve watermark, and catch-up retention.
 - Make actual bound-listener validation mandatory for the binary and safe embedder API; public development credentials or subprocess execution fail closed without a separate acknowledgement.
 
@@ -23,6 +24,7 @@ All notable changes are documented here. Coop follows semantic versioning while 
 - Add the `coop-attestation` profile and `coop-verify` CLI: in-toto Statement/v1, exact DSSE PAE, Ed25519 signing, threshold verification, strict key files, frozen vectors, and a published JSON Schema.
 - Advance SQLite to schema v4 with a durable signing outbox, exact deterministic result artifacts, immutable DSSE envelopes, quota-aware storage, tenant-scoped downloads, restart backfill, and conditional receipt binding.
 - Expose signer capabilities, current public-key discovery with an explicit trust warning, per-job attestation metadata, and exact artifact/envelope digest headers. Signatures prove key possession and integrity, not trusted hardware or deterministic execution.
+- Make the production gate invoke the packaged `coop-verify` over the exact downloaded envelope/result bytes with an explicit operator-side public-key pin; the server key endpoint remains discovery-only.
 
 ### Operations and operator experience
 

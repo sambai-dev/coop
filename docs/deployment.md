@@ -18,23 +18,28 @@ Validate the exact deployment by running the hostile suite. “The process start
 
 ## Compose on a dedicated VM
 
-On an x86_64 Linux Docker host, the repository image constructs `/opt/coop/rootfs` separately from the outer container filesystem. Base images are digest-pinned and both outer runtime and job rootfs install interpreters from the same dated Debian snapshot. Compose defaults to `COOP_SANDBOX=gvisor`, bind-mounts the reviewed runtime read-only, mounts the signing key as a secret, binds the exact manifest digest, and fails without credentials. The Dockerfile refuses another production architecture. Coop runs as container PID 1 with host-cgroup delegation; do not add Docker's `init: true` or unrelated co-processes.
+On an x86_64 Linux Docker host, the repository image constructs `/opt/coop/rootfs` separately from the outer container filesystem. Base images are digest-pinned and both outer runtime and job rootfs install interpreters from the same dated Debian snapshot. Compose defaults to `COOP_SANDBOX=gvisor`, bind-mounts the reviewed runtime read-only, mounts the signing key as a file-backed secret, binds the exact manifest digest, and fails without credentials. Because bind mounts retain host ownership, the image entrypoint copies the runtime and private key into separate root-owned container-local tmpfs paths before it execs Coop. The strict key/runtime readers validate those staged copies. The Dockerfile refuses another production architecture. Coop runs as container PID 1 with host-cgroup delegation; do not add Docker's `init: true` or unrelated co-processes.
 
 Use the guarded bootstrap. It refuses non-Linux/non-x86_64 hosts, requires an
 explicit dedicated-VM acknowledgement, creates `.env` plus `.coop-runtime/`
 without overwriting existing keys, downloads and verifies the pinned `runsc`,
-generates an Ed25519 key, builds with pulled bases, computes the exact rootfs
-digest, establishes the gVisor map-count floor, waits for readiness, and runs
-one receipt-and-attestation-checked canary in each runtime:
+generates an Ed25519 key plus a locally derived public-key pin, builds with
+pulled bases, validates the root-owned staged key/runtime through that exact
+image, computes the exact rootfs digest, establishes the gVisor map-count
+floor, waits for readiness, and runs one receipt-and-attestation-checked canary
+in each runtime:
 
 ```bash
 COOP_PRODUCTION_VM_ACKNOWLEDGED=true scripts/bootstrap-production.sh
 ```
 
 The guard is deliberate: `.env` contains bearer credentials and
-`.coop-runtime/attestation-key.pem` is signing authority. If `.env` exists, the
-script requires a non-empty `agent-a:key`; existing runtime/key files must
-match the reviewed contract. Review both scripts before running them.
+`.coop-runtime/attestation-key.pem` is signing authority. The adjacent
+`attestation-public-key.pem` is the bootstrap's operator-side trust pin; copy
+it through an authenticated channel before relying on a remote deployment. If
+`.env` exists, the script requires a non-empty `agent-a:key`; existing
+runtime/key/pin files must match the reviewed contract. Review both scripts
+before running them.
 
 Confirm posture with an authenticated request:
 
@@ -44,14 +49,23 @@ curl --fail-with-body \
   http://127.0.0.1:7300/v1/status
 ```
 
-To repeat the full posture and canary gate without rebuilding, extract the key
-into `COOP_CLIENT_KEY` through your secret manager and run:
+To repeat the full posture and canary gate without rebuilding, extract the
+tenant key through your secret manager, select the exact built image, and pass
+the independently retained public-key pin explicitly:
 
 ```bash
+coop_image=$(docker image inspect --format '{{.Id}}' "$(docker compose images -q coop)")
 COOP_CLIENT_KEY="$key" \
+COOP_VERIFY_CONTAINER_IMAGE="$coop_image" \
+COOP_VERIFY_PUBLIC_KEY_FILE="$(pwd -P)/.coop-runtime/attestation-public-key.pem" \
 COOP_VERIFY_MINIMUM_ISOLATION=gvisor-application-kernel \
   python3 scripts/verify-production.py
 ```
+
+For a binary/systemd installation, set `COOP_VERIFY_BIN` to the packaged
+absolute `coop-verify` path instead of `COOP_VERIFY_CONTAINER_IMAGE`. The pin
+is mandatory in both modes. The verifier never obtains trust from
+`/v1/attestation/public-key`.
 
 The verifier permits plain HTTP only on loopback. Set `COOP_VERIFY_BASE_URL` to
 an HTTPS endpoint for remote ingress and `COOP_VERIFY_LANGUAGES` to a
@@ -87,8 +101,16 @@ namespace-guest filter; its terminal policy and receipt must instead carry the
 reviewed runtime, rootfs, and OCI-config SHA-256 digests. The verifier submits
 the minimum atomically with every canary; confirms requested, effective,
 policy, and receipt isolation records agree; then waits for each signed
-attestation, downloads exact envelope/result bytes, and checks every declared
-digest, length, media type, receipt binding, and result field.
+attestation, downloads exact envelope/result bytes, checks every declared
+digest, length, media type, receipt binding, and result field, and invokes the
+packaged `coop-verify` against those exact bytes with the explicit pin.
+
+Rootless Docker and rootful daemons with user-namespace remapping are not a
+supported containment posture: the current providers require effective UID 0,
+host cgroups, mounts, and sysctl access. The staging copy follows the daemon's
+UID mapping where possible and the bootstrap validates the result before
+deployment; an incompatible mapping fails closed rather than relaxing file
+ownership checks.
 
 The Compose service remains privileged because the outer control plane creates runsc workloads, mounts, and cgroups. A privileged-container compromise is effectively a host compromise even though tenant jobs cross gVisor. Run this only inside the dedicated VM; never add the Docker socket, cloud credentials, home directories, or unrelated volumes.
 

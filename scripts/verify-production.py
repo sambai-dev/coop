@@ -6,11 +6,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import stat
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 
 MAX_JSON_BYTES = 4 * 1024 * 1024
@@ -27,6 +32,8 @@ ISOLATION_CLASSES = frozenset(
     }
 )
 DEFAULT_MINIMUM_ISOLATION = "linux-shared-kernel"
+RESULT_ARTIFACT_MEDIA_TYPE = "application/vnd.coop.execution-result.v1+json"
+IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 CANARIES = {
     "python": (
         'print("coop-production-canary-python")',
@@ -45,6 +52,207 @@ CANARIES = {
 
 class VerificationError(RuntimeError):
     pass
+
+
+class OfflineVerifier:
+    """Run the packaged verifier against exact downloaded artifact bytes."""
+
+    def __init__(
+        self,
+        public_key_file: str,
+        *,
+        binary: str = "coop-verify",
+        container_image: Optional[str] = None,
+        docker_binary: str = "docker",
+    ) -> None:
+        if not public_key_file.strip():
+            raise VerificationError(
+                "COOP_VERIFY_PUBLIC_KEY_FILE is required; obtain and pin the "
+                "Ed25519 public key through an authenticated out-of-band channel"
+            )
+        public_key = Path(public_key_file)
+        if not public_key.is_absolute():
+            raise VerificationError("COOP_VERIFY_PUBLIC_KEY_FILE must be absolute")
+        try:
+            metadata = public_key.lstat()
+        except OSError as exc:
+            raise VerificationError(
+                f"cannot inspect COOP_VERIFY_PUBLIC_KEY_FILE: {exc}"
+            ) from None
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise VerificationError(
+                "COOP_VERIFY_PUBLIC_KEY_FILE must be a non-symlink regular file"
+            )
+        self.public_key_file = public_key
+        self.binary = binary.strip()
+        self.container_image = container_image.strip() if container_image else None
+        self.docker_binary = docker_binary.strip()
+        if self.container_image is not None:
+            if not IMAGE_ID.fullmatch(self.container_image):
+                raise VerificationError(
+                    "COOP_VERIFY_CONTAINER_IMAGE must be an immutable sha256 image ID"
+                )
+            if not self.docker_binary:
+                raise VerificationError("COOP_VERIFY_DOCKER_BIN must not be empty")
+        elif not self.binary or not Path(self.binary).is_absolute():
+            raise VerificationError(
+                "COOP_VERIFY_BIN must be the absolute path to the packaged verifier"
+            )
+
+    @classmethod
+    def from_environment(cls) -> "OfflineVerifier":
+        return cls(
+            os.environ.get("COOP_VERIFY_PUBLIC_KEY_FILE", ""),
+            binary=os.environ.get("COOP_VERIFY_BIN", ""),
+            container_image=os.environ.get("COOP_VERIFY_CONTAINER_IMAGE") or None,
+            docker_binary=os.environ.get("COOP_VERIFY_DOCKER_BIN", "docker"),
+        )
+
+    def verify(
+        self,
+        envelope: bytes,
+        subject: bytes,
+        *,
+        execution_id: str,
+        subject_name: str,
+        media_type: str,
+        outcome: str,
+        expected_key_id: str,
+    ) -> Dict[str, Any]:
+        with tempfile.TemporaryDirectory(prefix="coop-production-verify-") as raw_temp:
+            temporary = Path(raw_temp)
+            envelope_path = temporary / "attestation.dsse.json"
+            subject_path = temporary / "result-artifact.json"
+            envelope_path.write_bytes(envelope)
+            subject_path.write_bytes(subject)
+            envelope_path.chmod(0o600)
+            subject_path.chmod(0o600)
+
+            if self.container_image is None:
+                command = [
+                    self.binary,
+                    "verify",
+                    "--envelope",
+                    str(envelope_path),
+                    "--subject",
+                    str(subject_path),
+                    "--public-key",
+                    str(self.public_key_file),
+                ]
+            else:
+                for path in [temporary, self.public_key_file]:
+                    require(
+                        "," not in str(path),
+                        "Docker-backed verification paths must not contain commas",
+                    )
+                command = [
+                    self.docker_binary,
+                    "run",
+                    "--rm",
+                    "--network=none",
+                    "--read-only",
+                    "--cap-drop=ALL",
+                    "--cap-add=DAC_OVERRIDE",
+                    "--cap-add=CHOWN",
+                    "--security-opt=no-new-privileges",
+                    "--user=0:0",
+                    "--tmpfs=/run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0",
+                    "--mount",
+                    f"type=bind,src={temporary},dst=/verify-input,readonly",
+                    "--mount",
+                    "type=bind,src="
+                    f"{self.public_key_file},"
+                    "dst=/run/coop-bootstrap/trusted-attestation-public-key.pem,readonly",
+                    "--env",
+                    "COOP_VERIFY_PUBLIC_KEY_SOURCE=/run/coop-bootstrap/trusted-attestation-public-key.pem",
+                    "--env",
+                    "COOP_VERIFY_PUBLIC_KEY_FILE=/run/coop-secrets/trusted-attestation-public-key.pem",
+                    self.container_image,
+                    "/usr/local/bin/coop-verify",
+                    "verify",
+                    "--envelope",
+                    "/verify-input/attestation.dsse.json",
+                    "--subject",
+                    "/verify-input/result-artifact.json",
+                    "--public-key",
+                    "/run/coop-secrets/trusted-attestation-public-key.pem",
+                ]
+            command.extend(
+                [
+                    "--subject-name",
+                    subject_name,
+                    "--media-type",
+                    media_type,
+                ]
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=30,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise VerificationError(f"coop-verify could not run: {exc}") from None
+            if completed.returncode != 0:
+                detail = completed.stderr[:64 * 1024].decode(
+                    "utf-8", errors="replace"
+                )
+                raise VerificationError(
+                    f"coop-verify rejected the signed result: {detail.strip()}"
+                )
+            if len(completed.stdout) > 64 * 1024:
+                raise VerificationError("coop-verify output exceeded 65536 bytes")
+            try:
+                output = json.loads(completed.stdout.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise VerificationError(
+                    f"coop-verify returned invalid JSON: {exc}"
+                ) from None
+            require(isinstance(output, dict), "coop-verify output was not an object")
+            verified_key_ids = output.get("verified_key_ids")
+            require(output.get("verified") is True, "coop-verify did not report success")
+            require(
+                output.get("execution_id") == execution_id,
+                "coop-verify execution ID differs from the job",
+            )
+            require(
+                output.get("subject_name") == subject_name,
+                "coop-verify subject name differs from policy",
+            )
+            require(
+                output.get("subject_media_type") == media_type,
+                "coop-verify subject media type differs from policy",
+            )
+            require(
+                output.get("subject_sha256") == hashlib.sha256(subject).hexdigest(),
+                "coop-verify subject digest differs from the exact result bytes",
+            )
+            require(
+                output.get("subject_size_bytes") == len(subject),
+                "coop-verify subject size differs from the exact result bytes",
+            )
+            require(
+                output.get("outcome") == outcome,
+                "coop-verify outcome differs from the API result",
+            )
+            require(
+                output.get("event_chain_complete") is True,
+                "coop-verify did not authenticate a complete event chain",
+            )
+            require(
+                isinstance(verified_key_ids, list)
+                and bool(verified_key_ids)
+                and all(isinstance(value, str) for value in verified_key_ids),
+                "coop-verify returned no verified key IDs",
+            )
+            require(
+                expected_key_id in verified_key_ids,
+                "the server's attestation key ID was not verified by the pinned key",
+            )
+            return cast(Dict[str, Any], output)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -319,6 +527,7 @@ def verify_attested_result(
     detail: Dict[str, Any],
     result: Mapping[str, Any],
     attestation_capabilities: Mapping[str, Any],
+    offline_verifier: OfflineVerifier,
 ) -> Dict[str, Any]:
     encoded_job_id = urllib.parse.quote(job_id, safe="")
     deadline = time.monotonic() + 15
@@ -426,6 +635,16 @@ def verify_attested_result(
             artifact_document.get(field) == result.get(field),
             f"{job_id}: result artifact {field} differs from the API result",
         )
+    verified = offline_verifier.verify(
+        envelope,
+        artifact,
+        execution_id=job_id,
+        subject_name=f"coop://jobs/{job_id}/result",
+        media_type=RESULT_ARTIFACT_MEDIA_TYPE,
+        outcome=cast(str, result.get("status")),
+        expected_key_id=key_id,
+    )
+    status["verified_key_ids"] = verified["verified_key_ids"]
     return status
 
 
@@ -434,6 +653,7 @@ def verify_canary(
     language: str,
     minimum_isolation: str,
     attestation_capabilities: Mapping[str, Any],
+    offline_verifier: OfflineVerifier,
 ) -> str:
     code, expected = CANARIES[language]
     submitted = api.request(
@@ -496,7 +716,14 @@ def verify_canary(
         f"{language}: effective isolation class does not satisfy the minimum",
     )
     verify_receipt(detail, minimum_isolation)
-    verify_attested_result(api, job_id, detail, result, attestation_capabilities)
+    verify_attested_result(
+        api,
+        job_id,
+        detail,
+        result,
+        attestation_capabilities,
+        offline_verifier,
+    )
     return job_id
 
 
@@ -512,6 +739,7 @@ def parse_languages(raw: str) -> List[str]:
 
 def main() -> None:
     try:
+        offline_verifier = OfflineVerifier.from_environment()
         api = Api(
             os.environ.get("COOP_VERIFY_BASE_URL", "http://127.0.0.1:7300"),
             os.environ.get("COOP_CLIENT_KEY", ""),
@@ -575,31 +803,17 @@ def main() -> None:
             "unexpected attestation envelope format",
         )
         require(
-            attestation_capabilities.get("public_key_url")
-            == "/v1/attestation/public-key",
-            "attestation public-key URL is missing",
-        )
-        public_key = api.request("GET", "/v1/attestation/public-key")
-        require(
-            public_key.get("algorithm") == "Ed25519"
-            and public_key.get("key_id") == attestation_capabilities.get("key_id"),
-            "attestation public key differs from capabilities",
-        )
-        require(
-            isinstance(public_key.get("public_key_pem"), str)
-            and public_key["public_key_pem"].startswith("-----BEGIN PUBLIC KEY-----\n")
-            and public_key["public_key_pem"].endswith("-----END PUBLIC KEY-----\n"),
-            "attestation public key is not canonical PEM",
-        )
-        require(
-            isinstance(public_key.get("trust_notice"), str)
-            and "not a trust anchor" in public_key["trust_notice"],
-            "attestation key response omits its trust warning",
+            isinstance(attestation_capabilities.get("key_id"), str),
+            "attestation key ID is missing",
         )
 
         jobs = {
             language: verify_canary(
-                api, language, minimum_isolation, attestation_capabilities
+                api,
+                language,
+                minimum_isolation,
+                attestation_capabilities,
+                offline_verifier,
             )
             for language in languages
         }

@@ -18,11 +18,13 @@ services:
       COOP_SANDBOX: "${COOP_SANDBOX:-gvisor}"
       COOP_ROOTFS: /opt/coop/rootfs
       COOP_SANDBOX_HELPER: /usr/local/bin/coop-sandbox-init
-      COOP_GVISOR_RUNSC: /usr/local/bin/runsc
+      COOP_GVISOR_RUNSC_SOURCE: /run/coop-bootstrap/runsc
+      COOP_GVISOR_RUNSC: /run/coop-runtime/runsc
       COOP_GVISOR_ROOTFS_SHA256: "${COOP_GVISOR_ROOTFS_SHA256:-}"
       COOP_GVISOR_PLATFORM: "${COOP_GVISOR_PLATFORM:-systrap}"
       COOP_ATTESTATION_MODE: sign
-      COOP_ATTESTATION_KEY_FILE: /run/secrets/coop-attestation-key.pem
+      COOP_ATTESTATION_KEY_SOURCE: /run/secrets/coop-attestation-key.pem
+      COOP_ATTESTATION_KEY_FILE: /run/coop-secrets/attestation-key.pem
       COOP_SECCOMP: auto
       COOP_WORKERS: "${COOP_WORKERS:-4}"
       COOP_TENANT_CONCURRENCY: "${COOP_TENANT_CONCURRENCY:-2}"
@@ -41,11 +43,14 @@ services:
       - coop-data:/data
       - type: bind
         source: ./.coop-runtime/runsc
-        target: /usr/local/bin/runsc
+        target: /run/coop-bootstrap/runsc
         read_only: true
     secrets:
       - source: coop_attestation_key
         target: coop-attestation-key.pem
+    tmpfs:
+      - /run/coop-runtime:rw,exec,nosuid,nodev,mode=0700,uid=0,gid=0
+      - /run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0
     mem_limit: "${COOP_CONTAINER_MEMORY_LIMIT:-8g}"
     # Per-job gVisor still needs host cgroup/runtime setup from the outer
     # container. The outer service is host-equivalent even though each tenant

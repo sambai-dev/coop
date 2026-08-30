@@ -231,10 +231,14 @@ def check_pins_and_packaging() -> int:
         "coop-sandbox-init /usr/local/bin/coop-sandbox-init",
         "coop-oci-init /usr/local/bin/coop-oci-init",
         "coop-verify /usr/local/bin/coop-verify",
+        "scripts/container-entrypoint.sh /usr/local/bin/coop-container-entrypoint",
+        'ENTRYPOINT ["/usr/local/bin/coop-container-entrypoint"]',
+        'CMD ["/usr/local/bin/coop"]',
         "COOP_ROOTFS=/opt/coop/rootfs",
         "COOP_SANDBOX_HELPER=/usr/local/bin/coop-sandbox-init",
         "install -d -o root -g root -m 0700 /data /var/lib/coop/jobs /opt/coop",
         "install -d -o root -g root -m 0755 /opt/coop/rootfs",
+        "/run/coop-bootstrap /run/coop-runtime /run/coop-secrets",
         'test "$(dpkg --print-architecture)" = amd64',
     ]:
         require(required in dockerfile, f"Docker helper/rootfs contract missing: {required}")
@@ -386,6 +390,9 @@ def check_pins_and_packaging() -> int:
         "reviewed_runsc_sha256",
         "COOP_GVISOR_ROOTFS_SHA256",
         "attestation-key.pem",
+        "attestation-public-key.pem",
+        "COOP_VERIFY_CONTAINER_IMAGE",
+        "/usr/local/bin/coop-verify public-key",
         "gvisor-application-kernel",
         "target.write_text",
         "target.chmod(0o600)",
@@ -399,6 +406,9 @@ def check_pins_and_packaging() -> int:
         "COOP_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel",
         "COOP_ATTESTATION_MODE=sign",
         "COOP_ATTESTATION_KEY_FILE",
+        "COOP_ATTESTATION_KEY_SOURCE",
+        "COOP_VERIFY_PUBLIC_KEY_FILE",
+        "COOP_VERIFY_CONTAINER_IMAGE",
     ]:
         require(required in container_smoke, f"container smoke contract missing: {required}")
     production_verifier = read("scripts/verify-production.py")
@@ -413,8 +423,26 @@ def check_pins_and_packaging() -> int:
         'receipt.get("receipt_sha256")',
         'document.get("networking") == "disabled"',
         'hashlib.sha256(canonical.encode("utf-8")).hexdigest() == recorded',
+        "OfflineVerifier",
+        "COOP_VERIFY_PUBLIC_KEY_FILE",
+        "COOP_VERIFY_BIN",
+        '"--subject-name"',
+        '"--public-key"',
+        "/usr/local/bin/coop-verify",
     ]:
         require(required in production_verifier, f"production verifier contract missing: {required}")
+    require(
+        'api.request("GET", "/v1/attestation/public-key")' not in production_verifier,
+        "production verifier must not trust the server public-key endpoint",
+    )
+    container_entrypoint = read("scripts/container-entrypoint.sh")
+    for required in [
+        "COOP_GVISOR_RUNSC_SOURCE",
+        "COOP_ATTESTATION_KEY_SOURCE",
+        "COOP_VERIFY_PUBLIC_KEY_SOURCE",
+        "install -o 0 -g 0",
+    ]:
+        require(required in container_entrypoint, f"container staging contract missing: {required}")
     require(
         "python3 -m unittest discover -s scripts/tests -v"
         in read(".github/workflows/ci.yml"),
@@ -457,10 +485,15 @@ def check_pins_and_packaging() -> int:
     require("COOP_API_KEYS: \"${COOP_API_KEYS:?" in compose, "Compose must require an API key")
     for contract in [
         'COOP_SANDBOX: "${COOP_SANDBOX:-gvisor}"',
-        "COOP_GVISOR_RUNSC: /usr/local/bin/runsc",
+        "COOP_GVISOR_RUNSC_SOURCE: /run/coop-bootstrap/runsc",
+        "COOP_GVISOR_RUNSC: /run/coop-runtime/runsc",
         "COOP_GVISOR_ROOTFS_SHA256",
         "COOP_ATTESTATION_MODE: sign",
+        "COOP_ATTESTATION_KEY_SOURCE",
+        "COOP_ATTESTATION_KEY_FILE: /run/coop-secrets/attestation-key.pem",
         "coop_attestation_key",
+        "/run/coop-runtime:rw,exec,nosuid,nodev,mode=0700,uid=0,gid=0",
+        "/run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0",
         "privileged: true",
     ]:
         require(contract in compose, f"Compose production contract missing: {contract}")

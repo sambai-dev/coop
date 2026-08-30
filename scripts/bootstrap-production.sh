@@ -23,13 +23,14 @@ reviewed_runsc_sha256=048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca
 runtime_dir=.coop-runtime
 runsc_path=$runtime_dir/runsc
 attestation_key_path=$runtime_dir/attestation-key.pem
+attestation_public_key_path=$runtime_dir/attestation-public-key.pem
 
 if [[ -L "$runtime_dir" ]]; then
   echo "$runtime_dir must not be a symlink" >&2
   exit 1
 fi
 install -d -m 0700 "$runtime_dir"
-if [[ -L "$runsc_path" || -L "$attestation_key_path" ]]; then
+if [[ -L "$runsc_path" || -L "$attestation_key_path" || -L "$attestation_public_key_path" ]]; then
   echo "$runtime_dir and its trusted files must not be symlinks" >&2
   exit 1
 fi
@@ -68,6 +69,23 @@ fi
 test -f "$attestation_key_path"
 test "$(stat -c %a "$attestation_key_path")" = 600
 openssl pkey -in "$attestation_key_path" -noout -check >/dev/null
+if [[ ! -e "$attestation_public_key_path" ]]; then
+  temporary_public_key=$runtime_dir/attestation-public-key.pem.new
+  if [[ -e "$temporary_public_key" || -L "$temporary_public_key" ]]; then
+    echo "refusing an existing temporary attestation public key" >&2
+    exit 1
+  fi
+  trap 'rm -f -- "${temporary_public_key:-}"' EXIT
+  openssl pkey -in "$attestation_key_path" -pubout -out "$temporary_public_key"
+  chmod 0644 "$temporary_public_key"
+  mv -- "$temporary_public_key" "$attestation_public_key_path"
+  temporary_public_key=
+  trap - EXIT
+fi
+test -f "$attestation_public_key_path"
+test "$(stat -c %a "$attestation_public_key_path")" = 644
+openssl pkey -pubin -in "$attestation_public_key_path" -noout >/dev/null
+cmp <(openssl pkey -in "$attestation_key_path" -pubout) "$attestation_public_key_path"
 
 if [[ ! -e .env ]]; then
   key=$(openssl rand -hex 32)
@@ -102,6 +120,56 @@ PY
 fi
 
 docker compose build --pull
+coop_image=$(docker image inspect --format '{{.Id}}' "$(docker compose images -q coop)")
+if [[ ! "$coop_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "Compose did not produce one immutable Coop image ID" >&2
+  exit 1
+fi
+
+runtime_dir_absolute=$(cd -- "$runtime_dir" && pwd -P)
+runsc_absolute=$runtime_dir_absolute/runsc
+attestation_key_absolute=$runtime_dir_absolute/attestation-key.pem
+attestation_public_key_absolute=$runtime_dir_absolute/attestation-public-key.pem
+
+# File-backed Compose secrets and ordinary bind mounts retain host ownership.
+# Stage both host inputs through the exact built image, then validate the
+# root-owned copies that the service entrypoint will use. This works for a
+# rootful daemon and for rootless UID mapping when the privileged provider is
+# otherwise available; incompatible userns-remap layouts fail before deploy.
+docker run --rm \
+  --network none \
+  --read-only \
+  --user 0:0 \
+  --cap-drop ALL \
+  --cap-add DAC_OVERRIDE \
+  --cap-add CHOWN \
+  --security-opt no-new-privileges \
+  --tmpfs /run/coop-runtime:rw,exec,nosuid,nodev,mode=0700,uid=0,gid=0 \
+  --tmpfs /run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0 \
+  --mount "type=bind,src=$runsc_absolute,dst=/run/coop-bootstrap/runsc,readonly" \
+  --mount "type=bind,src=$attestation_key_absolute,dst=/run/coop-bootstrap/attestation-key.pem,readonly" \
+  --mount "type=bind,src=$attestation_public_key_absolute,dst=/run/coop-bootstrap/attestation-public-key.pem,readonly" \
+  --env COOP_GVISOR_RUNSC_SOURCE=/run/coop-bootstrap/runsc \
+  --env COOP_GVISOR_RUNSC=/run/coop-runtime/runsc \
+  --env COOP_ATTESTATION_KEY_SOURCE=/run/coop-bootstrap/attestation-key.pem \
+  --env COOP_ATTESTATION_KEY_FILE=/run/coop-secrets/attestation-key.pem \
+  --env COOP_VERIFY_PUBLIC_KEY_SOURCE=/run/coop-bootstrap/attestation-public-key.pem \
+  --env COOP_VERIFY_PUBLIC_KEY_FILE=/run/coop-secrets/attestation-public-key.pem \
+  --env "COOP_BOOTSTRAP_RUNSC_VERSION=$reviewed_runsc_version" \
+  --env "COOP_BOOTSTRAP_RUNSC_SHA256=$reviewed_runsc_sha256" \
+  "$coop_image" /bin/sh -ec '
+    test "$(stat -c %u:%g /run/coop-runtime/runsc)" = 0:0
+    test "$(stat -c %a /run/coop-runtime/runsc)" = 755
+    test "$(sha256sum /run/coop-runtime/runsc | awk '\''{print $1}'\'')" = "$COOP_BOOTSTRAP_RUNSC_SHA256"
+    test "$(/run/coop-runtime/runsc --version | head -n1)" = "runsc version $COOP_BOOTSTRAP_RUNSC_VERSION"
+    test "$(stat -c %u:%g /run/coop-secrets/attestation-key.pem)" = 0:0
+    test "$(stat -c %a /run/coop-secrets/attestation-key.pem)" = 600
+    /usr/local/bin/coop-verify public-key \
+      --private-key /run/coop-secrets/attestation-key.pem \
+      --output /run/coop-secrets/derived-public-key.pem >/dev/null
+    cmp /run/coop-secrets/derived-public-key.pem \
+      /run/coop-secrets/attestation-public-key.pem
+  '
 
 rootfs_digest=$(docker compose run --rm --no-deps --entrypoint /bin/sh coop -ec \
   "sha256sum /opt/coop/rootfs/.coop-rootfs.manifest | awk '{print \$1}'")
@@ -142,6 +210,8 @@ docker compose up --detach --wait
 COOP_CLIENT_KEY="$key" \
 COOP_VERIFY_BASE_URL="${COOP_VERIFY_BASE_URL:-http://127.0.0.1:7300}" \
 COOP_VERIFY_MINIMUM_ISOLATION="${COOP_VERIFY_MINIMUM_ISOLATION:-gvisor-application-kernel}" \
+COOP_VERIFY_CONTAINER_IMAGE="$coop_image" \
+COOP_VERIFY_PUBLIC_KEY_FILE="$attestation_public_key_absolute" \
 python3 scripts/verify-production.py
 
-echo "Coop is running and verified. Tenant credentials remain in .env; the attestation key remains in .coop-runtime with mode 0600." >&2
+echo "Coop is running and independently verified. Tenant credentials remain in .env; the mode-0600 signing key and pinned public key remain in .coop-runtime." >&2

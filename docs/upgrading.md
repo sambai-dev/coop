@@ -73,9 +73,10 @@ Treat v0.4 as a security- and deployment-sensitive upgrade:
    `coop-oci-init` from the same release;
 4. rebuild the private rootfs and manifest, provision the exact reviewed
    `runsc`, set its manifest SHA-256, and run the real gVisor gate;
-5. generate an owner-only Ed25519 key and set
-   `COOP_ATTESTATION_MODE=sign` plus `COOP_ATTESTATION_KEY_FILE`. Production
-   refuses an implicit unsigned start; `off` must be explicit;
+5. generate an owner-only Ed25519 key, retain its derived public key through an
+   authenticated operator channel, and set `COOP_ATTESTATION_MODE=sign` plus
+   `COOP_ATTESTATION_KEY_FILE`. Production refuses an implicit unsigned start;
+   `off` must be explicit;
 6. migrate legacy keys to the indexed credential file/pepper or configure the
    strict JWT issuer/audience/JWKS/tenant mapping and required scopes;
 7. set tenant/global queue, memory, retained-byte, and disk-reserve budgets
@@ -83,9 +84,11 @@ Treat v0.4 as a security- and deployment-sensitive upgrade:
 8. update MCP policy from the legacy boolean to the exact
    `COOP_MCP_MINIMUM_ISOLATION` class and enable Tasks only where the host
    negotiates the 2026 extension;
-9. run `scripts/verify-production.py`, the real Python/MCP adapter verifier,
-   all language canaries, signed-artifact downloads, and offline
-   `coop-verify` before restoring traffic.
+9. run `scripts/verify-production.py` with the explicit public-key pin and the
+   packaged `coop-verify` binary/image, then run the real Python/MCP adapter
+   verifier and all language canaries before restoring traffic. The production
+   script passes the exact signed-artifact bytes to the offline verifier and
+   does not trust the server key endpoint.
 
 Do not run a v0.3 binary against a migrated schema-v4 database. Restore the
 pre-upgrade backup for rollback. Signing is durable but eventual, so consumers
