@@ -62,7 +62,8 @@ const ROW_VALIDATION_REVISION: i64 = 3;
 // the sentinel until the transaction commits (which Coop never does).
 const OWNED_ROW_WRITE_REVISION: i64 = ROW_VALIDATION_REVISION + 1;
 const STORAGE_GUARD_REVISION_MARKER: &str = "coop-storage-guard-r3";
-const ACCOUNTING_VALIDATION_REVISION: i64 = 1;
+const PREVIOUS_ACCOUNTING_VALIDATION_REVISION: i64 = 1;
+const ACCOUNTING_VALIDATION_REVISION: i64 = 2;
 const OWNED_ACCOUNTING_WRITE_REVISION: i64 = ACCOUNTING_VALIDATION_REVISION + 1;
 pub const JOB_COMPLETION_RESERVE_BYTES: u64 = 32 * 1024 * 1024;
 /// Portion of a job's admission-time completion reserve retained after its
@@ -404,6 +405,14 @@ fn logical_event_bytes(event: &EventRow) -> u64 {
         .saturating_add(event.event_hash.len() as u64)
 }
 
+fn logical_idempotency_bytes(tenant: &str, job_id: &str, request: &IdempotencyRequest) -> u64 {
+    LOGICAL_ROW_OVERHEAD_BYTES
+        .saturating_add(tenant.len() as u64)
+        .saturating_add(request.key.len() as u64)
+        .saturating_add(request.request_sha256.len() as u64)
+        .saturating_add(job_id.len() as u64)
+}
+
 fn to_i64_bytes(value: u64) -> StoreResult<i64> {
     i64::try_from(value)
         .map_err(|_| sqlx::Error::Protocol("logical byte count exceeded i64".to_string()))
@@ -478,10 +487,22 @@ async fn actual_job_logical_bytes_tx(
                       FROM job_attestations AS attestation
                       WHERE attestation.job_id = job.job_id
                     ), 0)
+                   + COALESCE((
+                       SELECT 64 + length(CAST(outbox.job_id AS BLOB))
+                       FROM attestation_outbox AS outbox
+                       WHERE outbox.job_id = job.job_id
+                    ), 0)
                   + COALESCE((
-                      SELECT 64 + length(CAST(outbox.job_id AS BLOB))
-                      FROM attestation_outbox AS outbox
-                      WHERE outbox.job_id = job.job_id
+                      SELECT SUM(
+                          64
+                          + length(CAST(mapping.tenant AS BLOB))
+                          + length(CAST(mapping.idempotency_key AS BLOB))
+                          + length(CAST(mapping.request_sha256 AS BLOB))
+                          + length(CAST(mapping.job_id AS BLOB))
+                      )
+                      FROM idempotency_keys AS mapping
+                      WHERE mapping.tenant = job.tenant
+                        AND mapping.job_id = job.job_id
                     ), 0) AS retained_bytes
          FROM jobs AS job WHERE job.job_id = ?1",
     )
@@ -1073,7 +1094,9 @@ impl Store {
         Ok(revision == Some(ROW_VALIDATION_REVISION))
     }
 
-    async fn accounting_validation_current(conn: &mut SqliteConnection) -> StoreResult<bool> {
+    async fn accounting_validation_revision(
+        conn: &mut SqliteConnection,
+    ) -> StoreResult<Option<i64>> {
         let revision = sqlx::query(
             "SELECT accounting_validation_revision
              FROM store_integrity WHERE singleton = 1",
@@ -1087,7 +1110,12 @@ impl Store {
                 "database accounting-validation revision is newer than supported revision {ACCOUNTING_VALIDATION_REVISION}"
             )));
         }
-        Ok(revision == Some(ACCOUNTING_VALIDATION_REVISION))
+        Ok(revision)
+    }
+
+    async fn accounting_validation_current(conn: &mut SqliteConnection) -> StoreResult<bool> {
+        Ok(Self::accounting_validation_revision(conn).await?
+            == Some(ACCOUNTING_VALIDATION_REVISION))
     }
 
     async fn record_row_validation(conn: &mut SqliteConnection) -> StoreResult<()> {
@@ -1162,10 +1190,18 @@ impl Store {
         Self::ensure_retention_tombstones(conn).await?;
         Self::ensure_attestation_tables(conn).await?;
         ensure_admitted_memory_column(conn, false).await?;
+        let accounting_revision = Self::accounting_validation_revision(conn).await?;
+        let rebuild_for_accounting_revision =
+            accounting_revision == Some(PREVIOUS_ACCOUNTING_VALIDATION_REVISION);
         let accounting_guards_were_current = accounting_guards_current(conn).await?;
         drop_accounting_guard_triggers(conn).await?;
         Self::ensure_idempotency_keys(conn).await?;
-        Self::ensure_storage_accounting(conn, accounting_guards_were_current).await?;
+        Self::ensure_storage_accounting(
+            conn,
+            accounting_guards_were_current,
+            rebuild_for_accounting_revision,
+        )
+        .await?;
         // These non-covering v2-development indexes can force SQLite to walk
         // large table-record overflow chains for lifecycle columns stored
         // after the JSON payloads. Replace them transactionally with indexes
@@ -1376,6 +1412,7 @@ impl Store {
     async fn ensure_storage_accounting(
         conn: &mut SqliteConnection,
         guards_were_current: bool,
+        rebuild_for_accounting_revision: bool,
     ) -> StoreResult<()> {
         let existed = table_exists(conn, "job_storage_usage").await?;
         sqlx::query(
@@ -1449,7 +1486,8 @@ impl Store {
         .await?;
 
         let authoritative_rows_changed = !Self::row_validation_current(conn).await?;
-        if !existed || authoritative_rows_changed {
+        let rebuilt = !existed || authoritative_rows_changed || rebuild_for_accounting_revision;
+        if rebuilt {
             sqlx::query("DELETE FROM job_storage_usage")
                 .execute(&mut *conn)
                 .await?;
@@ -1490,10 +1528,22 @@ impl Store {
                               FROM job_attestations AS attestation
                               WHERE attestation.job_id = job.job_id
                             ), 0)
+                           + COALESCE((
+                               SELECT 64 + length(CAST(outbox.job_id AS BLOB))
+                               FROM attestation_outbox AS outbox
+                               WHERE outbox.job_id = job.job_id
+                            ), 0)
                           + COALESCE((
-                              SELECT 64 + length(CAST(outbox.job_id AS BLOB))
-                              FROM attestation_outbox AS outbox
-                              WHERE outbox.job_id = job.job_id
+                              SELECT SUM(
+                                  64
+                                  + length(CAST(mapping.tenant AS BLOB))
+                                  + length(CAST(mapping.idempotency_key AS BLOB))
+                                  + length(CAST(mapping.request_sha256 AS BLOB))
+                                  + length(CAST(mapping.job_id AS BLOB))
+                              )
+                              FROM idempotency_keys AS mapping
+                              WHERE mapping.tenant = job.tenant
+                                AND mapping.job_id = job.job_id
                             ), 0),
                         CASE WHEN job.status IN ('queued','running') THEN ?1 ELSE 0 END,
                         job.admitted_mem_mb
@@ -1529,9 +1579,7 @@ impl Store {
         .execute(&mut *conn)
         .await?;
 
-        let row_validation_current = Self::row_validation_current(conn).await?;
         let accounting_validation_current = Self::accounting_validation_current(conn).await?;
-        let rebuilt = !existed || !row_validation_current;
         let requires_full_validation = rebuilt || !guards_were_current;
         if !accounting_validation_current && guards_were_current && !rebuilt {
             return Err(sqlx::Error::Protocol(
@@ -1648,6 +1696,18 @@ impl Store {
                             SELECT 64 + length(CAST(outbox.job_id AS BLOB))
                             FROM attestation_outbox AS outbox
                             WHERE outbox.job_id = job.job_id
+                          ), 0)
+                        + COALESCE((
+                            SELECT SUM(
+                                64
+                                + length(CAST(mapping.tenant AS BLOB))
+                                + length(CAST(mapping.idempotency_key AS BLOB))
+                                + length(CAST(mapping.request_sha256 AS BLOB))
+                                + length(CAST(mapping.job_id AS BLOB))
+                            )
+                            FROM idempotency_keys AS mapping
+                            WHERE mapping.tenant = job.tenant
+                              AND mapping.job_id = job.job_id
                           ), 0)
                     )
                     OR (job.status NOT IN ('queued','running')
@@ -2479,6 +2539,10 @@ impl Store {
             }
         }
 
+        let idempotency_bytes = idempotency
+            .map(|request| logical_idempotency_bytes(tenant, job_id, request))
+            .unwrap_or(0);
+
         let initial_charge = logical_job_base_bytes(job_id, tenant, language, "queued", spec_json)
             .checked_add(JOB_COMPLETION_RESERVE_BYTES)
             .and_then(|value| {
@@ -2490,6 +2554,7 @@ impl Store {
                         + 64,
                 )
             })
+            .and_then(|value| value.checked_add(idempotency_bytes))
             .ok_or_else(|| sqlx::Error::Protocol("logical job charge overflowed".to_string()))?;
         let created_at = now_ms();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -2534,6 +2599,7 @@ impl Store {
             append_event_tx(&mut tx, job_id, "accepted", &accepted_data, created_at).await?;
         let retained_bytes = logical_job_base_bytes(job_id, tenant, language, "queued", spec_json)
             .checked_add(logical_event_bytes(&event))
+            .and_then(|value| value.checked_add(idempotency_bytes))
             .ok_or_else(|| {
                 sqlx::Error::Protocol("logical retained bytes overflowed".to_string())
             })?;
@@ -4678,17 +4744,17 @@ fn accounting_trigger_statements() -> [&'static str; 26] {
          END",
         "CREATE TRIGGER coop_job_storage_dirty_insert AFTER INSERT ON job_storage_usage BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_job_storage_dirty_update AFTER UPDATE ON job_storage_usage BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_job_storage_dirty_delete AFTER DELETE ON job_storage_usage BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_total_storage_guard_insert BEFORE INSERT ON storage_usage_total
@@ -4705,17 +4771,17 @@ fn accounting_trigger_statements() -> [&'static str; 26] {
          END",
         "CREATE TRIGGER coop_total_storage_dirty_insert AFTER INSERT ON storage_usage_total BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_total_storage_dirty_update AFTER UPDATE ON storage_usage_total BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_total_storage_dirty_delete AFTER DELETE ON storage_usage_total BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_tenant_storage_guard_insert BEFORE INSERT ON tenant_storage_usage
@@ -4732,17 +4798,17 @@ fn accounting_trigger_statements() -> [&'static str; 26] {
          END",
         "CREATE TRIGGER coop_tenant_storage_dirty_insert AFTER INSERT ON tenant_storage_usage BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_tenant_storage_dirty_update AFTER UPDATE ON tenant_storage_usage BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_tenant_storage_dirty_delete AFTER DELETE ON tenant_storage_usage BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_idempotency_storage_guard_insert BEFORE INSERT ON idempotency_keys
@@ -4765,32 +4831,32 @@ fn accounting_trigger_statements() -> [&'static str; 26] {
          END",
         "CREATE TRIGGER coop_idempotency_dirty_insert AFTER INSERT ON idempotency_keys BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_idempotency_dirty_update AFTER UPDATE ON idempotency_keys BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_idempotency_dirty_delete AFTER DELETE ON idempotency_keys BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_tombstone_dirty_insert AFTER INSERT ON retention_tombstones BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_tombstone_dirty_update AFTER UPDATE ON retention_tombstones BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
         "CREATE TRIGGER coop_tombstone_dirty_delete AFTER DELETE ON retention_tombstones BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
-             WHERE singleton = 1 AND accounting_validation_revision != 2
+             WHERE singleton = 1 AND accounting_validation_revision != 3
                AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
          END",
     ]

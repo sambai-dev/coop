@@ -36,6 +36,17 @@ async fn raw_connection(db: &Path) -> SqliteConnection {
     SqliteConnection::connect_with(&options).await.unwrap()
 }
 
+async fn total_charged_bytes(db: &Path) -> i64 {
+    let mut connection = raw_connection(db).await;
+    let charged =
+        sqlx::query_scalar("SELECT charged_bytes FROM storage_usage_total WHERE singleton = 1")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    connection.close().await.unwrap();
+    charged
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_store_opens_beneath_the_trusted_system_temp_alias() {
@@ -1320,7 +1331,7 @@ fn validated_max_payload_writes_keep_healthy_reopen_on_the_bounded_fast_path() {
         .fetch_one(&mut connection)
         .await
         .unwrap();
-        assert_eq!(accounting_revision, 1);
+        assert_eq!(accounting_revision, 2);
         connection.close().await.unwrap();
         drop(store);
 
@@ -1755,8 +1766,20 @@ fn oversized_retention_history_is_drained_under_a_hard_event_budget() {
     sqlx::test_block_on(async {
         let db = test_db("retention-event-budget");
         let store = Store::open(&db).await.unwrap();
+        let spec = "{}";
+        let request = IdempotencyRequest {
+            key: "heavy-retention-key".to_string(),
+            request_sha256: canonical_spec_sha256(spec),
+        };
         store
-            .create_job("heavy", "tenant-a", "python", "{}")
+            .create_job_with_event_idempotent(
+                "heavy",
+                "tenant-a",
+                "python",
+                spec,
+                256,
+                Some(&request),
+            )
             .await
             .unwrap();
         store
@@ -1781,6 +1804,26 @@ fn oversized_retention_history_is_drained_under_a_hard_event_budget() {
         .unwrap();
         connection.close().await.unwrap();
         store.validate_integrity().await.unwrap();
+
+        let idempotency_bytes = 64
+            + "tenant-a".len() as i64
+            + request.key.len() as i64
+            + request.request_sha256.len() as i64
+            + "heavy".len() as i64;
+        let mut connection = raw_connection(&db).await;
+        let retained_before: i64 = sqlx::query_scalar(
+            "SELECT retained_bytes FROM job_storage_usage WHERE job_id = 'heavy'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        let receipt_bytes: i64 = sqlx::query_scalar(
+            "SELECT length(CAST(receipt_json AS BLOB)) FROM jobs WHERE job_id = 'heavy'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(5));
         let expected_events = legacy_rows as u64 + 2;
@@ -1814,8 +1857,26 @@ fn oversized_retention_history_is_drained_under_a_hard_event_budget() {
                 .fetch_one(&mut connection)
                 .await
                 .unwrap();
+        let mapping_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM idempotency_keys WHERE job_id = 'heavy'")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        let retained_after: i64 = sqlx::query_scalar(
+            "SELECT retained_bytes FROM job_storage_usage WHERE job_id = 'heavy'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
         assert_eq!(physical_job, 1);
         assert_eq!(tombstone, 1);
+        assert_eq!(mapping_count, 0);
+        assert_eq!(
+            retained_before - retained_after,
+            MAX_RETENTION_EVENTS_PER_BATCH as i64 * (64 + "legacy".len() as i64 + 2)
+                + receipt_bytes
+                + idempotency_bytes
+        );
         assert_eq!(
             remaining_events as u64,
             expected_events - MAX_RETENTION_EVENTS_PER_BATCH
@@ -1837,6 +1898,228 @@ fn oversized_retention_history_is_drained_under_a_hard_event_budget() {
         );
         assert!(!second.more_remaining);
         assert!(store.get_job("heavy").await.unwrap().is_none());
+    });
+}
+
+#[test]
+fn idempotency_mapping_bytes_are_exact_and_enforced_at_the_quota_boundary() {
+    sqlx::test_block_on(async {
+        let tenant = "tenant-é";
+        let job_id = "quota-é";
+        let spec = r#"{"language":"python","code":"print('é')"}"#;
+        let request = IdempotencyRequest {
+            key: "boundary-key".to_string(),
+            request_sha256: canonical_spec_sha256(spec),
+        };
+        let mapping_bytes = 64_u64
+            + tenant.len() as u64
+            + request.key.len() as u64
+            + request.request_sha256.len() as u64
+            + job_id.len() as u64;
+
+        let unkeyed_db = test_db("idempotency-unkeyed-charge");
+        let unkeyed_store = Store::open(&unkeyed_db).await.unwrap();
+        unkeyed_store
+            .create_job_with_event_idempotent(job_id, tenant, "python", spec, 256, None)
+            .await
+            .unwrap();
+        drop(unkeyed_store);
+        let unkeyed_charge = total_charged_bytes(&unkeyed_db).await;
+
+        let keyed_db = test_db("idempotency-keyed-charge");
+        let keyed_store = Store::open(&keyed_db).await.unwrap();
+        keyed_store
+            .create_job_with_event_idempotent(job_id, tenant, "python", spec, 256, Some(&request))
+            .await
+            .unwrap();
+        drop(keyed_store);
+        let keyed_charge = total_charged_bytes(&keyed_db).await;
+        assert_eq!(
+            keyed_charge - unkeyed_charge,
+            mapping_bytes as i64,
+            "the durable mapping must charge one row overhead plus its four text fields"
+        );
+
+        let quota_db = test_db("idempotency-exact-quota");
+        let unkeyed_charge = unkeyed_charge as u64;
+        let limits = StorageLimits::new(unkeyed_charge * 2, unkeyed_charge, 0);
+        let quota_store = Store::open_with_limits(&quota_db, limits).await.unwrap();
+        let error = quota_store
+            .create_job_with_event_idempotent(job_id, tenant, "python", spec, 256, Some(&request))
+            .await
+            .unwrap_err();
+        assert_eq!(capacity_error_kind(&error), Some(CapacityErrorKind::Tenant));
+        assert!(quota_store.get_job(job_id).await.unwrap().is_none());
+        assert_eq!(
+            quota_store
+                .lookup_idempotency(tenant, &request)
+                .await
+                .unwrap(),
+            IdempotencyLookup::Miss
+        );
+
+        quota_store
+            .create_job_with_event_idempotent(job_id, tenant, "python", spec, 256, None)
+            .await
+            .unwrap();
+        assert_eq!(total_charged_bytes(&quota_db).await, unkeyed_charge as i64);
+    });
+}
+
+#[test]
+fn idempotency_accounting_rebuilds_on_restart_and_releases_on_expiry() {
+    sqlx::test_block_on(async {
+        let db = test_db("idempotency-accounting-restart");
+        let tenant = "tenant-restart";
+        let job_id = "restart-job";
+        let spec = r#"{"language":"python","code":"pass"}"#;
+        let request = IdempotencyRequest {
+            key: "restart-key".to_string(),
+            request_sha256: canonical_spec_sha256(spec),
+        };
+        let expected_mapping_bytes = 64_i64
+            + tenant.len() as i64
+            + request.key.len() as i64
+            + request.request_sha256.len() as i64
+            + job_id.len() as i64;
+
+        let store = Store::open(&db).await.unwrap();
+        store
+            .create_job_with_event_idempotent(job_id, tenant, "python", spec, 256, Some(&request))
+            .await
+            .unwrap();
+        drop(store);
+
+        let mut connection = raw_connection(&db).await;
+        let measured_mapping_bytes: i64 = sqlx::query_scalar(
+            "SELECT 64
+                  + length(CAST(tenant AS BLOB))
+                  + length(CAST(idempotency_key AS BLOB))
+                  + length(CAST(request_sha256 AS BLOB))
+                  + length(CAST(job_id AS BLOB))
+             FROM idempotency_keys WHERE job_id = ?1",
+        )
+        .bind(job_id)
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(measured_mapping_bytes, expected_mapping_bytes);
+        let retained_before: i64 =
+            sqlx::query_scalar("SELECT retained_bytes FROM job_storage_usage WHERE job_id = ?1")
+                .bind(job_id)
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        let charged_before: i64 =
+            sqlx::query_scalar("SELECT charged_bytes FROM storage_usage_total WHERE singleton = 1")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        let tenant_before: i64 =
+            sqlx::query_scalar("SELECT charged_bytes FROM tenant_storage_usage WHERE tenant = ?1")
+                .bind(tenant)
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        assert_eq!(charged_before, tenant_before);
+
+        // Reproduce the revision-1 persisted state: its ledgers and aggregates
+        // are internally consistent, but omit the durable idempotency row.
+        sqlx::query(
+            "UPDATE job_storage_usage
+             SET retained_bytes = retained_bytes - ?2 WHERE job_id = ?1",
+        )
+        .bind(job_id)
+        .bind(measured_mapping_bytes)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE store_integrity SET accounting_validation_revision = 1
+             WHERE singleton = 1",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT charged_bytes FROM storage_usage_total WHERE singleton = 1",
+            )
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+            charged_before - measured_mapping_bytes
+        );
+        connection.close().await.unwrap();
+
+        let store = Store::open(&db).await.unwrap();
+        let mut connection = raw_connection(&db).await;
+        let rebuilt = sqlx::query(
+            "SELECT usage.retained_bytes,
+                    total.charged_bytes AS total_bytes,
+                    tenant_usage.charged_bytes AS tenant_bytes,
+                    integrity.accounting_validation_revision
+             FROM job_storage_usage AS usage
+             CROSS JOIN storage_usage_total AS total
+             INNER JOIN tenant_storage_usage AS tenant_usage
+                ON tenant_usage.tenant = usage.tenant
+             CROSS JOIN store_integrity AS integrity
+             WHERE usage.job_id = ?1 AND total.singleton = 1
+               AND integrity.singleton = 1",
+        )
+        .bind(job_id)
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(rebuilt.get::<i64, _>("retained_bytes"), retained_before);
+        assert_eq!(rebuilt.get::<i64, _>("total_bytes"), charged_before);
+        assert_eq!(rebuilt.get::<i64, _>("tenant_bytes"), tenant_before);
+        assert_eq!(rebuilt.get::<i64, _>("accounting_validation_revision"), 2);
+        connection.close().await.unwrap();
+        store.validate_integrity().await.unwrap();
+
+        store
+            .finalize_with_event(job_id, "succeeded", Some(0), 1, None)
+            .await
+            .unwrap()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let report = store.prune_older_than_batch(0, 1).await.unwrap();
+        assert_eq!(report.jobs_deleted, 1);
+        assert_eq!(
+            store.lookup_idempotency(tenant, &request).await.unwrap(),
+            IdempotencyLookup::Miss
+        );
+
+        let mut connection = raw_connection(&db).await;
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT charged_bytes FROM storage_usage_total WHERE singleton = 1",
+            )
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+            0
+        );
+        for table in [
+            "job_storage_usage",
+            "tenant_storage_usage",
+            "idempotency_keys",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "{table} retained an expired job charge");
+        }
+        connection.close().await.unwrap();
+        drop(store);
+        Store::open(&db)
+            .await
+            .unwrap()
+            .validate_integrity()
+            .await
+            .unwrap();
     });
 }
 
