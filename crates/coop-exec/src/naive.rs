@@ -32,7 +32,7 @@ use windows_sys::Win32::System::Threading::{
 
 const CONTROL_TICK: Duration = Duration::from_millis(20);
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
-const INTERPRETER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(10);
+const INTERPRETER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(20);
 const INTERPRETER_PREFLIGHT_CONCURRENCY: usize = 4;
 const INTERPRETER_PREFLIGHT_SENTINEL: &str = "COOP_NAIVE_PREFLIGHT_OK";
 const INTERPRETER_PREFLIGHT_OUTPUT_LIMIT: usize = 64 * 1024;

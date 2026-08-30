@@ -15,6 +15,7 @@ All notable changes are documented here. Coop follows semantic versioning while 
 ### Identity, reliability, and protocols
 
 - Add indexed peppered-HMAC credentials with principal, scope, expiry, and revocation metadata plus strict RFC 9068 JWT validation, bounded JWKS caching, RFC 6750 challenges, and protected-resource metadata.
+- Upgrade JWT verification to patched `jsonwebtoken` 10.4 with an explicit, bundled-source AWS-LC backend, checked-in Windows NASM objects, and regress malformed registered-claim types that previously enabled type-confusion bypasses.
 - Add tenant-scoped, fingerprint-bound `Idempotency-Key` submission with safe ambiguity reconciliation, typed idempotent cancellation, and OpenAPI response-header contracts.
 - Add the MCP 2026 stateless discovery contract and opt-in Tasks while preserving legacy hosts; stdio requests are concurrent and cancellable, terminal isolation evidence is validated, and durable job IDs survive wait/transport ambiguity.
 - Align the Python and TypeScript clients on the six-class isolation lattice, cursor/reconnect ordering, concurrent-memory capabilities, cancellation, idempotency metadata, and real-server package tests.

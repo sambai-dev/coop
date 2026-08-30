@@ -40,6 +40,12 @@ base64 = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
+# aws-lc-rs normally invokes a local NASM binary on Windows. Feature-unifying
+# its audited, checked-in prebuilt objects keeps consumer and CI builds
+# deterministic without weakening the cryptographic backend selection.
+aws-lc-rs = { workspace = true, features = ["prebuilt-nasm"] }
+
 [dev-dependencies]
 ed25519-dalek = { workspace = true }
 jsonwebtoken = { workspace = true, features = ["use_pem"] }

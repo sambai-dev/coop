@@ -208,8 +208,8 @@ key ID when signing is enabled. Its `trust_notice` is part of the contract:
 the unauthenticated DSSE `keyid` hint and a key fetched from the signer are not
 independent trust anchors. Pin or distribute the public key out of band, retain
 old keys across rotation, and verify the envelope plus exact result with
-`coop-verify --tenant EXPECTED_TENANT`. Verification proves possession of that
-key and profile integrity;
+`coop-verify verify --tenant EXPECTED_TENANT`. Verification proves possession
+of that key and profile integrity;
 it does not prove trusted hardware, deterministic execution, or semantic truth.
 `COOP_ATTESTATION_MODE=off` is an explicit production policy that produces no
 signatures.

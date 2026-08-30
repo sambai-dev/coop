@@ -76,6 +76,54 @@ def check_versions() -> str:
             is not None,
             f"workspace dependency {dependency} does not require {version}",
         )
+    require(
+        re.search(
+            r'^jsonwebtoken\s*=\s*\{[^\n}]*version\s*=\s*"10\.4\.0"[^\n}]*features\s*=\s*\["aws_lc_rs"\]',
+            root_manifest,
+            re.MULTILINE,
+        )
+        is not None,
+        "JWT verification must use patched jsonwebtoken 10.4.0 with the explicit AWS-LC backend",
+    )
+    require(
+        re.search(r'\[\[package\]\]\s+name = "jsonwebtoken"\s+version = "10\.4\.0"', lockfile)
+        is not None,
+        "Cargo.lock does not contain patched jsonwebtoken 10.4.0",
+    )
+    server_manifest = read("crates/coop-server/Cargo.toml")
+    require(
+        re.search(
+            r'^aws-lc-rs\s*=\s*\{[^\n}]*version\s*=\s*"1\.18\.0"[^\n}]*default-features\s*=\s*false',
+            root_manifest,
+            re.MULTILINE,
+        )
+        is not None,
+        "workspace must pin the reviewed aws-lc-rs 1.18.0 dependency",
+    )
+    require(
+        re.search(
+            r'^aws-lc-rs\s*=\s*\{[^\n}]*workspace\s*=\s*true[^\n}]*features\s*=\s*\["prebuilt-nasm"\]',
+            server_manifest,
+            re.MULTILINE,
+        )
+        is not None,
+        "Windows x86_64 builds must enable the checked-in AWS-LC NASM objects",
+    )
+    require(
+        re.search(r'\[\[package\]\]\s+name = "aws-lc-rs"\s+version = "1\.18\.0"', lockfile)
+        is not None,
+        "Cargo.lock does not contain reviewed aws-lc-rs 1.18.0",
+    )
+    cargo_config = read(".cargo/config.toml")
+    require(
+        re.search(
+            r'^AWS_LC_SYS_USE_SYSTEM\s*=\s*\{\s*value\s*=\s*"0"\s*,\s*force\s*=\s*true\s*\}$',
+            cargo_config,
+            re.MULTILINE,
+        )
+        is not None,
+        "Cargo builds must use the lockfile-pinned bundled AWS-LC source",
+    )
 
     python_version = toml_string("sdks/python/pyproject.toml", "project", "version")
     typescript_package = json.loads(read("sdks/typescript/package.json"))
@@ -230,6 +278,7 @@ def check_pins_and_packaging() -> int:
         'COOP_GIT_REVISION="${VCS_REF}" cargo build --locked --release',
         "-p coop-server -p coop-exec -p coop-attestation --bins",
         'COOP_GIT_REVISION="${VCS_REF}" cargo build',
+        "COPY .cargo ./.cargo",
         "coop-sandbox-init /usr/local/bin/coop-sandbox-init",
         "coop-oci-init /usr/local/bin/coop-oci-init",
         "coop-verify /usr/local/bin/coop-verify",

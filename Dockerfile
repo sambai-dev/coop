@@ -4,6 +4,7 @@ FROM rust:1.98.0-slim-bookworm@sha256:af0579d28b9a7ec5251aaafcb0c0a23dcde5c97065
 ARG VCS_REF=unknown
 
 WORKDIR /src
+COPY .cargo ./.cargo
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN COOP_GIT_REVISION="${VCS_REF}" cargo build --locked --release \
