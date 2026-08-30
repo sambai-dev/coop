@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        VERSION: "0.3.0"
+        VERSION: "0.4.0"
         VCS_REF: "${COOP_GIT_REVISION:-local}"
     restart: unless-stopped
     stop_grace_period: 45s

@@ -45,7 +45,7 @@ def toml_string(relative: str, section: str, key: str) -> str:
 
 def check_versions() -> str:
     version = toml_string("Cargo.toml", "workspace.package", "version")
-    require(version == "0.3.0", f"unexpected workspace release version: {version}")
+    require(version == "0.4.0", f"unexpected workspace release version: {version}")
 
     toolchain = toml_string("rust-toolchain.toml", "toolchain", "channel")
     rust_version = toml_string("Cargo.toml", "workspace.package", "rust-version")
