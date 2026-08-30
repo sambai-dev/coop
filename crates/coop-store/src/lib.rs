@@ -680,6 +680,14 @@ fn filesystem_probe_path(path: &Path) -> StoreResult<PathBuf> {
 
 #[cfg(unix)]
 fn filesystem_available_bytes(path: &Path) -> StoreResult<u64> {
+    fn saturating_product<Left, Right>(left: Left, right: Right) -> u64
+    where
+        Left: Into<u64>,
+        Right: Into<u64>,
+    {
+        left.into().saturating_mul(right.into())
+    }
+
     use std::os::unix::ffi::OsStrExt;
     let probe = filesystem_probe_path(path)?;
     let encoded = std::ffi::CString::new(probe.as_os_str().as_bytes())
@@ -689,7 +697,7 @@ fn filesystem_available_bytes(path: &Path) -> StoreResult<u64> {
         return Err(std::io::Error::last_os_error().into());
     }
     let stats = unsafe { stats.assume_init() };
-    Ok(stats.f_bavail.saturating_mul(stats.f_frsize))
+    Ok(saturating_product(stats.f_bavail, stats.f_frsize))
 }
 
 #[cfg(windows)]

@@ -103,6 +103,8 @@ async fn spawn_app_with_root() -> (Router, String) {
         db_path: db.to_string_lossy().into_owned(),
         api_keys,
         metrics_token: None,
+        attestation_mode: coop_server::config::AttestationMode::Off,
+        attestation_key_file: None,
         credentials: Default::default(),
         jwt: None,
         workers: 2,
