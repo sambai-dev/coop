@@ -18,7 +18,6 @@ fi
 test "$(uname -m)" = x86_64
 command -v docker >/dev/null
 command -v curl >/dev/null
-command -v openssl >/dev/null
 command -v python3 >/dev/null
 command -v seq >/dev/null
 image_id=$(docker image inspect --format '{{.Id}}' "$image")
@@ -36,11 +35,27 @@ case "$secrets_dir" in
   *) echo "unsafe smoke secret directory: $secrets_dir" >&2; exit 1 ;;
 esac
 umask 0077
-openssl genpkey -algorithm ED25519 -out "$secrets_dir/attestation.pem"
-chmod 0600 "$secrets_dir/attestation.pem"
-openssl pkey -in "$secrets_dir/attestation.pem" -pubout \
-  -out "$secrets_dir/attestation-public-key.pem"
-chmod 0644 "$secrets_dir/attestation-public-key.pem"
+if [[ "$secrets_dir" == *,* ]]; then
+  echo "smoke secret directory must not contain commas" >&2
+  exit 1
+fi
+verify_in_image() {
+  docker run --rm \
+    --network none \
+    --read-only \
+    --user 0:0 \
+    --cap-drop ALL \
+    --security-opt no-new-privileges \
+    --mount "type=bind,src=$secrets_dir,dst=/keys" \
+    --entrypoint /usr/local/bin/coop-verify \
+    "$image_id" "$@"
+}
+verify_in_image generate-key --output /keys/attestation.pem >/dev/null
+verify_in_image public-key \
+  --private-key /keys/attestation.pem \
+  --output /keys/attestation-public-key.pem >/dev/null
+test "$(stat -c %a "$secrets_dir/attestation.pem")" = 600
+test "$(stat -c %a "$secrets_dir/attestation-public-key.pem")" = 644
 
 cleanup() {
   local status=$?

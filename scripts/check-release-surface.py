@@ -412,8 +412,15 @@ def check_pins_and_packaging() -> int:
         "COOP_ATTESTATION_KEY_SOURCE",
         "COOP_VERIFY_PUBLIC_KEY_FILE",
         "COOP_VERIFY_CONTAINER_IMAGE",
+        "verify_in_image generate-key",
+        "verify_in_image public-key",
+        "--entrypoint /usr/local/bin/coop-verify",
     ]:
         require(required in container_smoke, f"container smoke contract missing: {required}")
+    require(
+        "openssl genpkey" not in container_smoke,
+        "container smoke must generate canonical keys with packaged coop-verify",
+    )
     production_verifier = read("scripts/verify-production.py")
     for required in [
         "verify_canary",
