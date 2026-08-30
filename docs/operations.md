@@ -12,8 +12,10 @@ A readiness check should:
 4. verify the terminal status, output, receipt/evidence completeness,
    `bootstrap_ready`, isolation facts, network posture, and every expected
    `limit_enforcement` flag;
-5. wait for `attestation.available`, download the exact envelope/result,
-   compare declared digests and fields, and verify the signature with an
+5. obtain the authoritative tenant from authenticated `/v1/whoami` or the
+   submitted `JobDetail.tenant`, wait for `attestation.available`, download the
+   exact envelope/result, compare `attestation.tenant`, declared digests, and
+   fields, then run `coop-verify verify --tenant "$EXPECTED_TENANT"` with an
    independently pinned public key;
 6. alert if latency, queue depth, or signing convergence exceeds policy.
 
