@@ -33,15 +33,19 @@ size, maximum wait, or required isolation posture. Those are process settings:
 |---|---|---|
 | `COOP_BASE_URL` | `http://127.0.0.1:7300` | Use the private/TLS Coop endpoint |
 | `COOP_API_KEY` | none; required | Give each harness its own tenant key |
-| `COOP_MCP_REQUIRE_ISOLATION` | `false` | Set `true`; calls fail closed unless Coop reports every isolation control |
+| `COOP_MCP_MINIMUM_ISOLATION` | unset | Exact required class; use `gvisor-application-kernel` for the guarded deployment |
+| `COOP_MCP_REQUIRE_ISOLATION` | `false` | Legacy compatibility switch mapping only to `linux-shared-kernel` |
 | `COOP_MCP_ALLOWED_LANGUAGES` | `python,node,bash` | Reduce to what the agent needs |
 | `COOP_MCP_MAX_WAIT_SECONDS` | `300` | Reduce for interactive agents if desired |
 | `COOP_MCP_MAX_CODE_BYTES` | `524288` | Reduce to bound model-generated payloads further |
 
-The adapter checks server capabilities before its first submission. With
-`COOP_MCP_REQUIRE_ISOLATION=true`, it requires the private-rootfs namespace
-backend, dedicated bootstrap, seccomp, disabled networking, and all five
-resource-enforcement flags. The terminal job receipt remains the per-run proof.
+The adapter sends its minimum isolation requirement with every submission, so
+admission and execution use the same atomic policy. It applies Coop's exact
+class satisfaction order: gVisor and VM providers satisfy
+`linux-shared-kernel`, confidential VMs satisfy `hardware-vm`, and Wasm remains
+a separate branch. Terminal policy and receipt evidence must report a class
+that still satisfies the configured minimum. This avoids imposing
+namespace-specific seccomp/rootfs assertions on gVisor or VM providers.
 
 ## Hermes
 
@@ -50,16 +54,16 @@ resource-enforcement flags. The terminal job receipt remains the per-run proof.
    ```dotenv
    COOP_BASE_URL=https://coop.internal.example
    COOP_API_KEY=replace-with-the-key-only-not-tenant-prefix
-   COOP_MCP_REQUIRE_ISOLATION=true
+   COOP_MCP_MINIMUM_ISOLATION=gvisor-application-kernel
    COOP_MCP_ALLOWED_LANGUAGES=python,node
    ```
 
 2. Merge [`hermes/config.snippet.yaml`](hermes/config.snippet.yaml) into
    `~/.hermes/config.yaml`. Replace `command: "coop-mcp"` with the absolute
    virtual-environment executable if necessary.
-3. Restart Hermes and use its MCP test/reload surface. Keep
-   `supports_parallel_tool_calls: false`; this adapter intentionally processes
-   one stdio request at a time while Coop performs concurrency control.
+3. Restart Hermes and use its MCP test/reload surface. Parallel tool calls are
+   supported through the adapter's bounded concurrent dispatcher; Coop remains
+   authoritative for tenant and global admission limits.
 4. Disable Hermes' local `execute_code` or terminal toolset for agents that
    must use Coop. Merely adding Coop does not stop a model from choosing an
    existing host/Docker execution tool.
@@ -67,7 +71,7 @@ resource-enforcement flags. The terminal job receipt remains the per-run proof.
 ## OpenClaw
 
 1. Export `COOP_BASE_URL`, `COOP_API_KEY`,
-   `COOP_MCP_REQUIRE_ISOLATION=true`, and the language allowlist into the
+   `COOP_MCP_MINIMUM_ISOLATION=gvisor-application-kernel`, and the language allowlist into the
    Gateway service environment.
 2. Merge [`openclaw/openclaw.snippet.json5`](openclaw/openclaw.snippet.json5)
    into `~/.openclaw/openclaw.json`, using the absolute `coop-mcp` path when
@@ -93,7 +97,7 @@ needed:
       "env": {
         "COOP_BASE_URL": "https://coop.internal.example",
         "COOP_API_KEY": "replace-me",
-        "COOP_MCP_REQUIRE_ISOLATION": "true",
+        "COOP_MCP_MINIMUM_ISOLATION": "gvisor-application-kernel",
         "COOP_MCP_ALLOWED_LANGUAGES": "python,node"
       }
     }
@@ -103,9 +107,17 @@ needed:
 
 Use the host's secret-reference mechanism instead of literal credentials when
 it has one. Set its per-call timeout above the adapter wait budget (330 seconds
-for the default maximum). Do not configure automatic retries for
-`coop_run_code`: a lost response does not prove that the job was not durably
-submitted. Use the returned job ID for reads and cancellation.
+for the default maximum). The adapter reuses one UUID for its initial submit
+and one ambiguous HTTP retry. If both acknowledgements are lost, an identical
+call to the same running adapter can reconcile that UUID for ten minutes; the
+bounded 1,024-entry table is tenant-, policy-, and job-spec-scoped and fails
+closed at capacity. A valid acknowledged job ID clears the exact entry so a
+later intentional identical call remains a new job.
+
+Do not configure unbounded automatic retries for `coop_run_code`: the recovery
+table is process-local, and a restart or expiry means a lost response still
+does not prove that the job was not durably submitted. Use the returned job ID
+for reads and cancellation.
 
 ## Where Coop fits
 

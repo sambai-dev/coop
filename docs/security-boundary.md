@@ -6,11 +6,29 @@ Coop runs code supplied by API clients. That makes containment configuration par
 
 | Tier | Intended use | Boundary | Current posture |
 |---|---|---|---|
-| External hardened runtime | Determined hostile multi-tenant code | gVisor/OCI, Kata, or microVM per workload | Recommended direction; not bundled or integrated |
+| gVisor application kernel | Determined hostile multi-tenant code | Reviewed `runsc` OCI workload and private rootfs per job | Guarded production default; runtime/rootfs/config digests retained as evidence |
+| Hardware or confidential VM | Determined hostile multi-tenant code | MicroVM/VM per workload | API class reserved; provider not bundled |
 | Linux x86_64 namespace backend | Untrusted or accidentally dangerous agent code on a dedicated x86_64 VM | Private rootfs, Linux namespaces, cgroup v2, rlimits, x86_64 seccomp policy, privilege drop | In tree; shared-kernel defense in depth |
 | Plain subprocess | Local development and same-trust code only | Process group and wall-time supervision | Unisolated; never a sandbox |
 
-The namespace backend is not equivalent to a VM. A kernel vulnerability, side channel, interpreter vulnerability, or privileged-container escape can cross it. It is supported only on Linux x86_64. macOS, Windows, and other Linux architectures use the plain development subprocess backend and provide no containment. That backend supervises cancellation, bounded output, and wall time, but does not enforce the requested CPU, memory, process-count, or file-size controls. Those controls remain null/false in its effective policy and receipts. For code controlled by mutually hostile tenants, use a per-workload hardened runtime or VM boundary once an integration is available.
+The namespace backend is not equivalent to a VM. A kernel vulnerability, side channel, interpreter vulnerability, or privileged-container escape can cross it. It is supported only on Linux x86_64. The reviewed gVisor provider adds a per-job application-kernel boundary and records its exact runtime, rootfs, and OCI configuration digests. macOS, Windows, and other Linux architectures use the plain development subprocess backend unless a separately reviewed provider is configured, and therefore provide no default containment. That backend supervises cancellation, bounded output, and wall time, but does not enforce the requested CPU, memory, process-count, or file-size controls. Those controls remain null/false in its effective policy and receipts.
+
+## gVisor-provider invariants
+
+A gVisor job is expected to fail closed unless all of these are true:
+
+1. `runsc` is an absolute, non-writable executable matching the reviewed version and SHA-256.
+2. the private rootfs and its content-complete manifest validate before workload creation; the OCI root is read-only;
+3. each job receives a unique runtime ID, OCI bundle, payload directory, cgroup, private `/tmp`/`/var/tmp`, and non-root uid/gid;
+4. the OCI configuration drops capabilities, sets `noNewPrivileges`, denies networking, applies rlimits/cgroup controls, and binds its canonical SHA-256 into provenance;
+5. the dedicated `coop-oci-init` confirms `/.coop-rootfs.manifest`, `/proc/gvisor/kernel_is_gvisor`, and Coop's marker before launching user code;
+6. a nonce-bound pass-fd ready frame is observed before any gVisor isolation class or effective control is reported;
+7. normal exit, cancellation, timeout, bootstrap failure, server crash, and provider switching all converge through runsc wait/kill/delete plus cgroup drain/removal;
+8. terminal evidence records the exact runtime, rootfs-manifest, and OCI-config digests, and the scheduler rejects contradictory observed isolation.
+
+The real release gate executes these paths with the pinned runtime. It does not
+generalize to arbitrary gVisor builds, kernels, KVM configuration, or hardware
+VM/confidential-computing claims.
 
 ## Namespace-backend invariants
 
@@ -41,23 +59,41 @@ Do not put secrets, the Coop database, host sockets, cloud credentials, SSH mate
 
 ## Network model
 
-The supported Linux x86_64 namespace backend denies job network access. A submitted `allow_network: true` is rejected; it is not an egress grant. The unisolated development subprocess backend cannot enforce this boundary and retains the service account's host networking, reported as `networking: "host"`. The server itself may also reach the network, so firewall its egress and metadata-service access at the VM boundary.
+The Linux x86_64 namespace and gVisor providers deny job network access. A submitted `allow_network: true` is rejected; it is not an egress grant. The unisolated development subprocess backend cannot enforce this boundary and retains the service account's host networking, reported as `networking: "host"`. The server itself may also reach the network, so firewall its egress and metadata-service access at the VM boundary.
 
 A future egress feature should be a host-side policy proxy with explicit destination, DNS-rebinding, method, and credential-injection rules—not a general network namespace interface.
 
 ## Authentication and transport
 
-- Use a different high-entropy API key per tenant and workload class.
+- Prefer indexed peppered-HMAC credentials with explicit principal, tenant,
+  scopes, expiry, and revocation, or strict RFC 9068 JWTs with pinned
+  issuer/audience/JWKS/tenant mapping. Legacy tenant keys are migration-only.
+- Grant only the required `jobs:submit`, `jobs:read`, `jobs:cancel`,
+  `service:read`, and `metrics:read` scopes; use a distinct global scrape token.
 - Keep Coop on a private network or loopback behind a TLS-terminating proxy.
 - Do not put API keys in URLs. Query strings are commonly logged by browsers and proxies.
 - Prefer the `Authorization` header for WebSocket clients that support it.
 - Clear dashboard state and close streams when rotating credentials.
 
-API keys are stored in process configuration, not hashed in SQLite. Rotation currently requires updating configuration and restarting the service.
+Credential files contain indexed HMAC digests rather than plaintext secrets;
+the pepper and signing private key remain separate protected files. JWT tokens
+are verified against a bounded cached JWKS and never persisted. Browser
+credentials remain memory-only and legacy local/session storage is purged.
 
 ## Evidence semantics
 
-The SQLite event history supports incident reconstruction: ordered lifecycle, output, truncation, violation, and terminal events. v0.2 links canonical events with SHA-256 and binds the terminal chain head into a receipt. The database is still mutable by the server account or anyone with database access; the chain is not signed, externally anchored, an append-only storage primitive, or remote attestation.
+The SQLite event history supports incident reconstruction: ordered lifecycle,
+output, truncation, violation, and terminal events. Canonical events link with
+SHA-256 and the terminal receipt binds their head. Schema v4 additionally
+stores a deterministic result artifact and an Ed25519 DSSE/in-toto envelope
+through a durable signing outbox. Persistence is conditional on unchanged
+receipt bytes; restart backfills missing retained signatures.
+
+The signature proves possession of the configured key over the exact
+statement/result digest. It is not execution truth, a WORM primitive,
+transparency anchoring, or remote hardware attestation. `keyid` is only a hint,
+and the current public-key endpoint is not an independent trust anchor. Pin
+keys out of band and preserve old keys through rotation.
 
 Configuration is not execution evidence. Namespace posture is attached only
 after the executor observes the helper's workload-ready control frame. A
@@ -67,7 +103,9 @@ active. Pre-ready failures therefore record `bootstrap_ready: false`, false
 isolation facts, and no effective controls; interrupted executions whose
 executor observation cannot be recovered omit that posture.
 
-For higher-assurance audit retention, export database snapshots and logs to access-controlled immutable storage. Preserve the configuration, binary digest, private-rootfs digest, and host/runtime metadata alongside them.
+For higher-assurance retention, export database snapshots, exact artifacts,
+envelopes, logs, and public-key history to access-controlled immutable storage.
+Preserve configuration plus binary/runtime/rootfs/OCI digests alongside them.
 
 ## Deployment rules
 
@@ -76,7 +114,13 @@ For higher-assurance audit retention, export database snapshots and logs to acce
 - Never mount `/var/run/docker.sock` or host credential directories.
 - Keep the API loopback-only unless a private TLS proxy is present.
 - Restrict access to the database, its WAL/SHM companions, backups, and rootfs.
-- Alert on restarts, sandbox bootstrap failures, cgroup cleanup failures, output truncation, and repeated violations.
-- Run the hostile suite on the exact kernel and deployment shape before admitting traffic.
+- Alert on restarts, provider/bootstrap/digest failures, cgroup cleanup,
+  attestation retries, output truncation, quota pressure, and violations.
+- Run both the hostile namespace suite and real gVisor lifecycle gate on the
+  exact kernel/deployment shape before admitting traffic.
 
-The supplied Compose file uses `privileged: true` because the in-tree backend manages namespaces, mounts, and cgroups. That flag grants host-equivalent container authority. Compose is therefore only a packaging convenience inside a dedicated VM, not a hardened Docker-host boundary.
+The supplied Compose file uses `privileged: true` because the outer control
+plane manages runsc, mounts, and cgroups. That grants host-equivalent container
+authority even though each tenant job enters gVisor. Compose is therefore a
+packaging convenience inside a dedicated VM, not a hardened Docker-host
+control-plane boundary.

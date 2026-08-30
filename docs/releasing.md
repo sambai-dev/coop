@@ -25,23 +25,29 @@ The repository variable is an acknowledgement, not proof. Recheck the settings a
 6. Make the [README](../README.md) current-release link match `vVERSION` and mark the matching `MAJOR.MINOR.x` line as supported in [SECURITY.md](../SECURITY.md). The tag workflow checks both dynamically.
 7. Confirm the workspace, lockfile, SDK, Docker, Compose, changelog, and tag versions all match exactly.
 8. Re-read [AUDIT.md](../AUDIT.md), the [security boundary](security-boundary.md), and residual risks. Stop if the code enforces a weaker posture than the documents.
-9. Obtain the release approval required by the protected environment, then create and push an immutable `vVERSION` tag from the reviewed commit according to the project's signing policy.
+9. Reproduce the schema-v3-to-v4 migration, signed restart backfill, offline
+   `coop-verify` vectors, and real pinned-runsc lifecycle without skips. Confirm
+   the archive and image contain the matching `coop-verify`/init binaries.
+10. Create and push the protected `vVERSION` tag from the reviewed commit. The tag push starts the release workflow; do not move or reuse the tag.
+11. When the publish job reaches the protected `release` environment, obtain its required approval only after reviewing the completed gates and intended eight-asset set.
 
-No release command is run by this documentation. Do not reuse or move a published tag to correct a mistake; increment the version and publish a superseding release.
+No release command is run by this documentation. Do not reuse or move a published tag to correct a mistake; increment the version and publish a superseding release. The workflow verifies that the remote tag exists and that the checkout matches the event commit; it does **not** cryptographically verify a signed Git tag. Tag trust currently comes from protected refs, release-environment approval, immutable releases, and workflow OIDC attestations.
 
 ## Automated publication contract
 
 For a matching, finalized tag the workflow:
 
 1. re-runs formatting, Clippy, locked tests, RustSec, SDK packaging, Docker canaries, and hostile containment;
-2. builds only the declared platform artifacts and packages the Linux helper with the Linux server;
-3. merges platform archives and SDK packages into one artifact set;
-4. produces an SPDX JSON SBOM and SHA-256 manifest covering every asset;
-5. records GitHub artifact attestations through OIDC;
-6. uploads the complete set to a draft release; and
-7. publishes that draft only after every upload and attestation succeeds and the protected `release` environment approves the job.
+2. builds only the declared platform artifacts, packages `coop-verify` on every platform, and packages both execution init helpers with Linux;
+3. downloads only four exactly named workflow artifacts, then requires exactly three platform archives and three SDK packages;
+4. safely extracts and inventories those six payloads into a fresh staging tree and produces one combined, artifact-scoped SPDX JSON SBOM;
+5. binds the SPDX predicate to all six payload digests, writes `SHA256SUMS` for the other seven public assets, and records SLSA provenance for the exact eight-asset set through OIDC;
+6. uploads only those eight names to a draft release and reconciles every remote name, size, and SHA-256 digest against the local files; and
+7. publishes that draft only after every upload, attestation, and readback succeeds and the protected `release` environment approves the job.
 
-If publication fails, keep the release as a draft while investigating. Verify asset hashes, attestations, archive contents, release notes, and fresh-install canaries before announcing it. After publication, monitor installation reports and preserve the workflow run, artifact attestations, dependency evidence, rootfs manifest, and release approval as the release record.
+The public contract is exactly eight assets: three platform archives, the Python wheel and source distribution, the npm tarball, the combined SPDX JSON document, and `SHA256SUMS`. The checksum manifest covers the other seven assets and cannot include its own digest; its release attestation and constrained workflow provenance authenticate the manifest itself. GitHub-generated source archives are outside this asset set.
+
+If publication fails, keep the release as a draft while investigating. Because draft uploads do not overwrite existing names, remove a failed draft only after preserving the evidence and before an intentional clean rerun. Verify asset hashes, attestations, archive contents, release notes, and fresh-install canaries before announcing it. After publication, monitor installation reports and preserve the workflow run, artifact/SBOM attestations, dependency inputs, and release approval as the repository release record. The workflow builds and gates an ephemeral container/private rootfs but does not publish that image or its rootfs manifest; each deployment must preserve its separately generated rootfs manifest, digest, package inventory, and verification output with the deployment record.
 
 ## Compromised or faulty release
 

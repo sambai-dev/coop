@@ -3,7 +3,8 @@ services:
     build:
       context: .
       args:
-        VERSION: "0.3.0"
+        VERSION: "0.4.0"
+        VCS_REF: "${COOP_GIT_REVISION:-local}"
     restart: unless-stopped
     stop_grace_period: 45s
     ports:
@@ -13,21 +14,48 @@ services:
     environment:
       COOP_ENV: production
       COOP_API_KEYS: "${COOP_API_KEYS:?copy .env.example to .env and replace the key}"
-      COOP_SANDBOX: ns
+      COOP_METRICS_TOKEN: "${COOP_METRICS_TOKEN:-}"
+      COOP_SANDBOX: "${COOP_SANDBOX:-gvisor}"
       COOP_ROOTFS: /opt/coop/rootfs
       COOP_SANDBOX_HELPER: /usr/local/bin/coop-sandbox-init
+      COOP_GVISOR_RUNSC_SOURCE: /run/coop-bootstrap/runsc
+      COOP_GVISOR_RUNSC: /run/coop-runtime/runsc
+      COOP_GVISOR_ROOTFS_SHA256: "${COOP_GVISOR_ROOTFS_SHA256:-}"
+      COOP_GVISOR_PLATFORM: "${COOP_GVISOR_PLATFORM:-systrap}"
+      COOP_ATTESTATION_MODE: sign
+      COOP_ATTESTATION_KEY_SOURCE: /run/secrets/coop-attestation-key.pem
+      COOP_ATTESTATION_KEY_FILE: /run/coop-secrets/attestation-key.pem
       COOP_SECCOMP: auto
       COOP_WORKERS: "${COOP_WORKERS:-4}"
       COOP_TENANT_CONCURRENCY: "${COOP_TENANT_CONCURRENCY:-2}"
+      COOP_TENANT_QUEUE_CAPACITY: "${COOP_TENANT_QUEUE_CAPACITY:-64}"
       COOP_RATE_PER_MIN: "${COOP_RATE_PER_MIN:-120}"
+      COOP_MAX_JOB_MEM_MB: "${COOP_MAX_JOB_MEM_MB:-1024}"
+      COOP_MEMORY_BUDGET_MB: "${COOP_MEMORY_BUDGET_MB:-4096}"
+      COOP_STORAGE_TENANT_MB: "${COOP_STORAGE_TENANT_MB:-4096}"
+      COOP_STORAGE_GLOBAL_MB: "${COOP_STORAGE_GLOBAL_MB:-16384}"
+      COOP_STORAGE_FREE_RESERVE_MB: "${COOP_STORAGE_FREE_RESERVE_MB:-1024}"
       COOP_RETENTION_HOURS: "${COOP_RETENTION_HOURS:-168}"
       COOP_SWEEP_INTERVAL_SECS: "${COOP_SWEEP_INTERVAL_SECS:-3600}"
+      COOP_LOG_FORMAT: "${COOP_LOG_FORMAT:-json}"
       RUST_LOG: "${RUST_LOG:-info,coop_server=info}"
     volumes:
       - coop-data:/data
-    # The in-tree x86_64 Linux namespace backend needs host-level namespace and
-    # cgroup privileges. This is NOT a safe public-cloud container boundary.
-    # Run this profile only on a dedicated x86_64 VM; see the boundary docs.
+      - type: bind
+        source: ./.coop-runtime/runsc
+        target: /run/coop-bootstrap/runsc
+        read_only: true
+    secrets:
+      - source: coop_attestation_key
+        target: coop-attestation-key.pem
+    tmpfs:
+      - /run/coop-runtime:rw,exec,nosuid,nodev,mode=0700,uid=0,gid=0
+      - /run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0
+    mem_limit: "${COOP_CONTAINER_MEMORY_LIMIT:-8g}"
+    # Per-job gVisor still needs host cgroup/runtime setup from the outer
+    # container. The outer service is host-equivalent even though each tenant
+    # job crosses a separate runsc application-kernel boundary. Run this
+    # profile only on a dedicated x86_64 VM; see the boundary docs.
     privileged: true
     cgroup: host
     healthcheck:
@@ -43,3 +71,7 @@ services:
 
 volumes:
   coop-data:
+
+secrets:
+  coop_attestation_key:
+    file: ./.coop-runtime/attestation-key.pem

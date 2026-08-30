@@ -2,15 +2,44 @@ use std::collections::HashMap;
 use std::path::{Component, Path};
 
 pub const DEV_DEFAULT_API_KEY: &str = "local:coop-dev-key";
+const PUBLIC_DEV_API_KEY: &str = "coop-dev-key";
+pub const DEFAULT_TENANT_QUEUE_CAPACITY: usize = 64;
+pub const DEFAULT_MAX_JOB_MEM_MB: u32 = 1024;
+pub const DEFAULT_MEMORY_BUDGET_MB: u32 = 4096;
+pub const DEFAULT_STORAGE_GLOBAL_MB: u64 = 16 * 1024;
+pub const DEFAULT_STORAGE_TENANT_MB: u64 = 4 * 1024;
+pub const DEFAULT_STORAGE_FREE_RESERVE_MB: u64 = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestationMode {
+    Off,
+    Sign,
+}
 
 #[derive(Clone)]
 pub struct Config {
     pub addr: String,
     pub db_path: String,
     pub api_keys: HashMap<String, String>,
+    /// Optional, separately scoped bearer credential for the global operator
+    /// metrics endpoint. It is never accepted by tenant API middleware.
+    pub metrics_token: Option<String>,
+    /// Signing is enabled only with an operator-supplied Ed25519 key file.
+    /// Production defaults fail closed; `Off` must be explicitly selected to
+    /// acknowledge that terminal jobs will not receive signed attestations.
+    pub attestation_mode: AttestationMode,
+    pub attestation_key_file: Option<String>,
+    pub credentials: crate::auth::CredentialStore,
+    pub jwt: Option<crate::auth::JwtConfig>,
     pub workers: usize,
     pub tenant_concurrency: usize,
+    pub tenant_queue_capacity: usize,
     pub rate_per_min: u32,
+    pub max_job_mem_mb: u32,
+    pub memory_budget_mb: u32,
+    pub storage_global_mb: u64,
+    pub storage_tenant_mb: u64,
+    pub storage_free_reserve_mb: u64,
     pub sandbox: String,
     pub jobs_root: String,
     /// A private, purpose-built root filesystem used by the namespace
@@ -18,12 +47,23 @@ pub struct Config {
     pub rootfs: Option<String>,
     /// Dedicated single-threaded bootstrap executable for namespace setup.
     pub sandbox_helper: Option<String>,
+    /// Absolute path to the reviewed, operator-installed runsc binary.
+    pub gvisor_runsc: Option<String>,
+    /// Operator-generated content digest of the immutable trusted rootfs.
+    pub gvisor_rootfs_sha256: Option<String>,
+    /// gVisor syscall interception platform: systrap in a VM, or KVM on a
+    /// suitably isolated bare-metal host.
+    pub gvisor_platform: String,
+    /// Non-root identity used by the OCI init and workload inside gVisor.
+    pub gvisor_uid: u32,
+    pub gvisor_gid: u32,
     /// Whether production policy is active. Kept in the parsed configuration
     /// so embedded servers cannot accidentally use the caller process' env.
     pub production: bool,
     /// Conspicuous acknowledgement required for the unisolated executor in
     /// production. This is deliberately separate from `COOP_SANDBOX=off`.
     pub unsafe_allow_naive: bool,
+    pub unsafe_allow_public_dev: bool,
     pub python_bin: Option<String>,
     pub node_bin: Option<String>,
     pub bash_bin: Option<String>,
@@ -46,15 +86,38 @@ impl std::fmt::Debug for Config {
                 "api_keys",
                 &format!("{} key(s), redacted", self.api_keys.len()),
             )
+            .field(
+                "metrics_token",
+                &self.metrics_token.as_ref().map(|_| "configured, redacted"),
+            )
+            .field("attestation_mode", &self.attestation_mode)
+            .field(
+                "attestation_key_file",
+                &self.attestation_key_file.as_ref().map(|_| "configured"),
+            )
+            .field("credentials", &self.credentials)
+            .field("jwt", &self.jwt)
             .field("workers", &self.workers)
             .field("tenant_concurrency", &self.tenant_concurrency)
+            .field("tenant_queue_capacity", &self.tenant_queue_capacity)
             .field("rate_per_min", &self.rate_per_min)
+            .field("max_job_mem_mb", &self.max_job_mem_mb)
+            .field("memory_budget_mb", &self.memory_budget_mb)
+            .field("storage_global_mb", &self.storage_global_mb)
+            .field("storage_tenant_mb", &self.storage_tenant_mb)
+            .field("storage_free_reserve_mb", &self.storage_free_reserve_mb)
             .field("sandbox", &self.sandbox)
             .field("jobs_root", &self.jobs_root)
             .field("rootfs", &self.rootfs)
             .field("sandbox_helper", &self.sandbox_helper)
+            .field("gvisor_runsc", &self.gvisor_runsc)
+            .field("gvisor_rootfs_sha256", &self.gvisor_rootfs_sha256)
+            .field("gvisor_platform", &self.gvisor_platform)
+            .field("gvisor_uid", &self.gvisor_uid)
+            .field("gvisor_gid", &self.gvisor_gid)
             .field("production", &self.production)
             .field("unsafe_allow_naive", &self.unsafe_allow_naive)
+            .field("unsafe_allow_public_dev", &self.unsafe_allow_public_dev)
             .field("python_bin", &self.python_bin)
             .field("node_bin", &self.node_bin)
             .field("bash_bin", &self.bash_bin)
@@ -99,6 +162,34 @@ fn env_true(getenv: &dyn Fn(&str) -> Option<String>, key: &str) -> bool {
             .as_deref(),
         Some("1" | "true" | "yes" | "on")
     )
+}
+
+fn listener_is_loopback(addr: &str) -> bool {
+    let addr = addr.trim();
+    if let Ok(socket) = addr.parse::<std::net::SocketAddr>() {
+        return socket.ip().is_loopback();
+    }
+    false
+}
+
+fn legacy_api_key_is_weak(key: &str) -> bool {
+    key == PUBLIC_DEV_API_KEY || key.len() < 16
+}
+
+fn ensure_metrics_token_is_separate(
+    metrics_token: Option<&str>,
+    api_keys: &HashMap<String, String>,
+    credentials: &crate::auth::CredentialStore,
+) -> Result<(), String> {
+    if metrics_token.is_some_and(|token| {
+        api_keys.contains_key(token) || credentials.matches_active_credential(token)
+    }) {
+        return Err(
+            "COOP_METRICS_TOKEN must be different from every active tenant API credential"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Reject paths for which a permissions call could affect a broad or
@@ -434,14 +525,99 @@ impl Config {
         getenv: &dyn Fn(&str) -> Option<String>,
         production: bool,
     ) -> Result<Self, String> {
+        let credentials_path = getenv("COOP_CREDENTIALS_FILE")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let pepper_path = getenv("COOP_CREDENTIAL_PEPPER_FILE")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let credentials = match (credentials_path.as_deref(), pepper_path.as_deref()) {
+            (Some(credentials), Some(pepper)) => crate::auth::CredentialStore::load(
+                Path::new(credentials),
+                Path::new(pepper),
+                production,
+            )?,
+            (None, None) => crate::auth::CredentialStore::default(),
+            _ => return Err(
+                "COOP_CREDENTIALS_FILE and COOP_CREDENTIAL_PEPPER_FILE must be configured together"
+                    .to_string(),
+            ),
+        };
+
+        let oidc_issuer = getenv("COOP_OIDC_ISSUER")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let oidc_audience = getenv("COOP_OIDC_AUDIENCE")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let oidc_jwks = getenv("COOP_OIDC_JWKS_URL")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let oidc_tenant_map = getenv("COOP_OIDC_TENANT_MAP")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let optional_oidc_values = [
+            getenv("COOP_OIDC_TENANT_CLAIM"),
+            getenv("COOP_OIDC_ALGORITHMS"),
+            getenv("COOP_OIDC_JWKS_TTL_SECONDS"),
+            getenv("COOP_OIDC_MAX_TOKEN_AGE_SECONDS"),
+        ];
+        let oidc_requested = oidc_issuer.is_some()
+            || oidc_audience.is_some()
+            || oidc_jwks.is_some()
+            || oidc_tenant_map.is_some()
+            || optional_oidc_values
+                .iter()
+                .any(|value| value.as_ref().is_some_and(|value| !value.trim().is_empty()));
+        let jwt = if oidc_requested {
+            let issuer = oidc_issuer.as_deref().ok_or_else(|| {
+                "COOP_OIDC_ISSUER is required when OIDC authentication is configured".to_string()
+            })?;
+            let audience = oidc_audience.as_deref().ok_or_else(|| {
+                "COOP_OIDC_AUDIENCE is required when OIDC authentication is configured".to_string()
+            })?;
+            let jwks = oidc_jwks.as_deref().ok_or_else(|| {
+                "COOP_OIDC_JWKS_URL is required when OIDC authentication is configured".to_string()
+            })?;
+            let tenant_map = oidc_tenant_map.as_deref().ok_or_else(|| {
+                "COOP_OIDC_TENANT_MAP is required when OIDC authentication is configured"
+                    .to_string()
+            })?;
+            Some(crate::auth::JwtConfig::parse(
+                issuer,
+                audience,
+                jwks,
+                &env_or(getenv, "COOP_OIDC_TENANT_CLAIM", "tenant_id"),
+                tenant_map,
+                &env_or(getenv, "COOP_OIDC_ALGORITHMS", "RS256,ES256,EdDSA"),
+                parse_number(
+                    getenv,
+                    "COOP_OIDC_JWKS_TTL_SECONDS",
+                    "300",
+                    60_u64,
+                    3600_u64,
+                )?,
+                parse_number(
+                    getenv,
+                    "COOP_OIDC_MAX_TOKEN_AGE_SECONDS",
+                    "3600",
+                    60_u64,
+                    86_400_u64,
+                )?,
+            )?)
+        } else {
+            None
+        };
+
         let mut api_keys = HashMap::new();
         let raw = getenv("COOP_API_KEYS").filter(|v| !v.trim().is_empty());
         let raw = match raw {
-            Some(raw) => raw,
+            Some(raw) => Some(raw),
+            None if !credentials.is_empty() || jwt.is_some() => None,
             None if production => {
                 return Err(
-                    "COOP_API_KEYS must be configured in production; refusing to start with the \
-                     development default API key"
+                    "configure COOP_CREDENTIALS_FILE with COOP_CREDENTIAL_PEPPER_FILE or provide \
+                     legacy COOP_API_KEYS; refusing to start production without credentials"
                         .to_string(),
                 );
             }
@@ -451,51 +627,125 @@ impl Config {
                      default key '{DEV_DEFAULT_API_KEY}'. Anyone who can reach this server can run \
                      code on it. Set COOP_API_KEYS before exposing coop beyond localhost."
                 );
-                DEV_DEFAULT_API_KEY.to_string()
+                Some(DEV_DEFAULT_API_KEY.to_string())
             }
         };
-        for entry in raw.split(',') {
-            let entry = entry.trim();
-            if entry.is_empty() {
-                continue;
-            }
-            let (tenant, key) = match entry.split_once(':') {
-                Some((tenant, key)) => (tenant.trim(), key.trim()),
-                None if !production => ("local", entry),
-                None => {
-                    return Err(
-                        "each production COOP_API_KEYS entry must use tenant:key syntax"
-                            .to_string(),
-                    )
+        if let Some(raw) = raw {
+            for entry in raw.split(',') {
+                let entry = entry.trim();
+                if entry.is_empty() {
+                    continue;
                 }
-            };
-            if tenant.is_empty() {
-                return Err("COOP_API_KEYS contains a blank tenant".to_string());
-            }
-            if key.is_empty() {
-                return Err(format!(
-                    "COOP_API_KEYS contains a blank key for tenant {tenant:?}"
-                ));
-            }
-            if production && (key == "coop-dev-key" || key.len() < 16) {
-                return Err(format!(
-                    "production API key for tenant {tenant:?} is public or too short (minimum 16 characters)"
-                ));
-            }
-            if api_keys
-                .insert(key.to_string(), tenant.to_string())
-                .is_some()
-            {
-                return Err("COOP_API_KEYS contains a duplicate key".to_string());
+                let (tenant, key) = match entry.split_once(':') {
+                    Some((tenant, key)) => (tenant.trim(), key.trim()),
+                    None if !production => ("local", entry),
+                    None => {
+                        return Err(
+                            "each production COOP_API_KEYS entry must use tenant:key syntax"
+                                .to_string(),
+                        )
+                    }
+                };
+                if tenant.is_empty() {
+                    return Err("COOP_API_KEYS contains a blank tenant".to_string());
+                }
+                crate::auth::validate_identity("legacy COOP_API_KEYS tenant", tenant)?;
+                if key.is_empty() {
+                    return Err(format!(
+                        "COOP_API_KEYS contains a blank key for tenant {tenant:?}"
+                    ));
+                }
+                if production && legacy_api_key_is_weak(key) {
+                    return Err(format!(
+                        "production API key for tenant {tenant:?} is public or too short (minimum 16 characters)"
+                    ));
+                }
+                if api_keys
+                    .insert(key.to_string(), tenant.to_string())
+                    .is_some()
+                {
+                    return Err("COOP_API_KEYS contains a duplicate key".to_string());
+                }
             }
         }
 
-        if api_keys.is_empty() {
-            return Err("COOP_API_KEYS did not contain any usable tenant keys".to_string());
+        if api_keys.is_empty() && credentials.is_empty() && jwt.is_none() {
+            return Err(
+                "credential configuration did not contain any usable credentials".to_string(),
+            );
+        }
+        if production && !api_keys.is_empty() {
+            tracing::warn!(
+                "SECURITY: legacy COOP_API_KEYS are enabled in production; migrate to the indexed \
+                 peppered COOP_CREDENTIALS_FILE format"
+            );
+        }
+
+        let metrics_token = getenv("COOP_METRICS_TOKEN")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if metrics_token.as_ref().is_some_and(|token| token.len() < 16) {
+            return Err(
+                "COOP_METRICS_TOKEN must contain at least 16 characters when configured"
+                    .to_string(),
+            );
+        }
+        ensure_metrics_token_is_separate(metrics_token.as_deref(), &api_keys, &credentials)?;
+
+        let attestation_key_file = getenv("COOP_ATTESTATION_KEY_FILE")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let attestation_mode = match getenv("COOP_ATTESTATION_MODE")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .as_deref()
+        {
+            None if attestation_key_file.is_some() => AttestationMode::Sign,
+            None if production => {
+                return Err(
+                    "production requires COOP_ATTESTATION_KEY_FILE for signed terminal evidence; set COOP_ATTESTATION_MODE=off only as an explicit policy decision to disable signing"
+                        .to_string(),
+                )
+            }
+            None => AttestationMode::Off,
+            Some("sign" | "signed" | "on" | "enabled") => {
+                if attestation_key_file.is_none() {
+                    return Err(
+                        "COOP_ATTESTATION_MODE=sign requires COOP_ATTESTATION_KEY_FILE"
+                            .to_string(),
+                    );
+                }
+                AttestationMode::Sign
+            }
+            Some("off" | "disabled" | "none") => {
+                if attestation_key_file.is_some() {
+                    return Err(
+                        "COOP_ATTESTATION_MODE=off must not also configure COOP_ATTESTATION_KEY_FILE"
+                            .to_string(),
+                    );
+                }
+                AttestationMode::Off
+            }
+            Some(_) => {
+                return Err(
+                    "COOP_ATTESTATION_MODE must be either sign or off".to_string(),
+                )
+            }
+        };
+        if production {
+            if let Some(path) = attestation_key_file.as_deref() {
+                if !Path::new(path).is_absolute() {
+                    return Err(
+                        "COOP_ATTESTATION_KEY_FILE must be an absolute path in production"
+                            .to_string(),
+                    );
+                }
+            }
         }
 
         let sandbox = env_or(getenv, "COOP_SANDBOX", "auto");
         let unsafe_allow_naive = env_true(getenv, "COOP_UNSAFE_ALLOW_NAIVE");
+        let unsafe_allow_public_dev = env_true(getenv, "COOP_UNSAFE_ALLOW_PUBLIC_DEV");
         let seccomp = !matches!(
             env_or(getenv, "COOP_SECCOMP", "auto")
                 .trim()
@@ -507,10 +757,68 @@ impl Config {
             return Err("COOP_SECCOMP cannot be disabled in production".to_string());
         }
 
-        Ok(Self {
+        let tenant_queue_capacity = parse_number(
+            getenv,
+            "COOP_TENANT_QUEUE_CAPACITY",
+            &DEFAULT_TENANT_QUEUE_CAPACITY.to_string(),
+            1usize,
+            crate::QUEUE_CAPACITY,
+        )?;
+        let max_job_mem_mb = parse_number(
+            getenv,
+            "COOP_MAX_JOB_MEM_MB",
+            &DEFAULT_MAX_JOB_MEM_MB.to_string(),
+            16u32,
+            coop_types::MEM_MAX_MB,
+        )?;
+        let memory_budget_mb = parse_number(
+            getenv,
+            "COOP_MEMORY_BUDGET_MB",
+            &DEFAULT_MEMORY_BUDGET_MB.to_string(),
+            16u32,
+            1_048_576u32,
+        )?;
+        if max_job_mem_mb > memory_budget_mb {
+            return Err(format!(
+                "COOP_MAX_JOB_MEM_MB ({max_job_mem_mb}) must not exceed COOP_MEMORY_BUDGET_MB ({memory_budget_mb})"
+            ));
+        }
+        let storage_global_mb = parse_number(
+            getenv,
+            "COOP_STORAGE_GLOBAL_MB",
+            &DEFAULT_STORAGE_GLOBAL_MB.to_string(),
+            128u64,
+            1_048_576u64,
+        )?;
+        let storage_tenant_mb = parse_number(
+            getenv,
+            "COOP_STORAGE_TENANT_MB",
+            &DEFAULT_STORAGE_TENANT_MB.to_string(),
+            64u64,
+            1_048_576u64,
+        )?;
+        if storage_tenant_mb > storage_global_mb {
+            return Err(format!(
+                "COOP_STORAGE_TENANT_MB ({storage_tenant_mb}) must not exceed COOP_STORAGE_GLOBAL_MB ({storage_global_mb})"
+            ));
+        }
+        let storage_free_reserve_mb = parse_number(
+            getenv,
+            "COOP_STORAGE_FREE_RESERVE_MB",
+            &DEFAULT_STORAGE_FREE_RESERVE_MB.to_string(),
+            0u64,
+            1_048_576u64,
+        )?;
+
+        let config = Self {
             addr: env_or(getenv, "COOP_ADDR", "127.0.0.1:7300"),
             db_path: env_or(getenv, "COOP_DB", "coop.db"),
             api_keys,
+            metrics_token,
+            attestation_mode,
+            attestation_key_file,
+            credentials,
+            jwt,
             workers: parse_number(getenv, "COOP_WORKERS", "4", 1usize, 256usize)?,
             tenant_concurrency: parse_number(
                 getenv,
@@ -519,7 +827,13 @@ impl Config {
                 1usize,
                 256usize,
             )?,
+            tenant_queue_capacity,
             rate_per_min: parse_number(getenv, "COOP_RATE_PER_MIN", "120", 1u32, 1_000_000u32)?,
+            max_job_mem_mb,
+            memory_budget_mb,
+            storage_global_mb,
+            storage_tenant_mb,
+            storage_free_reserve_mb,
             sandbox,
             jobs_root: env_or(getenv, "COOP_JOBS_ROOT", &default_jobs_root()),
             rootfs: getenv("COOP_ROOTFS")
@@ -529,8 +843,18 @@ impl Config {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .or_else(default_sandbox_helper),
+            gvisor_runsc: getenv("COOP_GVISOR_RUNSC")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            gvisor_rootfs_sha256: getenv("COOP_GVISOR_ROOTFS_SHA256")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty()),
+            gvisor_platform: env_or(getenv, "COOP_GVISOR_PLATFORM", "systrap"),
+            gvisor_uid: parse_number(getenv, "COOP_GVISOR_UID", "65534", 1u32, 4_294_967_294u32)?,
+            gvisor_gid: parse_number(getenv, "COOP_GVISOR_GID", "65534", 1u32, 4_294_967_294u32)?,
             production,
             unsafe_allow_naive,
+            unsafe_allow_public_dev,
             python_bin: getenv("COOP_PYTHON"),
             node_bin: getenv("COOP_NODE"),
             bash_bin: getenv("COOP_BASH"),
@@ -543,7 +867,74 @@ impl Config {
                 86_400u64,
             )?,
             seccomp,
-        })
+        };
+        config.validate_declared_listener_security()?;
+        Ok(config)
+    }
+
+    pub fn validate_declared_listener_security(&self) -> Result<(), String> {
+        if listener_is_loopback(&self.addr) || self.unsafe_allow_public_dev {
+            return Ok(());
+        }
+        if self.api_keys.keys().any(|key| legacy_api_key_is_weak(key)) {
+            return Err(
+                "a non-loopback COOP_ADDR cannot use the public development API key or a legacy API key shorter than 16 characters; configure a strong COOP_API_KEYS value or set COOP_UNSAFE_ALLOW_PUBLIC_DEV=true to acknowledge the unsafe development exposure"
+                    .to_string(),
+            );
+        }
+        if matches!(
+            self.sandbox.trim().to_ascii_lowercase().as_str(),
+            "off" | "none" | "naive"
+        ) {
+            return Err(
+                "a non-loopback COOP_ADDR cannot use the unisolated subprocess backend unless COOP_UNSAFE_ALLOW_PUBLIC_DEV=true is set"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_metrics_token_separation(&self) -> Result<(), String> {
+        ensure_metrics_token_is_separate(
+            self.metrics_token.as_deref(),
+            &self.api_keys,
+            &self.credentials,
+        )
+    }
+
+    pub fn validate_resolved_listener_security(
+        &self,
+        mode: coop_exec::SandboxMode,
+    ) -> Result<(), String> {
+        self.validate_declared_listener_security()?;
+        if !listener_is_loopback(&self.addr)
+            && mode == coop_exec::SandboxMode::Off
+            && !self.unsafe_allow_public_dev
+        {
+            return Err(
+                "COOP_SANDBOX=auto resolved to the unisolated subprocess backend on a non-loopback listener; configure namespace isolation or set COOP_UNSAFE_ALLOW_PUBLIC_DEV=true to acknowledge the unsafe development exposure"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn validate_bound_listener_security(
+        &self,
+        bound: std::net::SocketAddr,
+        mode: coop_exec::SandboxMode,
+    ) -> Result<(), String> {
+        if bound.ip().is_loopback() || self.unsafe_allow_public_dev {
+            return Ok(());
+        }
+        if self.api_keys.keys().any(|key| legacy_api_key_is_weak(key))
+            || mode == coop_exec::SandboxMode::Off
+        {
+            return Err(format!(
+                "listener resolved to non-loopback address {bound} with an unsafe development credential or executor; configure production keys and namespace isolation, or explicitly set COOP_UNSAFE_ALLOW_PUBLIC_DEV=true"
+            ));
+        }
+        Ok(())
     }
 
     pub fn interpreter_override(&self, language: &str) -> Option<String> {
@@ -553,11 +944,33 @@ impl Config {
             _ => self.bash_bin.clone(),
         }
     }
+
+    pub fn clamp_limits(&self, limits: coop_types::Limits) -> coop_types::Limits {
+        let mut limits = limits.clamped();
+        limits.mem_mb = self.clamp_mem_mb(limits.mem_mb);
+        limits
+    }
+
+    pub fn clamp_mem_mb(&self, mem_mb: u32) -> u32 {
+        mem_mb
+            .clamp(16, coop_types::MEM_MAX_MB)
+            .min(self.max_job_mem_mb)
+    }
+
+    pub fn storage_limits(&self) -> coop_store::StorageLimits {
+        let mib = 1024_u64 * 1024;
+        coop_store::StorageLimits::new(
+            self.storage_global_mb.saturating_mul(mib),
+            self.storage_tenant_mb.saturating_mul(mib),
+            self.storage_free_reserve_mb.saturating_mul(mib),
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hmac::{Hmac, Mac};
 
     fn source<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |key: &str| {
@@ -566,6 +979,54 @@ mod tests {
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| v.to_string())
         }
+    }
+
+    fn indexed_credential_fixture(
+        token: &str,
+        expires_at_ms: Option<i64>,
+        revoked_at_ms: Option<i64>,
+    ) -> (std::path::PathBuf, String, String) {
+        let root = std::env::temp_dir().join(format!(
+            "coop-config-indexed-collision-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pepper = [0x6d_u8; 32];
+        let mut hmac = Hmac::<sha2::Sha256>::new_from_slice(&pepper).unwrap();
+        hmac.update(token.as_bytes());
+        let digest = hmac.finalize().into_bytes();
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let credentials = root.join("credentials.json");
+        let pepper_file = root.join("pepper");
+        std::fs::write(&pepper_file, hex(&pepper)).unwrap();
+        std::fs::write(
+            &credentials,
+            serde_json::json!({
+                "version": 1,
+                "credentials": [{
+                    "key_id": "metrics-alias",
+                    "tenant_id": "tenant-a",
+                    "principal_id": "principal-a",
+                    "digest_hmac_sha256": hex(&digest),
+                    "scopes": ["metrics:read"],
+                    "created_at_ms": 1,
+                    "expires_at_ms": expires_at_ms,
+                    "revoked_at_ms": revoked_at_ms
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        (
+            root,
+            credentials.to_string_lossy().into_owned(),
+            pepper_file.to_string_lossy().into_owned(),
+        )
     }
 
     #[test]
@@ -592,7 +1053,10 @@ mod tests {
     #[test]
     fn prod_mode_with_explicit_keys_does_not_get_dev_default() {
         let cfg = Config::from_sources(
-            &source(&[("COOP_API_KEYS", "acme:correct-horse-battery-staple")]),
+            &source(&[
+                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("COOP_ATTESTATION_MODE", "off"),
+            ]),
             true,
         )
         .unwrap();
@@ -606,9 +1070,126 @@ mod tests {
     }
 
     #[test]
+    fn production_attestation_policy_is_fail_closed_and_off_is_explicit() {
+        let base = [("COOP_API_KEYS", "acme:correct-horse-battery-staple")];
+        let error = Config::from_sources(&source(&base), true).unwrap_err();
+        assert!(error.contains("COOP_ATTESTATION_KEY_FILE"), "{error}");
+        assert!(error.contains("COOP_ATTESTATION_MODE=off"), "{error}");
+
+        let off = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("COOP_ATTESTATION_MODE", "off"),
+            ]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(off.attestation_mode, AttestationMode::Off);
+        assert!(off.attestation_key_file.is_none());
+
+        let missing_key = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("COOP_ATTESTATION_MODE", "sign"),
+            ]),
+            true,
+        )
+        .unwrap_err();
+        assert!(missing_key.contains("requires COOP_ATTESTATION_KEY_FILE"));
+
+        let ambiguous = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("COOP_ATTESTATION_MODE", "off"),
+                ("COOP_ATTESTATION_KEY_FILE", "/var/lib/coop/signing.pem"),
+            ]),
+            true,
+        )
+        .unwrap_err();
+        assert!(ambiguous.contains("must not also configure"), "{ambiguous}");
+        assert!(Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("COOP_ATTESTATION_MODE", "maybe"),
+            ]),
+            true,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn credentials_file_can_be_the_only_auth_source_and_requires_a_paired_pepper() {
+        let root =
+            std::env::temp_dir().join(format!("coop-config-credentials-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let credentials = root.join("credentials.json");
+        let pepper = root.join("pepper");
+        std::fs::write(&pepper, "11".repeat(32)).unwrap();
+        std::fs::write(
+            &credentials,
+            serde_json::json!({
+                "version":1,
+                "credentials":[{
+                    "key_id":"agent-a",
+                    "tenant_id":"tenant-a",
+                    "principal_id":"principal-a",
+                    "digest_hmac_sha256":"22".repeat(32),
+                    "scopes":["jobs:read"],
+                    "created_at_ms":1
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let credential_path = credentials.to_string_lossy().into_owned();
+        let pepper_path = pepper.to_string_lossy().into_owned();
+        let cfg = Config::from_sources(
+            &source(&[
+                ("COOP_CREDENTIALS_FILE", credential_path.as_str()),
+                ("COOP_CREDENTIAL_PEPPER_FILE", pepper_path.as_str()),
+            ]),
+            false,
+        )
+        .unwrap();
+        assert!(cfg.api_keys.is_empty());
+        assert_eq!(cfg.credentials.len(), 1);
+        assert!(Config::from_sources(
+            &source(&[("COOP_CREDENTIALS_FILE", credential_path.as_str())]),
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn oidc_can_be_the_only_auth_source_but_partial_or_insecure_config_fails_closed() {
+        let complete = [
+            ("COOP_OIDC_ISSUER", "https://issuer.example"),
+            ("COOP_OIDC_AUDIENCE", "https://coop.example"),
+            ("COOP_OIDC_JWKS_URL", "https://issuer.example/jwks"),
+            ("COOP_OIDC_TENANT_MAP", "external=internal"),
+        ];
+        let cfg = Config::from_sources(&source(&complete), false).unwrap();
+        assert!(cfg.api_keys.is_empty());
+        assert!(cfg.jwt.is_some());
+
+        assert!(Config::from_sources(
+            &source(&[("COOP_OIDC_ISSUER", "https://issuer.example")]),
+            false
+        )
+        .is_err());
+        let mut insecure = complete;
+        insecure[2].1 = "http://issuer.example/jwks";
+        assert!(Config::from_sources(&source(&insecure), false).is_err());
+    }
+
+    #[test]
     fn debug_output_never_contains_plaintext_keys() {
         let cfg = Config::from_sources(
-            &source(&[("COOP_API_KEYS", "acme:s3cr3t-value-that-is-long")]),
+            &source(&[
+                ("COOP_API_KEYS", "acme:s3cr3t-value-that-is-long"),
+                ("COOP_METRICS_TOKEN", "metrics-secret-value"),
+                ("COOP_ATTESTATION_MODE", "off"),
+            ]),
             true,
         )
         .unwrap();
@@ -617,7 +1198,120 @@ mod tests {
             !rendered.contains("s3cr3t-value-that-is-long"),
             "leaked: {rendered}"
         );
+        assert!(
+            !rendered.contains("metrics-secret-value"),
+            "leaked: {rendered}"
+        );
         assert!(rendered.contains("redacted"), "{rendered}");
+    }
+
+    #[test]
+    fn metrics_token_is_optional_but_must_be_strong_when_configured() {
+        let cfg = Config::from_sources(&source(&[]), false).unwrap();
+        assert!(cfg.metrics_token.is_none());
+
+        let error = Config::from_sources(&source(&[("COOP_METRICS_TOKEN", "too-short")]), false)
+            .unwrap_err();
+        assert!(error.contains("COOP_METRICS_TOKEN"), "{error}");
+
+        let cfg = Config::from_sources(
+            &source(&[("COOP_METRICS_TOKEN", "separate-operator-secret")]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.metrics_token.as_deref(),
+            Some("separate-operator-secret")
+        );
+
+        let error = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "tenant:shared-secret-value"),
+                ("COOP_METRICS_TOKEN", "shared-secret-value"),
+            ]),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("different"), "{error}");
+    }
+
+    #[test]
+    fn metrics_token_cannot_alias_an_active_indexed_credential() {
+        let token = format!("coop_metrics-alias_{}", "a".repeat(43));
+
+        for (expires_at_ms, revoked_at_ms) in [(Some(i64::MAX), None), (None, Some(i64::MAX))] {
+            let (root, credentials, pepper) =
+                indexed_credential_fixture(&token, expires_at_ms, revoked_at_ms);
+            let error = Config::from_sources(
+                &source(&[
+                    ("COOP_CREDENTIALS_FILE", credentials.as_str()),
+                    ("COOP_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
+                    ("COOP_METRICS_TOKEN", token.as_str()),
+                ]),
+                false,
+            )
+            .expect_err("an active tenant credential cannot double as the metrics token");
+            assert!(error.contains("active tenant API credential"), "{error}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        let (root, credentials, pepper) = indexed_credential_fixture(&token, Some(i64::MAX), None);
+        let unrelated_same_key_id = format!("coop_metrics-alias_{}", "b".repeat(43));
+        Config::from_sources(
+            &source(&[
+                ("COOP_CREDENTIALS_FILE", credentials.as_str()),
+                ("COOP_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
+                ("COOP_METRICS_TOKEN", unrelated_same_key_id.as_str()),
+            ]),
+            false,
+        )
+        .expect("a key-id match without an HMAC match is not a credential collision");
+        std::fs::remove_dir_all(root).unwrap();
+
+        for (expires_at_ms, revoked_at_ms) in [(Some(2), None), (None, Some(2))] {
+            let (root, credentials, pepper) =
+                indexed_credential_fixture(&token, expires_at_ms, revoked_at_ms);
+            Config::from_sources(
+                &source(&[
+                    ("COOP_CREDENTIALS_FILE", credentials.as_str()),
+                    ("COOP_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
+                    ("COOP_METRICS_TOKEN", token.as_str()),
+                ]),
+                false,
+            )
+            .expect("an expired or revoked credential is not an active tenant alias");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn build_app_revalidates_metrics_token_separation_after_config_mutation() {
+        let token = format!("coop_metrics-alias_{}", "a".repeat(43));
+        let (root, credentials, pepper) = indexed_credential_fixture(&token, Some(i64::MAX), None);
+        let jobs = root.join("jobs").to_string_lossy().into_owned();
+        let mut cfg = Config::from_sources(
+            &source(&[
+                ("COOP_CREDENTIALS_FILE", credentials.as_str()),
+                ("COOP_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
+                ("COOP_SANDBOX", "off"),
+                ("COOP_JOBS_ROOT", jobs.as_str()),
+                ("COOP_STORAGE_FREE_RESERVE_MB", "0"),
+            ]),
+            false,
+        )
+        .unwrap();
+        cfg.metrics_token = Some(token);
+        let db = root.join("coop.db");
+        let store = std::sync::Arc::new(
+            coop_store::Store::open_with_limits(&db, cfg.storage_limits())
+                .await
+                .unwrap(),
+        );
+        let error = match crate::build_app(cfg, store, "127.0.0.1:0".parse().unwrap()).await {
+            Err(error) => error,
+            Ok(_) => panic!("public build_app bypassed metrics-token separation"),
+        };
+        assert!(error.contains("active tenant API credential"), "{error}");
     }
 
     #[test]
@@ -635,6 +1329,51 @@ mod tests {
                 "{raw}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_tenants_share_the_indexed_identity_contract() {
+        let too_long = "t".repeat(129);
+        for tenant in [
+            "tenant with space",
+            "tenant-é",
+            "tenant\ncontrol",
+            "tenant\"quote",
+            "tenant\\slash",
+            too_long.as_str(),
+        ] {
+            let raw = format!("{tenant}:correct-horse-battery-staple");
+            let error = Config::from_sources(
+                &source(&[
+                    ("COOP_API_KEYS", raw.as_str()),
+                    ("COOP_ATTESTATION_MODE", "off"),
+                ]),
+                true,
+            )
+            .expect_err(tenant);
+            assert!(
+                error.contains("1-128 safe printable ASCII"),
+                "{tenant:?}: {error}"
+            );
+        }
+
+        let maximum = "t".repeat(128);
+        let raw = format!("{maximum}:correct-horse-battery-staple");
+        let config = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", raw.as_str()),
+                ("COOP_ATTESTATION_MODE", "off"),
+            ]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            config
+                .api_keys
+                .get("correct-horse-battery-staple")
+                .map(String::as_str),
+            Some(maximum.as_str())
+        );
     }
 
     #[test]
@@ -656,6 +1395,7 @@ mod tests {
             &source(&[
                 ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
                 ("COOP_SECCOMP", "off"),
+                ("COOP_ATTESTATION_MODE", "off"),
             ]),
             true,
         )
@@ -826,5 +1566,159 @@ mod tests {
             assert!(!is_production_env(Some(v.to_string())), "{v}");
         }
         assert!(!is_production_env(None));
+    }
+
+    #[test]
+    fn non_loopback_development_listener_fails_closed_without_acknowledgement() {
+        let error = Config::from_sources(&source(&[("COOP_ADDR", "0.0.0.0:7300")]), false)
+            .expect_err("public fallback key must not bind publicly");
+        assert!(error.contains("public development API key"), "{error}");
+
+        let error = Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "0.0.0.0:7300"),
+                ("COOP_API_KEYS", "local:coop-dev-key"),
+                ("COOP_SANDBOX", "namespaces"),
+            ]),
+            false,
+        )
+        .expect_err("explicit public key must be detected semantically");
+        assert!(error.contains("public development API key"), "{error}");
+
+        let error = Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "[::]:7300"),
+                ("COOP_API_KEYS", "tenant:a-long-development-key"),
+                ("COOP_SANDBOX", "off"),
+            ]),
+            false,
+        )
+        .expect_err("public subprocess backend must not start");
+        assert!(error.contains("unisolated subprocess"), "{error}");
+
+        Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "0.0.0.0:7300"),
+                ("COOP_UNSAFE_ALLOW_PUBLIC_DEV", "true"),
+            ]),
+            false,
+        )
+        .expect("conspicuous acknowledgement is explicit");
+    }
+
+    #[test]
+    fn public_isolated_development_listener_requires_strong_legacy_keys() {
+        for weak in ["123456789012345", PUBLIC_DEV_API_KEY] {
+            let error = Config::from_sources(
+                &source(&[
+                    ("COOP_ADDR", "0.0.0.0:7300"),
+                    ("COOP_API_KEYS", weak),
+                    ("COOP_SANDBOX", "namespaces"),
+                ]),
+                false,
+            )
+            .expect_err("a public isolated listener must reject weak legacy credentials");
+            assert!(
+                error.contains("shorter than 16") || error.contains("public development API key"),
+                "{weak}: {error}"
+            );
+        }
+
+        Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "0.0.0.0:7300"),
+                ("COOP_API_KEYS", "1234567890123456"),
+                ("COOP_SANDBOX", "namespaces"),
+            ]),
+            false,
+        )
+        .expect("a 16-byte public development key meets the existing strength floor");
+        Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "short-loopback"),
+                ("COOP_SANDBOX", "namespaces"),
+            ]),
+            false,
+        )
+        .expect("weak development credentials remain available on literal loopback");
+        Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "0.0.0.0:7300"),
+                ("COOP_API_KEYS", "short-public"),
+                ("COOP_SANDBOX", "namespaces"),
+                ("COOP_UNSAFE_ALLOW_PUBLIC_DEV", "true"),
+            ]),
+            false,
+        )
+        .expect("the conspicuous public-development override remains available");
+
+        let production_error = Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "0.0.0.0:7300"),
+                ("COOP_API_KEYS", "tenant:short"),
+                ("COOP_SANDBOX", "namespaces"),
+                ("COOP_UNSAFE_ALLOW_PUBLIC_DEV", "true"),
+            ]),
+            true,
+        )
+        .expect_err("the development override must not weaken production key policy");
+        assert!(production_error.contains("too short"), "{production_error}");
+
+        let weak_loopback = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "short-loopback"),
+                ("COOP_SANDBOX", "namespaces"),
+            ]),
+            false,
+        )
+        .unwrap();
+        let public: std::net::SocketAddr = "203.0.113.10:7300".parse().unwrap();
+        let error = weak_loopback
+            .validate_bound_listener_security(public, coop_exec::SandboxMode::Namespaces)
+            .expect_err("actual non-loopback binding must revalidate an embedder's config");
+        assert!(error.contains("unsafe development credential"), "{error}");
+
+        let hostname_error = Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "localhost:7300"),
+                ("COOP_API_KEYS", "short-hostname"),
+                ("COOP_SANDBOX", "namespaces"),
+            ]),
+            false,
+        )
+        .expect_err("unresolved hostnames retain the existing fail-closed policy");
+        assert!(
+            hostname_error.contains("shorter than 16"),
+            "{hostname_error}"
+        );
+    }
+
+    #[test]
+    fn configured_resource_ceilings_are_coherent_and_clamp_memory() {
+        let cfg = Config::from_sources(
+            &source(&[
+                ("COOP_MAX_JOB_MEM_MB", "512"),
+                ("COOP_MEMORY_BUDGET_MB", "1024"),
+                ("COOP_STORAGE_TENANT_MB", "128"),
+                ("COOP_STORAGE_GLOBAL_MB", "256"),
+            ]),
+            false,
+        )
+        .unwrap();
+        let limits = coop_types::Limits {
+            mem_mb: 4096,
+            ..coop_types::Limits::default()
+        };
+        assert_eq!(cfg.clamp_limits(limits).mem_mb, 512);
+
+        let error = Config::from_sources(
+            &source(&[
+                ("COOP_MAX_JOB_MEM_MB", "2048"),
+                ("COOP_MEMORY_BUDGET_MB", "1024"),
+            ]),
+            false,
+        )
+        .expect_err("one job cannot exceed aggregate memory");
+        assert!(error.contains("must not exceed"), "{error}");
     }
 }

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/coop-attestation",
     "crates/coop-types",
     "crates/coop-store",
     "crates/coop-exec",
@@ -8,16 +9,17 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.98"
 license = "MIT"
 repository = "https://github.com/sambai-dev/coop"
 
 [workspace.dependencies]
-coop-types = { path = "crates/coop-types", version = "0.3.0" }
-coop-store = { path = "crates/coop-store", version = "0.3.0" }
-coop-exec = { path = "crates/coop-exec", version = "0.3.0" }
+coop-types = { path = "crates/coop-types", version = "0.4.0" }
+coop-store = { path = "crates/coop-store", version = "0.4.0" }
+coop-exec = { path = "crates/coop-exec", version = "0.4.0" }
+coop-attestation = { path = "crates/coop-attestation", version = "0.4.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -28,12 +30,25 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["trace", "cors"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 utoipa = { version = "5", features = ["axum_extras"] }
 uuid = { version = "1", features = ["v7"] }
 futures-util = "0.3"
 dashmap = "6"
 sha2 = "0.10"
+base64 = "0.22.1"
+clap = { version = "4.5.48", features = ["derive"] }
+ed25519-dalek = { version = "2.2.0", features = ["pem", "pkcs8", "rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+pkcs8 = { version = "0.10.2", features = ["pem"] }
+thiserror = "2"
+zeroize = "1.8"
+rustix = { version = "1.1", features = ["process"] }
+libc = "0.2"
+hmac = "0.12"
+subtle = "2"
+jsonwebtoken = { version = "9.3.1", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 
 [profile.release]
 lto = "thin"

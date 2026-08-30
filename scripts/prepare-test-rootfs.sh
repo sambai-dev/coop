@@ -11,11 +11,14 @@ fi
 
 rootfs="${COOP_ROOTFS:-/opt/coop/rootfs}"
 helper_source="${1:-target/debug/coop-sandbox-init}"
+oci_init_source="${2:-target/debug/coop-oci-init}"
 helper_target="${COOP_SANDBOX_HELPER:-/usr/local/bin/coop-sandbox-init}"
 
 if [[ "$rootfs" != "/opt/coop/rootfs" ]]; then
-  echo "refusing unexpected test rootfs path: $rootfs" >&2
-  exit 1
+  if [[ "${COOP_TEST_ROOTFS_ALLOW_CUSTOM:-}" != "true" || ! "$rootfs" =~ ^/opt/coop-gvisor-test-[a-zA-Z0-9_-]+/rootfs$ ]]; then
+    echo "refusing unexpected test rootfs path: $rootfs" >&2
+    exit 1
+  fi
 fi
 if [[ -e "$rootfs" ]]; then
   echo "refusing to reuse existing test rootfs: $rootfs" >&2
@@ -25,9 +28,15 @@ if [[ ! -x "$helper_source" ]]; then
   echo "sandbox helper was not built: $helper_source" >&2
   exit 1
 fi
+if [[ ! -x "$oci_init_source" ]]; then
+  echo "gVisor OCI init was not built: $oci_init_source" >&2
+  exit 1
+fi
 
 install -o root -g root -m 0755 "$helper_source" "$helper_target"
 install -d -o root -g root -m 0755 "$rootfs" "$rootfs/usr" "$rootfs/etc"
+install -d -o root -g root -m 0755 "$rootfs/usr/local" "$rootfs/usr/local/bin"
+install -o root -g root -m 0755 "$oci_init_source" "$rootfs/usr/local/bin/coop-oci-init"
 
 # Debian's merged-/usr links preserve the interpreter paths used outside and
 # inside the pivot. Copy distribution runtimes/libraries, but not /usr/local.
@@ -66,6 +75,7 @@ install -d -o root -g root -m 0755 \
   "$rootfs/.pivot_old" \
   "$rootfs/proc" \
   "$rootfs/dev" \
+  "$rootfs/sys" \
   "$rootfs/work" \
   "$rootfs/var"
 install -d -o root -g root -m 1777 "$rootfs/tmp" "$rootfs/var/tmp"
@@ -75,3 +85,6 @@ test -x "$rootfs/usr/bin/python3"
 test -x "$rootfs/usr/bin/node"
 test -x "$rootfs/usr/bin/bash"
 test -z "$(find "$rootfs/.pivot_old" -mindepth 1 -print -quit)"
+
+python3 "$(dirname "$0")/build-rootfs-manifest.py" "$rootfs" >/dev/null
+chown root:root "$rootfs/.coop-rootfs.manifest"

@@ -10,6 +10,8 @@ LLM ⇄ Hermes / OpenClaw / another MCP host ⇄ coop-mcp ⇄ Coop
 ```
 
 The Python SDK package installs a dependency-free `coop-mcp` stdio server.
+It serves stateless MCP 2026 discovery and opt-in Tasks alongside the legacy
+initialize flow, with bounded concurrent requests and cancellation.
 Follow the runnable templates and operator-policy guidance in
 [`integrations/`](../integrations/README.md).
 
@@ -46,11 +48,30 @@ policy; Coop can only govern jobs that reach its API.
 
 ## Failure semantics
 
-`coop_run_code` submits once and never transparently retries submission. If its
-wait budget expires, it returns `complete: false` with the durable `job_id`.
-Call `coop_job_result` or `coop_cancel_job` with that ID. Transport failures
-during submission remain ambiguous because the server may have committed the
-job before the connection failed.
+`coop_run_code` gives every submission a UUID idempotency key and permits one
+ambiguous HTTP retry with that key. If both submission acknowledgements are
+lost, the running adapter retains the key for ten minutes under an opaque HMAC
+fingerprint of the target tenant, submission policy, and normalized job spec.
+The next matching call reuses the unresolved key; a different tenant, policy,
+code, stdin, language, or limit gets a different key. A valid acknowledged
+`job_id` resolves and removes only that exact entry, so a later intentional
+matching call creates a new job.
+
+The process-local reconciliation table reserves space before submitting, holds
+at most 1,024 active or unresolved operations, and fails a new distinct call
+closed rather than evicting an unexpired ambiguity. A restart or ten-minute
+expiry ends this recovery window, so hosts must not layer unbounded automatic
+retries over `coop_run_code`. Concurrent matching calls that started before an
+ambiguity retain distinct keys; while one unresolved key is actively being
+reconciled, another indistinguishable call fails closed. Wait duration and MCP
+Task response mode do not change the submitted job fingerprint.
+
+If the post-submit wait budget expires, the adapter returns `complete: false`
+with the acknowledged durable `job_id`. Call `coop_job_result` or
+`coop_cancel_job` with that ID. Direct SDK callers can use an `Idempotency-Key`
+(maximum 128 visible ASCII bytes) and explicitly opt into one ambiguous
+transport retry; the same key and canonical job spec then resolve to the
+original job.
 
 Tool results include both MCP structured content and the same JSON serialized
 as text for older hosts. Execution failures such as a nonzero exit, timeout,
@@ -58,14 +79,30 @@ OOM kill, or policy violation are successful tool transport results with a
 terminal Coop status; connection, authentication, validation, and adapter
 policy failures use MCP `isError: true`.
 
+Terminal MCP results also carry `attestation` status metadata from the job
+detail: availability, the bound tenant, key ID, content digests and sizes,
+media type, and the two tenant-scoped download paths. The adapter deliberately
+does not embed the DSSE envelope or result artifact in MCP output, and it does
+not label signatures as verified. A trusted host can download the exact files
+through an SDK, retain
+them with the parent trace, and invoke `coop-verify verify` offline using an
+independently pinned operator public key. Treat the public-key API as discovery,
+not trust bootstrap; a successful verification still requires the host to
+provide its expected tenant and evaluate the authenticated `outcome` and
+`event_chain_complete` fields.
+
 ## Production checklist
 
-- run Coop's namespace backend only on the dedicated Linux x86_64 VM described
-  in [deployment](deployment.md)
+- run a reviewed provider on the dedicated Linux x86_64 VM described in
+  [deployment](deployment.md)
 - use a private or TLS Coop endpoint and an integration-specific tenant key
-- set `COOP_MCP_REQUIRE_ISOLATION=true`
+- set `COOP_MCP_MINIMUM_ISOLATION` to the exact workflow class (the guarded
+  deployment uses `gvisor-application-kernel`); retain the legacy boolean only
+  for an older configuration that intentionally means `linux-shared-kernel`
 - restrict `COOP_MCP_ALLOWED_LANGUAGES` and adapter ceilings
 - set the MCP host timeout above the intended Coop wait budget
 - disable alternate execution tools when Coop is mandatory
 - probe the MCP server, then run a canary through the actual harness
-- retain the job ID in the parent agent trace and inspect its terminal receipt
+- retain the job ID in the parent agent trace and inspect the terminal
+  `isolation_class`, receipt, and attestation metadata; download and verify the
+  exact signed files when portable evidence is required

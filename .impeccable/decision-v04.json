@@ -1,0 +1,133 @@
+{
+  "title": "Choose Coop's new operator console",
+  "question": "Three production-level directions from the current flow and Mobbin research. Choose the one Coop should become.",
+  "options": [
+    {
+      "id": "assigned",
+      "label": "Execution Dossier",
+      "kicker": "THE ROLL",
+      "lineage": "official run records, evidence folios, and modern platform inspectors",
+      "thesis": "Every run becomes one legible dossier from queued request to portable proof.",
+      "palette": ["#fbfcfe", "#182235", "#155eef", "#16845b", "#c0362c"],
+      "materials": ["paper-bright workspace", "fine ledger rules", "ink-black output well"],
+      "viewport": "A run ledger, selected execution, and permanent proof folio share one calm three-part workspace.",
+      "risk": "The right folio must collapse cleanly on smaller laptops or the center can feel compressed.",
+      "raised": [
+        {"from": "night-flight six-pack", "raise": "The run, lifecycle, and proof folio now form one fixed cross-check sweep."},
+        {"from": "jet-age ticket wallet", "raise": "Cancelled and failed evidence remains visible instead of disappearing."},
+        {"from": "mecha crisis wall", "raise": "Amber and red are reserved for genuine caution and failure."},
+        {"from": "cloud quarry", "raise": "The transition from live run to sealed proof becomes Coop's signature moment."}
+      ],
+      "comp": ".impeccable/mocks/decision/execution-dossier.png"
+    },
+    {
+      "id": "model-pick",
+      "label": "Three-Pane Operations Desk",
+      "kicker": "IMPECCABLE’S PICK",
+      "lineage": "Databricks run detail, Snowflake workspaces, and Hume job records",
+      "thesis": "A dense queue, output-first workspace, and pinned evidence inspector make every operator action immediate.",
+      "palette": ["#ffffff", "#172033", "#1f5eff", "#17845c", "#e49b19"],
+      "materials": ["cool-white application plane", "true table rows", "near-black log surface"],
+      "viewport": "A 300px queue, broad execution workspace, and 300px boundary inspector fill the frame edge to edge.",
+      "risk": "It is the most familiar platform pattern and therefore the least ownable without excellent evidence details.",
+      "comp": ".impeccable/mocks/decision/operations-desk.png"
+    },
+    {
+      "id": "challenger-night-flight",
+      "label": "Night Flight Six-Pack",
+      "verdict": "declined",
+      "lineage": "small-aircraft instrument cross-check",
+      "thesis": "Six fixed truths give the operator a practiced scan path through a run.",
+      "palette": ["#090b0d", "#f4f5f2", "#69d398", "#e6a33d", "#da4d47"],
+      "materials": ["matte instrument panel", "luminous markings"],
+      "viewport": "A fixed constellation of run, policy, output, and evidence instruments.",
+      "case": "Operator identification holds, but round gauges misrepresent event-ledger and evidence data.",
+      "kept": "Fixed cross-check reading order.",
+      "risk": "It would repeat the dark technical costume the redesign is meant to leave behind.",
+      "hero": "https://impeccable.style/worlds/cards/signals-instruments-night-flight-six-pack-hero.webp"
+    },
+    {
+      "id": "challenger-ticket-wallet",
+      "label": "Jet-Age Ticket Wallet",
+      "verdict": "declined",
+      "lineage": "carbon-copy coupons, baggage tags, and route manifests",
+      "thesis": "A run tears through requested, active, and sealed evidence coupons without losing history.",
+      "palette": ["#ffffff", "#172c55", "#b62635", "#554273"],
+      "materials": ["crisp coupon stock", "carbon-copy numerals"],
+      "viewport": "The selected run unfolds as a sequence of retained operational coupons.",
+      "case": "Durable state maps well, but the paper metaphor slows routine monitoring.",
+      "kept": "Nothing disappears when cancelled; it is visibly voided.",
+      "risk": "Literal ephemera would turn proof into decoration.",
+      "hero": "https://impeccable.style/worlds/cards/vernacular-ephemera-jet-age-ticket-wallet-hero.webp"
+    },
+    {
+      "id": "challenger-cracktro",
+      "label": "Cracktro Queue",
+      "verdict": "declined",
+      "lineage": "bitmap scrollers and depth-ranked work queues",
+      "thesis": "Brightness and depth pull exactly one run to the foreground.",
+      "palette": ["#050607", "#f4f2e8", "#e2a94b", "#777b7e"],
+      "materials": ["emissive black", "drifting neutral dust"],
+      "viewport": "Unboxed queue layers advance and recede around one bright selected run.",
+      "case": "Foreground rank is clear, but the form recreates terminal cosplay.",
+      "kept": "One unmistakable foreground task.",
+      "risk": "It would look deliberately retro instead of operationally current.",
+      "hero": "https://impeccable.style/worlds/cards/operate-c-cracktro-scroller-queue-hero.webp"
+    },
+    {
+      "id": "challenger-miura",
+      "label": "Miura Evidence Sheet",
+      "verdict": "declined",
+      "lineage": "linked aerospace deployment diagrams",
+      "thesis": "Requested policy unfolds into observed controls and proof through one coupled geometry.",
+      "palette": ["#fbfbf8", "#25282b", "#c5a858", "#bdd9ea"],
+      "materials": ["matte spec sheet", "scored crease graph"],
+      "viewport": "One linked field expands from request through execution to evidence.",
+      "case": "Causality is strong, but folding geometry obscures familiar controls.",
+      "kept": "Linked fields should reveal policy-to-evidence causality.",
+      "risk": "The diagram would become the product instead of serving the work.",
+      "hero": "https://impeccable.style/worlds/cards/paper-folds-pleats-deployable-miura-orbit-sheet-hero.webp"
+    },
+    {
+      "id": "challenger-mecha",
+      "label": "Crisis Wall",
+      "verdict": "declined",
+      "lineage": "nineties mecha-anime command displays",
+      "thesis": "Conditions and limits announce themselves with absolute visual force.",
+      "palette": ["#000000", "#f47b20", "#97e82f", "#df2c2c"],
+      "materials": ["phosphor display", "hazard bands"],
+      "viewport": "A severe framed wall of execution conditions and counters.",
+      "case": "The alarms are clear, but constant crisis language destroys trust calibration.",
+      "kept": "Reserve alarm colors for real exceptions.",
+      "risk": "Every normal run would look like an emergency.",
+      "hero": "https://impeccable.style/worlds/cards/pop-culture-shelf-anime-command-center-hero.webp"
+    },
+    {
+      "id": "challenger-cloud",
+      "label": "Cloud Quarry",
+      "verdict": "declined",
+      "lineage": "constructive surreal weather systems",
+      "thesis": "A run is cut from policy, worked live, and sealed into a durable block of evidence.",
+      "palette": ["#f7f8f8", "#1597d4", "#535c64", "#c2c8cc"],
+      "materials": ["cumulus mass", "silver cut line"],
+      "viewport": "Execution moves through stacked white blocks with deep blue evidence gaps.",
+      "case": "The material is memorable, but it does not identify the operator audience or familiar task.",
+      "kept": "Create one memorable product-specific transition.",
+      "risk": "It would sacrifice daily usability for visual novelty.",
+      "hero": "https://impeccable.style/worlds/cards/dream-surreal-impossible-worlds-cloud-quarry-hero.webp"
+    }
+  ],
+  "reroll": {"registers": ["safer", "bolder"]},
+  "buildPath": {"value": "comp", "toggle": true},
+  "canon": true,
+  "canonCard": {
+    "label": "Canonical Platform Console",
+    "thesis": "A familiar enterprise run table and detail drawer, executed at current platform quality.",
+    "palette": ["#ffffff", "#1d2738", "#2563eb", "#16845b"],
+    "materials": ["mist-gray app shell", "fine table rules", "drawer elevation"],
+    "viewport": "A factual navigation rail, run table, and selected-run drawer use the arrangement operators already expect.",
+    "risk": "It is intentionally indistinguishable from neighboring developer platforms.",
+    "comp": ".impeccable/mocks/decision/canonical-console.png"
+  },
+  "steer": true
+}

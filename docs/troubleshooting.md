@@ -5,6 +5,12 @@
 Read the first error line; startup checks are intentionally fail closed.
 
 - `COOP_API_KEYS`: use `tenant:key`, a nonblank tenant, and a random key of at least the enforced minimum length.
+- attestation rejected: production needs an absolute owner-only canonical
+  Ed25519 PKCS#8 `COOP_ATTESTATION_KEY_FILE`, unless
+  `COOP_ATTESTATION_MODE=off` was an explicit unsigned-evidence decision.
+- gVisor rejected: verify the absolute `runsc` version/SHA-256, executable
+  ownership, `vm.max_map_count`, rootfs manifest, its configured SHA-256, and
+  matching `coop-oci-init` before retrying.
 - namespace unavailable: confirm x86_64 Linux 5.14+, effective UID 0, unified cgroup v2, `cgroup.kill`, recursive `mount_setattr`, and a writable delegated cgroup subtree. The current backend does not support non-root delegation; macOS, Windows, and non-x86_64 Linux are unsupported for containment.
 - helper rejected: install `coop-sandbox-init` from the exact same build as `coop`, set `COOP_SANDBOX_HELPER`, and keep it root-owned/non-writable by jobs.
 - rootfs rejected: set `COOP_ROOTFS` to a dedicated absolute directory; never `/`, the jobs root, or a symlink.
@@ -12,6 +18,14 @@ Read the first error line; startup checks are intentionally fail closed.
 - database/instance lock rejected: use one dedicated regular `COOP_DB` file. Symlinks and hard-linked SQLite aliases are intentionally unsupported, and a second Coop process cannot own the same database.
 - seccomp rejected: production does not permit `COOP_SECCOMP=off`.
 - subprocess rejected: do not use it for untrusted work; the explicit acknowledgement is `COOP_UNSAFE_ALLOW_NAIVE=true`.
+
+For Compose, do not point the server directly at the host-owned private key or
+`runsc`. File-backed secrets and bind mounts preserve the host UID, while the
+production readers require root-owned in-container files. The supplied image
+entrypoint stages both inputs into root-owned tmpfs paths and the bootstrap
+validates that mapping through the exact built image. If the staging preflight
+fails under rootless Docker or `userns-remap`, use the supported rootful
+dedicated-VM posture; do not loosen file modes or ownership checks.
 
 ## `/healthz` is green but jobs fail
 
@@ -21,7 +35,11 @@ An interpreter override must be meaningful both to the outer launcher and after 
 
 ## `503` on submit
 
-The admission queue or worker service is unavailable. Back off with jitter and inspect queue pressure, worker health, tenant concurrency, and long-running jobs. Increasing workers without increasing host capacity can make isolation and SQLite contention worse.
+The admission queue, global response/body capacity, storage service, or worker
+service is unavailable. Back off with jitter and inspect the structured error
+code, tenant/global queue leases, weighted memory, logical storage, disk
+reserve, worker health, and long-running jobs. Increasing workers without host
+capacity can make isolation and SQLite contention worse.
 
 ## `429` during wait or benchmark
 
@@ -37,7 +55,32 @@ Truncation protects server memory and storage. Read the receipt's observed byte 
 
 ## Jobs cannot access the network
 
-This is expected in the supported Linux x86_64 namespace backend. `allow_network: true` is not supported. Move required fetching into a trusted adapter, validate the data, and pass bounded input to the job. If status reports `networking: "host"`, the server is using the unisolated development subprocess backend; it has host egress and must not run untrusted code.
+This is expected in the Linux x86_64 gVisor and namespace providers.
+`allow_network: true` is not supported. Move required fetching into a trusted
+adapter, validate the data, and pass bounded input to the job. If status reports
+`networking: "host"`, the server is using the unisolated development subprocess
+and must not run untrusted code.
+
+## Terminal job has no signed attestation
+
+Signing is durable but asynchronous. Retry job detail briefly and require
+`attestation.available: true` before downloading. If it stays false, inspect
+attestation retry/key/storage warnings and the signer capability. Do not call
+an unavailable envelope “verified.” `COOP_ATTESTATION_MODE=off` intentionally
+produces no signature; after enabling a key, only retained terminal jobs can be
+backfilled. Preserve historical public keys when rotating.
+
+## Production verification rejects the attestation
+
+`scripts/verify-production.py` requires an absolute
+`COOP_VERIFY_PUBLIC_KEY_FILE` obtained independently of the server. For the
+Compose bootstrap, use `.coop-runtime/attestation-public-key.pem` and set
+`COOP_VERIFY_CONTAINER_IMAGE` to the immutable built image ID. For a binary
+installation, set `COOP_VERIFY_BIN` to the packaged verifier. A missing pin,
+nonzero verifier exit, wrong key, modified envelope/result byte, unexpected
+subject, or incomplete authenticated event chain fails the gate. Do not fix a
+failure by downloading `/v1/attestation/public-key` from the deployment being
+checked; that endpoint is discovery material, not a trust anchor.
 
 ## SQLite is busy or disk is full
 

@@ -4,13 +4,13 @@ The OpenAPI document at `/openapi.json` is the machine-readable HTTP contract. T
 
 ## Authentication
 
-Send a bearer key on every `/v1/*` request except a WebSocket upgrade authenticated with the one-use stream ticket described below:
+Send a bearer credential on every `/v1/*` request except a WebSocket upgrade authenticated with the one-use stream ticket described below:
 
 ```http
 Authorization: Bearer TENANT_KEY
 ```
 
-The key maps to exactly one tenant. Job identifiers are not authorization tokens; access is always checked against the authenticated tenant. `/healthz`, `/readyz`, `/openapi.json`, and the dashboard shell are public by design, so do not put secrets in those responses.
+Indexed credentials and RFC 9068 JWTs resolve a principal, tenant, scopes, and authority lifetime; legacy keys map to one tenant with the complete compatibility scope set. Job identifiers are not authorization tokens. Job reads, cancellation, streams, result artifacts, and attestations always check tenant ownership, while route-specific middleware enforces `jobs:submit`, `jobs:read`, `jobs:cancel`, `service:read`, or `metrics:read`. Invalid credentials use RFC 6750 challenges. `/healthz`, `/readyz`, `/openapi.json`, and the dashboard shell are public by design, so do not put secrets in those responses.
 
 Coop uses plain HTTP/1.1. Put it behind a TLS proxy for any connection that leaves the local host or a private encrypted network; the proxy may serve HTTP/2 or HTTP/3 to clients while using HTTP/1.1 on the private Coop hop.
 
@@ -23,6 +23,9 @@ Coop uses plain HTTP/1.1. Put it behind a TLS proxy for any connection that leav
   "language": "python",
   "code": "print('hello')",
   "stdin": "optional input\n",
+  "requirements": {
+    "minimum_isolation": "linux-shared-kernel"
+  },
   "limits": {
     "wall_seconds": 15,
     "cpu_seconds": 10,
@@ -34,20 +37,37 @@ Coop uses plain HTTP/1.1. Put it behind a TLS proxy for any connection that leav
 }
 ```
 
-The namespace deployment supports `python`, `node`, and `bash` after its full
-rootfs startup preflight succeeds. Development mode probes each configured host
+The gVisor and namespace providers support `python`, `node`, and `bash` after
+their full rootfs/runtime startup preflight succeeds. Development mode probes each configured host
 runtime once at startup and advertises only the languages that pass the exact
 sanitized-environment canary in `GET /v1/capabilities`. Submitting a known but
 unavailable runtime returns `422 runtime_unavailable`; an unknown language
 returns `400 unsupported_language`. Omitted limits receive defaults and all
 client values are clamped to server ceilings. `allow_network: true` is rejected
-rather than granting egress. Namespace execution reports
+rather than granting egress. Isolated execution reports
 `networking: "disabled"`; a ready development subprocess truthfully reports
 its retained host networking as `networking: "host"`.
 
+`requirements.minimum_isolation` is checked atomically before a job is
+persisted and again before execution. The process-provider order is
+`none < linux-shared-kernel < gvisor-application-kernel < hardware-vm <
+confidential-vm`; a stronger observed class satisfies a weaker minimum. The
+`wasm-capability` class is a separate branch and satisfies only itself (or a
+minimum of `none`). An unsatisfied minimum returns
+`422 minimum_isolation_unsatisfied` without creating a job.
+
 Source and stdin are each capped at 1 MiB after JSON decoding. The encoded request body is capped at 16 MiB so worst-case valid JSON escaping still fits without allowing unbounded buffering. Body reads have a 30-second deadline and global/per-tenant active-read caps; capacity failures are structured retryable `429`/`503` responses. Stored/emitted stdout and stderr are independently capped at 1 MiB and 10,000 records, with any single record split at 16 KiB. The executor continues draining after the storage cap so a noisy child cannot block supervision; the event history and receipt record truncation and observed byte counts.
 
-A successful submission returns `201 Created` with the job ID, initial status, and relative stream/history URLs. Queue or global lifetime-capacity saturation returns `503`; tenant lifetime saturation returns `429`. Callers should honor `Retry-After` and use bounded exponential backoff with jitter rather than retrying immediately.
+A successful submission returns `201 Created` with the job ID, initial status,
+relative stream/history URLs, `Location: /v1/jobs/{id}`, and an
+`Idempotency-Replayed` response header. For safe reconciliation after an
+ambiguous transport failure, send exactly one `Idempotency-Key` containing
+1–128 visible ASCII bytes. Reusing that tenant-scoped key with the same
+canonical job spec returns the original job and `Idempotency-Replayed: true`;
+reusing it for a different spec returns `422 idempotency_key_reused`. Queue or
+global lifetime-capacity saturation returns `503`; tenant lifetime saturation
+returns `429`. Callers should honor `Retry-After` and use bounded exponential
+backoff with jitter rather than retrying immediately.
 
 ## Status and cancellation
 
@@ -56,7 +76,7 @@ spec, execution policy, and (once terminal) receipt plus `receipt_sha256`.
 `requested_spec` remains the complete clamped-input record. Compare a non-null
 `effective_spec`—not the request—to understand what the selected backend
 actually enforced. Its `EffectiveLimits` members are individually nullable:
-the namespace backend sets all five resource controls after successful
+the gVisor and namespace providers set all five resource controls after successful
 bootstrap, while the development subprocess sets only `wall_seconds`; its
 CPU, memory, process, and file values are `null`. `limit_enforcement` carries
 the corresponding explicit booleans.
@@ -77,7 +97,11 @@ are:
 - `cancelled`
 - `error`
 
-`DELETE /v1/jobs/{id}` requests cancellation. Cancellation is cooperative at the scheduler boundary and forceful at the executor boundary. Once terminal, a job does not return to a running state.
+`DELETE /v1/jobs/{id}` requests cancellation. It is idempotent and returns the
+current job projection plus `cancellation_requested` and `already_terminal`;
+repeating it for an already-terminal job remains `200`. Cancellation is
+cooperative at the scheduler boundary and forceful at the executor boundary.
+Once terminal, a job does not return to a running state.
 
 ## Waiting for a result
 
@@ -100,7 +124,7 @@ Do not poll job status in a short loop. It creates unnecessary SQLite load and c
 
 Detail, replay, and folded-result JSON use a capacity-one 64 KiB response pump under global/per-tenant lifetime admission. The response body owns that admission permit and the serialized buffer until EOF or connection teardown, so progressing clients receive the complete declared JSON even at low bandwidth. Every accepted connection has a 30-second write-progress deadline: if Hyper is trying to write response bytes and the socket accepts no bytes for that entire interval, the server closes the connection, drops the body, and reclaims its capacity. A positive socket write resets that deadline; the independent 10-minute absolute connection lifetime remains the outer bound.
 
-The transport admits at most 256 connections, gives every HTTP/1 request head a total 30 seconds (including silent and partial-preface peers), and closes every connection after an absolute 10 minutes. These are compiled v0.2 safety invariants and are logged at startup. The connection permit and absolute deadline move into an upgraded WebSocket; idle reads do not arm the write-progress timer, but the absolute lifetime still requires cursor-based reconnect. The request-head timer ends before a handler, `/result` wait, response transfer, or WebSocket session begins. Graceful shutdown first lets those upgraded sockets close normally; if the bounded HTTP drain expires, dropping the server force-closes guarded socket I/O and reclaims the global permit.
+The transport admits at most 256 connections, gives every HTTP/1 request head a total 30 seconds (including silent and partial-preface peers), and closes every connection after an absolute 10 minutes. These are compiled transport safety invariants and are logged at startup. The connection permit and absolute deadline move into an upgraded WebSocket; idle reads do not arm the write-progress timer, but the absolute lifetime still requires cursor-based reconnect. The request-head timer ends before a handler, `/result` wait, response transfer, or WebSocket session begins. Graceful shutdown first lets those upgraded sockets close normally; if the bounded HTTP drain expires, dropping the server force-closes guarded socket I/O and reclaims the global permit.
 
 A response cut short by a transport boundary does not satisfy its declared `Content-Length`; clients must reject it as incomplete JSON. Detail, result, and replay are idempotent reads and may be retried with backoff from durable state. For replay, advance `after` only after a complete page has decoded and been accepted, then resume from that page's `next_cursor`; never advance a cursor from a truncated response. Do not apply this rule blindly to `POST /v1/jobs`: a submission transport failure does not prove that the durable job was not accepted. Prefer replay pagination when consuming a large event history.
 
@@ -112,7 +136,7 @@ Common event kinds include lifecycle transitions, `stdout`, `stderr`, `violation
 
 ### Receipts and hash chains
 
-Every new v0.2 event carries `hash_version: 1`, `prev_hash`, and `event_hash`. The event digest covers a versioned domain separator, job ID, previous hash, sequence, timestamp, kind, and canonical JSON data. A migrated v0.1 event uses `hash_version: 0`; it is preserved but explicitly unverifiable.
+Every newly written event carries `hash_version: 1`, `prev_hash`, and `event_hash`. The event digest covers a versioned domain separator, job ID, previous hash, sequence, timestamp, kind, and canonical JSON data. A migrated v0.1 event uses `hash_version: 0`; it is preserved but explicitly unverifiable.
 
 The terminal receipt records code/stdin/policy hashes, requested and effective
 limits, backend/seccomp/network posture, private-rootfs and dedicated-bootstrap
@@ -132,13 +156,69 @@ When executor telemetry survived, the optional top-level `executor_output` keeps
 
 If startup recovery finds a job that was running when the server stopped, it emits a minimal terminal receipt with `terminal_reason: "server_restarted"`, outcome/timing fields, the event-chain summary, and the receipt digest. Execution-only evidence such as effective limits, runtime posture, output hashes, and resource observations is unavailable for that interrupted run; clients must treat those members as optional rather than inventing zero values.
 
-`event_chain.complete` means the terminal transaction saw no legacy rows and the count of v1 hashed rows equalled the stored event count. It is not an on-read cryptographic verification result; an auditor must still recompute every event link. `receipt_sha256` is SHA-256 over the canonical receipt JSON with that member removed. These values detect changes relative to the retained record, but they are not signatures or external attestations; a database administrator can rewrite values and recompute them.
+`event_chain.complete` means the terminal transaction saw no legacy rows and the count of v1 hashed rows equalled the stored event count. It is not an on-read cryptographic verification result; an auditor must still recompute every event link. `receipt_sha256` is SHA-256 over the canonical receipt JSON with that member removed. These hashes are not signatures on their own; signed evidence is the separate convergent record below.
+
+### Signed attestations and result artifacts
+
+Schema v4 commits an attestation-outbox row atomically with every terminal
+receipt. A bounded control-plane worker then builds a deterministic result
+artifact, signs an in-toto Statement/v1 inside an exact-byte DSSE envelope with
+Ed25519, self-verifies it, and conditionally persists it only if the receipt
+bytes still match. Signing is therefore crash-convergent rather than falsely
+described as atomic: immediately after terminalization, `attestation.available`
+may be `false`; clients that require a signature must wait boundedly.
+
+`GET /v1/jobs/{id}` includes:
+
+```json
+{
+  "attestation": {
+    "available": true,
+    "tenant": "TENANT_ID",
+    "key_id": "sha256:…",
+    "receipt_sha256": "…",
+    "result_media_type": "application/vnd.coop.execution-result.v1+json",
+    "result_sha256": "…",
+    "result_size_bytes": 321,
+    "envelope_sha256": "…",
+    "envelope_size_bytes": 2048,
+    "envelope_url": "/v1/jobs/JOB_ID/attestation",
+    "result_artifact_url": "/v1/jobs/JOB_ID/result-artifact"
+  }
+}
+```
+
+`attestation.tenant` is the tenant claim bound into the persisted evidence; it
+is null while evidence is unavailable. The two authenticated download routes
+return the **exact stored bytes**, with
+their media type, `Content-Length`, and `X-Content-Sha256`. The result artifact
+is canonical JSON containing `_type`, `schema_version: 1`, authoritative
+`tenant`, lifecycle/outcome, receipt digest, folded stdout/stderr, truncation,
+and violations. The signed predicate carries the same tenant. Existing v0.3
+receipts remain embedded unchanged and may omit tenant; backfill obtains it
+from the durable job row instead. The result artifact is capped
+at 16 MiB; the DSSE envelope is capped at 2 MiB. These records share the same
+tenant authorization and large-response lifetime limits as job detail.
+On upgrade, pre-fix persisted files that do not carry the same tenant/job/
+receipt/digest links are removed from availability and requeued; job detail
+never synthesizes a tenant claim for those stale bytes.
+
+`GET /v1/attestation/public-key` returns the current canonical SPKI PEM and
+key ID when signing is enabled. Its `trust_notice` is part of the contract:
+the unauthenticated DSSE `keyid` hint and a key fetched from the signer are not
+independent trust anchors. Pin or distribute the public key out of band, retain
+old keys across rotation, and verify the envelope plus exact result with
+`coop-verify --tenant EXPECTED_TENANT`. Verification proves possession of that
+key and profile integrity;
+it does not prove trusted hardware, deterministic execution, or semantic truth.
+`COOP_ATTESTATION_MODE=off` is an explicit production policy that produces no
+signatures.
 
 ## WebSocket stream
 
 First send an authenticated `POST /v1/jobs/{id}/stream-ticket`. It returns a short-lived, one-use, job-bound ticket and stream URL. Open that URL with `ws://` (or `wss://` behind TLS). The server consumes the ticket before active-stream admission, sends persisted history first, then live events, and finishes after the terminal event. A `429`/`503` capacity rejection therefore requires minting a new ticket after `Retry-After`. Reconnect by minting a new ticket and continue from the last sequence; deduplicate by job ID and sequence number.
 
-Browser WebSocket APIs cannot set an `Authorization` header. Stream tickets exist so the long-lived API key never needs to enter a WebSocket URL. The bundled clients disable their v0.1 API-key query fallback by default; enabling it requires an explicit opt-in and should be limited to a trusted legacy server because URLs leak into history, logs, and proxy telemetry. Structured v0.2 errors never trigger the fallback.
+Browser WebSocket APIs cannot set an `Authorization` header. Stream tickets exist so the long-lived API key never needs to enter a WebSocket URL. The bundled clients disable their v0.1 API-key query fallback by default; enabling it requires an explicit opt-in and should be limited to a trusted legacy server because URLs leak into history, logs, and proxy telemetry. Structured Coop errors never trigger the fallback.
 
 Clients must handle:
 
@@ -152,7 +232,17 @@ Clients must handle:
 
 `GET /v1/jobs?limit=N&cursor=CURSOR&status=STATUS&language=LANGUAGE` returns `{items,next_cursor}` for the authenticated tenant. Cursors are opaque; pass them through unchanged.
 
-`GET /v1/capabilities` describes supported languages, limits, and server features. `GET /v1/whoami` resolves the authenticated tenant. `GET /v1/metrics` is an operator surface; keep it private and do not assume its values are tenant-billing counters. `/healthz` is liveness and `/readyz` checks process/store readiness. Use authenticated `/v1/status` plus an actual canary job to verify containment.
+`GET /v1/capabilities` describes supported languages, the provider's
+`isolation_class`, per-job ceilings, the aggregate `concurrent_mem_mb_max`, and
+server features, including signer metadata when enabled. `GET /v1/whoami`
+resolves the authenticated tenant, principal, credential/auth method, scopes,
+and authority expiry. `GET /v1/metrics` exposes tenant-scoped current-job
+metrics. The separate global `/metrics` endpoint is disabled unless
+`COOP_METRICS_TOKEN` is configured and never accepts a tenant credential; it
+uses fixed-cardinality labels and OpenMetrics negotiation. Neither surface is
+a billing ledger. `/healthz` is liveness and `/readyz` checks cached
+process/store readiness. Use authenticated `/v1/status`, signer capabilities,
+and an actual minimum-isolation plus signed-result canary before traffic.
 
 ## Errors and rate limits
 
@@ -175,8 +265,11 @@ Treat HTTP status codes and error codes as authoritative. In particular:
 - `401` missing/invalid key
 - `404` missing job or foreign-tenant job
 - `409` invalid lifecycle operation
-- `422` a supported language whose configured runtime failed startup preflight
+- `422` unavailable runtime, unsatisfied minimum isolation, or an idempotency key reused for a different request
 - `429` tenant rate budget or per-tenant body/result-wait/stream/response lifetime capacity exhausted
 - `503` admission queue, bounded request/response lifetime capacity, shutdown, or worker service unavailable
+- `507` filesystem free-space reserve prevents durable admission
 
-Honor `Retry-After` when present. Retry only idempotent reads automatically; a timed-out submission may have been accepted, so production clients should attach their own correlation ID once the API supports idempotency keys.
+Honor `Retry-After` when present. Retry reads automatically only when their
+operation policy allows it. Retry an ambiguously acknowledged submission only
+when it carried an `Idempotency-Key`, and reuse the exact key and job spec.

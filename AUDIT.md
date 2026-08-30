@@ -1,12 +1,49 @@
-# Coop v0.2 security review record
+# Coop security review record
 
 **Review date:** 2026-08-26
 
 **Scope:** Rust workspace, execution boundary, API tenancy, scheduler, SQLite store, dashboard, SDKs, Docker/Compose, CI/release automation, and public documentation
 
-**Status:** historical v0.2 release hardening record; not an external certification. v0.3 adds integration and setup surfaces without changing this execution boundary.
+**Status:** historical v0.2 record plus the v0.4 addendum below; not an external certification.
 
 This file records the security properties reviewed for v0.2 and the evidence expected before release. It deliberately replaces v0.1 claims that overstated host-filesystem isolation, PID-namespace behavior, event-log immutability, and hostile-test coverage.
+
+## v0.4 review addendum — 2026-08-30
+
+The v0.4 work was reviewed in independent repository, runtime/supply-chain,
+identity, observability, SDK/protocol, and adversarial reliability passes. No
+validated P0 remained. The release-blocking P1 findings—global queue capture,
+unbounded retained storage, idempotency handoff races, unsafe embedder listener
+authority, and accounting-integrity laundering—were fixed and covered by
+deterministic concurrency, migration, restart, and raw-SQL regression tests.
+
+The current guarded production contract adds:
+
+- a separate pinned gVisor OCI workload per job, with real ready/execute/cancel/timeout/delete/crash-recovery gates;
+- atomic tenant/global admission, memory, logical-storage, and disk-reserve controls;
+- scoped indexed credentials and strict RFC 9068 JWT validation;
+- executor-observed isolation requirements checked at admission, scheduling, and terminal evidence;
+- schema-v4 signing outbox, deterministic result artifacts, Ed25519 DSSE/in-toto envelopes, exact-byte download digests, and restart backfill;
+- bounded OpenMetrics, request IDs, W3C trace links, and JSON production logs;
+- dual-era MCP, safe idempotent SDK submission, typed cancellation, and live packaged-client tests.
+
+The gVisor gate found one P2 direct-provider input-bound bypass; the provider
+now rejects code/stdin before staging or cloning and the final runtime review
+reported no remaining validated P0/P1/P2. Identity review likewise reported no
+remaining P0/P1/P2 after bounded JWKS-cache and credential-lifetime fixes.
+
+Current residual constraints are explicit:
+
+| ID | Area | Constraint | Required operator response |
+|---|---|---|---|
+| V4-R-001 | Outer control plane | Compose remains host-equivalent even though each job uses runsc | Dedicated x86_64 VM; protect and patch the outer service |
+| V4-R-002 | Runtime class | gVisor is an application-kernel boundary, not a hardware or confidential VM | Do not label it VM/TEE isolation; use a future reviewed provider when that property is required |
+| V4-R-003 | Signed evidence | DSSE proves possession of the configured key, not execution truth; the current key endpoint is not a trust anchor | Pin/distribute public keys out of band; preserve rotation history and external records |
+| V4-R-004 | Signing availability | Signing is durable but eventual; a terminal job can briefly have no envelope | Require `attestation.available`, retry boundedly, and alert on persistent backlog/warnings |
+| V4-R-005 | Key custody | The integrated signer is a local PEM, without KMS/HSM isolation | Store owner-only outside job roots; back up/rotate deliberately; use an external signer in a future release when required |
+| V4-R-006 | Single node | SQLite, queue ownership, quotas, and live fan-out remain one-node | Run one active server per database; no horizontal-scaling claim |
+| V4-R-007 | Network policy | Isolated jobs have no general egress or credential broker | Fetch through trusted adapters and pass bounded inputs |
+| V4-R-008 | Development provider | `off` is the service account's authority and host network | Same-trust local testing only; never hostile tenants |
 
 ## Review outcome
 
@@ -71,19 +108,19 @@ The digest lets the server or an auditor with the canonical fields detect accide
 | API contract | generated/static OpenAPI validation and examples |
 | Packaging | locked Docker build plus image/rootfs canary |
 | Dependencies | RustSec advisory scan of `Cargo.lock` |
-| Release integrity | tag/version check, checksums, SPDX SBOM, GitHub artifact attestation, one atomic publish job |
+| Release integrity | tag/version check, exact asset allowlist, checksums, artifact-scoped SPDX/SBOM attestation, GitHub provenance, one reconciled atomic publish job |
 
 A skipped containment suite is not a passing result. Ordinary `cargo test` runs do not execute ignored hostile tests.
 
 ## Dependency review
 
-The local 2026-08-27 RustSec scan evaluated 185 locked Rust dependencies and reported no known vulnerabilities. That is a point-in-time advisory lookup, not a guarantee; release CI repeats the lockfile scan and dependency updates require normal review.
+The local 2026-08-30 RustSec scan evaluated 296 locked Rust dependencies and reported no known vulnerabilities. That is a point-in-time advisory lookup, not a guarantee; release CI repeats the lockfile scan and dependency updates require normal review.
 
 ## Claims intentionally not made
 
-- VM-grade isolation or protection from kernel exploits
+- hardware-VM, confidential-computing, or protection-from-runtime/kernel-zero-day guarantees
 - deterministic re-execution
-- cryptographic signing, remote attestation, or WORM audit storage
+- signatures as proof of semantic execution truth, remote hardware attestation, transparency anchoring, or WORM audit storage
 - arbitrary network egress with credential safety
 - persistent workspaces or multi-node scheduling
 - production support for macOS, Windows, or non-x86_64 Linux subprocess execution of untrusted code

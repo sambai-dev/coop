@@ -1,10 +1,13 @@
 # Keep this version in sync with rust-toolchain.toml and CI.
-FROM rust:1.89.0-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6 AS build
+FROM rust:1.98.0-slim-bookworm@sha256:af0579d28b9a7ec5251aaafcb0c0a23dcde5c97065112aae0cc3abeda42d5394 AS build
+
+ARG VCS_REF=unknown
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --locked --release -p coop-server -p coop-exec --bins
+RUN COOP_GIT_REVISION="${VCS_REF}" cargo build --locked --release \
+      -p coop-server -p coop-exec -p coop-attestation --bins
 
 # Both the service image and private job rootfs use the same digest-pinned
 # Debian base and immutable package snapshot. Package resolution therefore
@@ -28,6 +31,9 @@ RUN install -d -m 0755 /.pivot_old /proc /dev /work \
     && install -d -m 1777 /tmp \
     && install -d -m 0755 /tmp/home
 
+FROM sandbox-rootfs AS complete-sandbox-rootfs
+COPY --from=build /src/target/release/coop-oci-init /usr/local/bin/coop-oci-init
+
 FROM runtime-base AS runtime
 
 # The namespace bootstrap and seccomp policy are x86_64-only. Refuse to
@@ -35,7 +41,7 @@ FROM runtime-base AS runtime
 # containment boundary.
 RUN test "$(dpkg --print-architecture)" = amd64
 
-ARG VERSION=0.3.0
+ARG VERSION=0.4.0
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="Coop" \
       org.opencontainers.image.description="Audit-first execution gateway for AI agents" \
@@ -47,11 +53,18 @@ LABEL org.opencontainers.image.title="Coop" \
 # Interpreters exist both outside and inside the job rootfs. Jobs pivot into
 # the private /opt/coop/rootfs tree before exec.
 RUN install -d -o root -g root -m 0700 /data /var/lib/coop/jobs /opt/coop \
+    && install -d -o root -g root -m 0700 \
+      /run/coop-bootstrap /run/coop-runtime /run/coop-secrets \
     && install -d -o root -g root -m 0755 /opt/coop/rootfs
 
-COPY --from=sandbox-rootfs / /opt/coop/rootfs
+COPY --from=complete-sandbox-rootfs / /opt/coop/rootfs
+COPY scripts/build-rootfs-manifest.py /tmp/build-rootfs-manifest.py
+RUN python3 /tmp/build-rootfs-manifest.py /opt/coop/rootfs >/dev/null \
+    && rm /tmp/build-rootfs-manifest.py
 COPY --from=build /src/target/release/coop /usr/local/bin/coop
 COPY --from=build /src/target/release/coop-sandbox-init /usr/local/bin/coop-sandbox-init
+COPY --from=build /src/target/release/coop-verify /usr/local/bin/coop-verify
+COPY --chmod=0755 scripts/container-entrypoint.sh /usr/local/bin/coop-container-entrypoint
 
 ENV COOP_ENV=production \
     COOP_ADDR=0.0.0.0:7300 \
@@ -69,4 +82,5 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7300/readyz', timeout=2).read()"]
 
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["/usr/local/bin/coop"]
+ENTRYPOINT ["/usr/local/bin/coop-container-entrypoint"]
+CMD ["/usr/local/bin/coop"]

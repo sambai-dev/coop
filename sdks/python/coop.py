@@ -8,6 +8,8 @@ fallback.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import http.client
 import json
 import math
@@ -15,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import asdict, dataclass
 from email.utils import parsedate_to_datetime
 from enum import Enum
@@ -28,13 +31,18 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Tuple,
     TypedDict,
     Union,
     cast,
 )
 
 __all__ = [
+    "ArtifactDownload",
+    "AttestationCapabilities",
+    "AttestationPublicKey",
     "Capabilities",
+    "CancellationResponse",
     "Coop",
     "CoopError",
     "CoopEvent",
@@ -44,9 +52,12 @@ __all__ = [
     "ExecutorStreamEvidence",
     "EffectiveJobSpec",
     "EffectiveLimits",
+    "ExecutionRequirements",
     "ExecutionPolicy",
     "HashedCoopEvent",
+    "IsolationClass",
     "Job",
+    "JobAttestationStatus",
     "JobDetail",
     "JobPage",
     "JobResult",
@@ -56,6 +67,7 @@ __all__ = [
     "JobView",
     "Limits",
     "LimitEnforcement",
+    "MinimumIsolation",
     "OutputEvidence",
     "Receipt",
     "ReceiptLimits",
@@ -63,10 +75,12 @@ __all__ = [
     "StoredJobSpec",
     "StoredLimits",
     "SubmitResponse",
+    "SubmitResult",
     "WhoAmI",
+    "isolation_satisfies",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 class JobStatus(str, Enum):
@@ -122,6 +136,43 @@ class _RequiredJobSpec(TypedDict):
 class JobSpec(_RequiredJobSpec, total=False):
     stdin: str
     limits: Dict[str, Union[int, bool]]
+    requirements: "ExecutionRequirements"
+
+
+IsolationClass = Literal[
+    "none",
+    "linux-shared-kernel",
+    "gvisor-application-kernel",
+    "wasm-capability",
+    "hardware-vm",
+    "confidential-vm",
+]
+MinimumIsolation = IsolationClass
+
+
+def isolation_satisfies(observed: IsolationClass, minimum: IsolationClass) -> bool:
+    """Return whether an observed provider class satisfies a requested minimum."""
+
+    if minimum == "none":
+        return True
+    if minimum == "wasm-capability":
+        return observed == "wasm-capability"
+    process_chain = {
+        "none": 0,
+        "linux-shared-kernel": 1,
+        "gvisor-application-kernel": 2,
+        "hardware-vm": 3,
+        "confidential-vm": 4,
+    }
+    if observed == "wasm-capability":
+        return False
+    return process_chain[observed] >= process_chain[minimum]
+
+
+class ExecutionRequirements(TypedDict, total=False):
+    """Atomic admission requirements enforced by a supporting Coop server."""
+
+    minimum_isolation: MinimumIsolation
 
 
 class StoredLimits(TypedDict):
@@ -135,13 +186,17 @@ class StoredLimits(TypedDict):
     allow_network: bool
 
 
-class StoredJobSpec(TypedDict):
+class _RequiredStoredJobSpec(TypedDict):
     """The complete requested spec returned by a job lookup."""
 
     language: str
     code: str
     stdin: Optional[str]
     limits: StoredLimits
+
+
+class StoredJobSpec(_RequiredStoredJobSpec, total=False):
+    requirements: ExecutionRequirements
 
 
 class EffectiveLimits(TypedDict):
@@ -160,6 +215,8 @@ class EffectiveJobSpec(TypedDict):
     code: str
     stdin: Optional[str]
     limits: EffectiveLimits
+    requirements: ExecutionRequirements
+    isolation_class: Optional[IsolationClass]
 
 
 class LimitEnforcement(TypedDict):
@@ -181,6 +238,12 @@ class SubmitResponse(_RequiredSubmitResponse, total=False):
     stream_ticket_url: str
 
 
+class SubmitResult(TypedDict):
+    job: SubmitResponse
+    location: Optional[str]
+    idempotency_replayed: bool
+
+
 class JobView(TypedDict):
     job_id: str
     tenant: str
@@ -192,10 +255,19 @@ class JobView(TypedDict):
     exit_code: Optional[int]
 
 
+class CancellationResponse(TypedDict):
+    """Normalized cancellation acknowledgement across current and legacy servers."""
+
+    job: Optional[JobView]
+    cancellation_requested: bool
+    already_terminal: bool
+
+
 class ExecutionPolicy(TypedDict):
     """Observed policy; fields are unknown for queued or migrated rows."""
 
     sandbox: Optional[str]
+    isolation_class: Optional[IsolationClass]
     bootstrap_ready: Optional[bool]
     isolated: Optional[bool]
     seccomp: Optional[bool]
@@ -204,6 +276,10 @@ class ExecutionPolicy(TypedDict):
     private_rootfs: Optional[bool]
     dedicated_bootstrap: Optional[bool]
     limit_enforcement: Optional[LimitEnforcement]
+    runtime_version: Optional[str]
+    runtime_sha256: Optional[str]
+    rootfs_sha256: Optional[str]
+    config_sha256: Optional[str]
 
 
 class EventChainReceipt(TypedDict):
@@ -280,6 +356,8 @@ class Receipt(_RequiredReceipt, total=False):
     created_at_ms: int
     started_at_ms: Optional[int]
     backend: str
+    minimum_isolation: MinimumIsolation
+    isolation_class: IsolationClass
     bootstrap_ready: bool
     isolated: bool
     seccomp: bool
@@ -287,6 +365,10 @@ class Receipt(_RequiredReceipt, total=False):
     networking: Optional[Literal["disabled", "host"]]
     private_rootfs: bool
     dedicated_bootstrap: bool
+    runtime_version: Optional[str]
+    runtime_sha256: Optional[str]
+    rootfs_sha256: Optional[str]
+    config_sha256: Optional[str]
     evidence_complete: bool
     requested_limits: ReceiptLimits
     effective_limits: EffectiveLimits
@@ -305,6 +387,23 @@ class JobDetail(JobView):
     execution_policy: ExecutionPolicy
     receipt: Optional[Receipt]
     receipt_sha256: Optional[str]
+    attestation: "JobAttestationStatus"
+
+
+class JobAttestationStatus(TypedDict):
+    """Availability, bound tenant, and immutable signed-evidence digests."""
+
+    available: bool
+    tenant: Optional[str]
+    key_id: Optional[str]
+    receipt_sha256: Optional[str]
+    result_media_type: Optional[str]
+    result_sha256: Optional[str]
+    result_size_bytes: Optional[int]
+    envelope_sha256: Optional[str]
+    envelope_size_bytes: Optional[int]
+    envelope_url: Optional[str]
+    result_artifact_url: Optional[str]
 
 
 Job = Union[JobView, JobDetail]
@@ -326,7 +425,7 @@ class CoopEvent(_RequiredCoopEvent, total=False):
 
 
 class HashedCoopEvent(_RequiredCoopEvent):
-    """A v0.2 event after the caller has validated its evidence fields."""
+    """An event after the caller has validated its evidence fields."""
 
     prev_hash: Optional[str]
     event_hash: str
@@ -362,6 +461,7 @@ class StreamTicket(TypedDict):
 
 class ExecutionCapabilities(TypedDict):
     backend: str
+    isolation_class: IsolationClass
     isolated: bool
     private_rootfs: bool
     dedicated_bootstrap: bool
@@ -374,6 +474,7 @@ class LimitCapabilities(TypedDict):
     wall_seconds_max: int
     cpu_seconds_max: int
     mem_mb_max: int
+    concurrent_mem_mb_max: int
     pids_max: int
     file_mb_max: int
     output_lines_max: int
@@ -389,6 +490,15 @@ class FeatureCapabilities(TypedDict):
     event_cursors: bool
     stream_tickets: bool
     receipts: bool
+    signed_attestations: bool
+
+
+class AttestationCapabilities(TypedDict):
+    enabled: bool
+    algorithm: Optional[str]
+    envelope_format: Optional[str]
+    key_id: Optional[str]
+    public_key_url: Optional[str]
 
 
 class Capabilities(TypedDict):
@@ -397,6 +507,27 @@ class Capabilities(TypedDict):
     execution: ExecutionCapabilities
     limits: LimitCapabilities
     features: FeatureCapabilities
+    attestations: AttestationCapabilities
+
+
+class AttestationPublicKey(TypedDict):
+    algorithm: str
+    key_id: str
+    public_key_pem: str
+    trust_notice: str
+
+
+class ArtifactDownload(TypedDict):
+    """Exact response bytes plus validated transport-integrity metadata.
+
+    ``sha256`` is checked against ``X-Content-Sha256``. This does not verify
+    the DSSE signature or establish trust in the server's signing key.
+    """
+
+    content: bytes
+    content_type: str
+    content_length: int
+    sha256: str
 
 
 class WhoAmI(TypedDict):
@@ -416,6 +547,7 @@ class CoopError(RuntimeError):
         retryable: bool = False,
         body: str = "",
         retry_after: Optional[float] = None,
+        idempotency_key: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -425,6 +557,7 @@ class CoopError(RuntimeError):
         self.retryable = retryable
         self.body = body
         self.retry_after = retry_after
+        self.idempotency_key = idempotency_key
 
     def __str__(self) -> str:
         prefix = f"coop {self.status}" if self.status is not None else "coop"
@@ -496,24 +629,58 @@ def _error_from_response(
     )
 
 
+def _header_value(headers: Mapping[str, str], name: str) -> Optional[str]:
+    """Read a response header from HTTPMessage or a test Mapping."""
+
+    value = headers.get(name)
+    if value is not None:
+        return str(value)
+    wanted = name.lower()
+    for key, candidate in headers.items():
+        if str(key).lower() == wanted:
+            return str(candidate)
+    return None
+
+
+def _http_origin(url: str) -> Tuple[str, Optional[str], int]:
+    parts = urllib.parse.urlsplit(url)
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https") or parts.hostname is None:
+        raise ValueError("URL does not have an HTTP origin")
+    port = parts.port or (443 if scheme == "https" else 80)
+    return (scheme, parts.hostname.lower(), port)
+
+
 class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
     """Prevent an HTTP redirect from forwarding a tenant key to another origin."""
 
     def __init__(self, base_url: str) -> None:
         super().__init__()
-        parts = urllib.parse.urlsplit(base_url)
-        port = parts.port or (443 if parts.scheme.lower() == "https" else 80)
-        self._origin = (parts.scheme.lower(), parts.hostname, port)
+        self._origin = _http_origin(base_url)
 
     def redirect_request(
         self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
     ) -> Any:
-        target = urllib.parse.urlsplit(urllib.parse.urljoin(req.full_url, newurl))
-        port = target.port or (443 if target.scheme.lower() == "https" else 80)
-        origin = (target.scheme.lower(), target.hostname, port)
+        absolute = urllib.parse.urljoin(req.full_url, newurl)
+        try:
+            origin = _http_origin(absolute)
+        except ValueError as exc:
+            raise CoopError(
+                "refused a redirect without a valid HTTP origin",
+                status=code,
+                code="unsafe_redirect",
+                body=newurl,
+            ) from exc
         if origin != self._origin:
             raise CoopError(
                 "refused a cross-origin redirect that could expose the API key",
+                status=code,
+                code="unsafe_redirect",
+                body=newurl,
+            )
+        if req.has_header("Idempotency-key") and code in (301, 302, 303):
+            raise CoopError(
+                "refused a redirect that could change a keyed submission's method or body",
                 status=code,
                 code="unsafe_redirect",
                 body=newurl,
@@ -542,14 +709,15 @@ class Coop:
             )
         if not api_key.strip():
             raise ValueError("api_key must not be empty")
-        if timeout <= 0:
-            raise ValueError("timeout must be positive")
+        if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
         base_path = parts.path.rstrip("/")
         self.base_url = urllib.parse.urlunsplit(
             (parts.scheme, parts.netloc, base_path, "", "")
         )
         self.api_key = api_key
         self.timeout = timeout
+        self._origin = _http_origin(self.base_url)
         self._opener = (
             opener
             or urllib.request.build_opener(_SameOriginRedirect(self.base_url)).open
@@ -582,7 +750,28 @@ class Coop:
         *,
         query: Optional[Mapping[str, Union[str, int, None]]] = None,
         timeout: Optional[float] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Any:
+        value, _, _ = self._request_with_metadata(
+            method,
+            path,
+            payload,
+            query=query,
+            timeout=timeout,
+            idempotency_key=idempotency_key,
+        )
+        return value
+
+    def _request_with_metadata(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[Mapping[str, Any]] = None,
+        *,
+        query: Optional[Mapping[str, Union[str, int, None]]] = None,
+        timeout: Optional[float] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Tuple[Any, Mapping[str, str], Optional[int]]:
         data = (
             json.dumps(payload, separators=(",", ":")).encode("utf-8")
             if payload is not None
@@ -595,6 +784,8 @@ class Coop:
         }
         if data is not None:
             headers["Content-Type"] = "application/json"
+        if idempotency_key is not None:
+            headers["Idempotency-Key"] = idempotency_key
         request = urllib.request.Request(
             self._url(path, query), data=data, method=method, headers=headers
         )
@@ -604,10 +795,18 @@ class Coop:
                 timeout=self.timeout if timeout is None else timeout,
             ) as response:
                 raw = response.read()
+                response_headers = cast(
+                    Mapping[str, str], getattr(response, "headers", {})
+                )
+                response_status = cast(Optional[int], getattr(response, "status", None))
                 if not raw:
-                    return None
+                    return None, response_headers, response_status
                 try:
-                    return json.loads(raw.decode("utf-8"))
+                    return (
+                        json.loads(raw.decode("utf-8")),
+                        response_headers,
+                        response_status,
+                    )
                 except (json.JSONDecodeError, UnicodeError) as exc:
                     raise CoopError(
                         "server returned invalid JSON",
@@ -655,6 +854,156 @@ class Coop:
             )
             raise CoopError(str(reason), code=code, retryable=True) from exc
 
+    def _request_bytes(
+        self,
+        path: str,
+        *,
+        accept: str,
+        timeout: Optional[float] = None,
+    ) -> ArtifactDownload:
+        """Read an authenticated artifact without decoding or re-encoding it."""
+
+        if timeout is not None and (
+            isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0
+        ):
+            raise ValueError("timeout must be finite and positive")
+        request = urllib.request.Request(
+            self._url(path),
+            method="GET",
+            headers={
+                "Accept": accept,
+                "Authorization": f"Bearer {self.api_key}",
+                "User-Agent": f"coop-python/{__version__}",
+            },
+        )
+        try:
+            with self._opener(
+                request,
+                timeout=self.timeout if timeout is None else timeout,
+            ) as response:
+                response_url_fn = getattr(response, "geturl", None)
+                response_url = response_url_fn() if callable(response_url_fn) else None
+                if response_url:
+                    try:
+                        response_origin = _http_origin(str(response_url))
+                    except ValueError as exc:
+                        raise CoopError(
+                            "refused a response without a valid HTTP origin",
+                            status=getattr(response, "status", None),
+                            code="unsafe_redirect",
+                        ) from exc
+                    if response_origin != self._origin:
+                        raise CoopError(
+                            "refused a cross-origin response that could expose the API key",
+                            status=getattr(response, "status", None),
+                            code="unsafe_redirect",
+                        )
+                raw = response.read()
+                response_headers = cast(
+                    Mapping[str, str], getattr(response, "headers", {})
+                )
+                response_status = cast(Optional[int], getattr(response, "status", None))
+        except urllib.error.HTTPError as exc:
+            response_headers = cast(Mapping[str, str], exc.headers)
+            try:
+                try:
+                    body = exc.read().decode("utf-8", errors="replace")
+                except (
+                    http.client.HTTPException,
+                    urllib.error.URLError,
+                    TimeoutError,
+                    OSError,
+                ) as read_exc:
+                    reason = getattr(read_exc, "reason", read_exc)
+                    raise CoopError(
+                        f"failed to read HTTP {exc.code} response body: {reason}",
+                        status=exc.code,
+                        code="transport_error",
+                        request_id=_header_value(response_headers, "x-request-id"),
+                        retryable=True,
+                        retry_after=_retry_after(response_headers),
+                    ) from read_exc
+            finally:
+                exc.close()
+            raise _error_from_response(exc.code, body, response_headers) from None
+        except CoopError:
+            raise
+        except (
+            http.client.HTTPException,
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+        ) as exc:
+            reason = getattr(exc, "reason", exc)
+            code = (
+                "request_timeout"
+                if isinstance(reason, TimeoutError)
+                else "transport_error"
+            )
+            raise CoopError(str(reason), code=code, retryable=True) from exc
+
+        digest_header = _header_value(response_headers, "x-content-sha256")
+        if digest_header is None:
+            raise CoopError(
+                "artifact response omitted X-Content-Sha256",
+                status=response_status,
+                code="invalid_response",
+            )
+        if len(digest_header) != 64 or any(
+            character not in "0123456789abcdefABCDEF" for character in digest_header
+        ):
+            raise CoopError(
+                "artifact response contained a malformed X-Content-Sha256",
+                status=response_status,
+                code="invalid_response",
+            )
+        expected_sha256 = digest_header.lower()
+        actual_sha256 = hashlib.sha256(raw).hexdigest()
+        if not hmac.compare_digest(expected_sha256, actual_sha256):
+            raise CoopError(
+                "artifact bytes did not match X-Content-Sha256",
+                status=response_status,
+                code="content_digest_mismatch",
+                retryable=True,
+            )
+
+        content_type = _header_value(response_headers, "content-type")
+        if content_type is None or not content_type.strip():
+            raise CoopError(
+                "artifact response omitted Content-Type",
+                status=response_status,
+                code="invalid_response",
+            )
+        declared_length = _header_value(response_headers, "content-length")
+        if declared_length is not None:
+            try:
+                parsed_length = int(declared_length, 10)
+            except ValueError as exc:
+                raise CoopError(
+                    "artifact response contained a malformed Content-Length",
+                    status=response_status,
+                    code="invalid_response",
+                ) from exc
+            if parsed_length < 0:
+                raise CoopError(
+                    "artifact response contained a negative Content-Length",
+                    status=response_status,
+                    code="invalid_response",
+                )
+            if parsed_length != len(raw):
+                raise CoopError(
+                    "artifact response body did not match Content-Length",
+                    status=response_status,
+                    code="transport_error",
+                    retryable=True,
+                )
+        return {
+            "content": raw,
+            "content_type": content_type,
+            "content_length": len(raw),
+            "sha256": actual_sha256,
+        }
+
     @staticmethod
     def _limits_dict(
         limits: Optional[LimitInput], overrides: Mapping[str, Any]
@@ -688,16 +1037,159 @@ class Coop:
         code: str,
         stdin: Optional[str] = None,
         limits: Optional[LimitInput] = None,
+        *,
+        requirements: Optional[ExecutionRequirements] = None,
+        idempotency_key: Optional[str] = None,
+        retry_ambiguous: bool = False,
+        max_ambiguous_retries: int = 1,
+        retry_backoff: float = 0.25,
         **limit_overrides: Union[int, bool],
     ) -> SubmitResponse:
-        """Submit a job without double-nesting an explicit ``limits`` value."""
+        """Submit a job and return the compatibility response body."""
+
+        return self.submit_result(
+            language,
+            code,
+            stdin,
+            limits,
+            requirements=requirements,
+            idempotency_key=idempotency_key,
+            retry_ambiguous=retry_ambiguous,
+            max_ambiguous_retries=max_ambiguous_retries,
+            retry_backoff=retry_backoff,
+            **limit_overrides,
+        )["job"]
+
+    def submit_result(
+        self,
+        language: str,
+        code: str,
+        stdin: Optional[str] = None,
+        limits: Optional[LimitInput] = None,
+        *,
+        requirements: Optional[ExecutionRequirements] = None,
+        idempotency_key: Optional[str] = None,
+        retry_ambiguous: bool = False,
+        max_ambiguous_retries: int = 1,
+        retry_backoff: float = 0.25,
+        **limit_overrides: Union[int, bool],
+    ) -> SubmitResult:
+        """Submit a job with response metadata and optional ambiguous retry.
+
+        Ambiguous retries are disabled by default. Opting in reuses one caller-
+        supplied or generated key and assumes the target Coop server implements
+        ``Idempotency-Key`` replay semantics for an identical submission.
+        """
+        if retry_ambiguous and idempotency_key is None:
+            idempotency_key = str(uuid.uuid4())
+        if idempotency_key is not None:
+            key_value: Any = idempotency_key
+            if (
+                not isinstance(key_value, str)
+                or not key_value
+                or len(key_value) > 128
+                or any(ord(char) < 0x21 or ord(char) > 0x7E for char in key_value)
+            ):
+                raise ValueError(
+                    "idempotency_key must contain 1-128 visible ASCII bytes"
+                )
+            idempotency_key = key_value
+        retry_value: Any = retry_ambiguous
+        if not isinstance(retry_value, bool):
+            raise TypeError("retry_ambiguous must be a boolean")
+        retries_value: Any = max_ambiguous_retries
+        if isinstance(retries_value, bool) or not isinstance(retries_value, int):
+            raise TypeError("max_ambiguous_retries must be an integer")
+        if not 0 <= max_ambiguous_retries <= 10:
+            raise ValueError("max_ambiguous_retries must be between 0 and 10")
+        backoff_value: Any = retry_backoff
+        if (
+            isinstance(backoff_value, bool)
+            or not isinstance(backoff_value, (int, float))
+            or not math.isfinite(float(retry_backoff))
+            or retry_backoff < 0
+            or retry_backoff > 60
+        ):
+            raise ValueError("retry_backoff must be finite and between 0 and 60")
         spec: JobSpec = {"language": language, "code": code}
         if stdin is not None:
             spec["stdin"] = stdin
         limit_values = self._limits_dict(limits, limit_overrides)
         if limit_values:
             spec["limits"] = cast(Dict[str, Union[int, bool]], limit_values)
-        return cast(SubmitResponse, self._request("POST", "/v1/jobs", spec))
+        if requirements is not None:
+            requirements_value: Any = requirements
+            if not isinstance(requirements_value, dict):
+                raise TypeError("requirements must be an object")
+            requirements_mapping = cast(Dict[str, Any], requirements_value)
+            unknown_requirements = set(requirements_mapping).difference(
+                {"minimum_isolation"}
+            )
+            if unknown_requirements:
+                raise TypeError(
+                    "unknown requirement: " + ", ".join(sorted(unknown_requirements))
+                )
+            minimum: Any = requirements_mapping.get("minimum_isolation", "none")
+            allowed_isolation = {
+                "none",
+                "linux-shared-kernel",
+                "gvisor-application-kernel",
+                "wasm-capability",
+                "hardware-vm",
+                "confidential-vm",
+            }
+            if not isinstance(minimum, str) or minimum not in allowed_isolation:
+                raise ValueError("minimum_isolation is not a supported isolation class")
+            spec["requirements"] = cast(
+                ExecutionRequirements, dict(requirements_mapping)
+            )
+        attempt = 0
+        while True:
+            try:
+                value, headers, _ = self._request_with_metadata(
+                    "POST",
+                    "/v1/jobs",
+                    spec,
+                    idempotency_key=idempotency_key,
+                )
+                replayed_raw = headers.get("idempotency-replayed") or headers.get(
+                    "Idempotency-Replayed"
+                )
+                if replayed_raw is None:
+                    replayed = False
+                elif replayed_raw.lower() in {"true", "false"}:
+                    replayed = replayed_raw.lower() == "true"
+                else:
+                    raise CoopError(
+                        "server returned an invalid Idempotency-Replayed header",
+                        code="invalid_response",
+                    )
+                location = headers.get("location") or headers.get("Location")
+                return {
+                    "job": cast(SubmitResponse, value),
+                    "location": location,
+                    "idempotency_replayed": replayed,
+                }
+            except CoopError as exc:
+                if idempotency_key is not None:
+                    exc.idempotency_key = idempotency_key
+                ambiguous = exc.code in {"request_timeout", "transport_error"}
+                if ambiguous and idempotency_key is None:
+                    # Retrying an unkeyed accepted-or-not submission can create
+                    # a duplicate job, so this failure is not safely retryable.
+                    exc.retryable = False
+                if (
+                    not retry_ambiguous
+                    or not ambiguous
+                    or attempt >= max_ambiguous_retries
+                ):
+                    raise
+                delay = float(retry_backoff) * (2**attempt)
+                if exc.retry_after is not None:
+                    delay = max(delay, min(exc.retry_after, 60.0))
+                if delay > 0:
+                    time.sleep(min(delay, 60.0))
+                attempt += 1
 
     def _get_with_timeout(
         self, job_id: str, request_timeout: Optional[float]
@@ -714,14 +1206,87 @@ class Coop:
     def get(self, job_id: str) -> JobDetail:
         return self._get_with_timeout(job_id, None)
 
+    def cancel_result(self, job_id: str) -> CancellationResponse:
+        raw = self._request("DELETE", self._job_path(job_id))
+        if raw is None:
+            return {
+                "job": None,
+                "cancellation_requested": True,
+                "already_terminal": False,
+            }
+        if not isinstance(raw, dict):
+            raise CoopError("invalid cancellation response", code="invalid_response")
+        response = cast(Dict[str, Any], raw)
+        if "cancellation_requested" in response or "already_terminal" in response:
+            requested = response.get("cancellation_requested")
+            already_terminal = response.get("already_terminal")
+            job_value = response.get("job")
+            if (
+                not isinstance(requested, bool)
+                or not isinstance(already_terminal, bool)
+                or (job_value is not None and not isinstance(job_value, dict))
+            ):
+                raise CoopError(
+                    "invalid cancellation response", code="invalid_response"
+                )
+            return {
+                "job": cast(Optional[JobView], job_value),
+                "cancellation_requested": requested,
+                "already_terminal": already_terminal,
+            }
+        # Legacy servers returned a JobView directly. A successful response is
+        # an accepted cancellation even when its projected status has not yet
+        # changed to ``cancelled``.
+        return {
+            "job": cast(JobView, response),
+            "cancellation_requested": True,
+            "already_terminal": False,
+        }
+
     def cancel(self, job_id: str) -> Optional[JobView]:
-        return cast(Optional[JobView], self._request("DELETE", self._job_path(job_id)))
+        """Compatibility view of :meth:`cancel_result`, returning only the job."""
+
+        return self.cancel_result(job_id)["job"]
 
     def whoami(self) -> WhoAmI:
         return cast(WhoAmI, self._request("GET", "/v1/whoami"))
 
     def capabilities(self) -> Capabilities:
         return cast(Capabilities, self._request("GET", "/v1/capabilities"))
+
+    def attestation_public_key(self) -> AttestationPublicKey:
+        """Return key material advertised by this authenticated Coop server.
+
+        The response is discovery data, not a trust anchor. Pin the public key
+        through an authenticated out-of-band channel before verifying evidence.
+        """
+
+        return cast(
+            AttestationPublicKey,
+            self._request("GET", "/v1/attestation/public-key"),
+        )
+
+    def download_attestation(
+        self, job_id: str, *, timeout: Optional[float] = None
+    ) -> ArtifactDownload:
+        """Download exact persisted DSSE bytes and validate their HTTP digest."""
+
+        return self._request_bytes(
+            self._job_path(job_id) + "/attestation",
+            accept="application/vnd.dsse.envelope.v1+json",
+            timeout=timeout,
+        )
+
+    def download_result_artifact(
+        self, job_id: str, *, timeout: Optional[float] = None
+    ) -> ArtifactDownload:
+        """Download exact signed-subject bytes and validate their HTTP digest."""
+
+        return self._request_bytes(
+            self._job_path(job_id) + "/result-artifact",
+            accept="application/vnd.coop.execution-result.v1+json",
+            timeout=timeout,
+        )
 
     def list(
         self,
@@ -967,7 +1532,7 @@ class Coop:
         except CoopError as exc:
             if exc.status not in (404, 405):
                 raise
-            # A structured v0.2 error such as `job_not_found` is not evidence
+            # A structured Coop error such as `job_not_found` is not evidence
             # that this endpoint is missing. Only an explicit opt-in plus an
             # unstructured legacy HTTP code may place a credential in a URL.
             legacy_endpoint_missing = exc.code in ("http_404", "http_405")
@@ -1022,8 +1587,21 @@ class Coop:
         poll_interval: float = 1.0,
     ) -> Iterator[CoopEvent]:
         """Yield ordered events until the job reaches a terminal state."""
-        if after < -1 or poll_interval <= 0:
-            raise ValueError("after must be -1 or greater and poll_interval positive")
+        after_value: Any = after
+        interval_value: Any = poll_interval
+        if (
+            isinstance(after_value, bool)
+            or not isinstance(after_value, int)
+            or after < -1
+            or isinstance(interval_value, bool)
+            or not isinstance(interval_value, (int, float))
+            or not math.isfinite(float(poll_interval))
+            or poll_interval <= 0
+        ):
+            raise ValueError(
+                "after must be an integer -1 or greater and poll_interval finite "
+                "and positive"
+            )
         cursor = after
         if prefer_websocket:
             socket = None
@@ -1068,7 +1646,7 @@ class Coop:
                 yield event
                 if self._terminal_event(event):
                     terminal_seen = True
-            # A v0.2 terminal event is the final durable row. Yield the rest
+            # A current terminal event is the final durable row. Yield the rest
             # of a legacy replay page before stopping so compatibility data is
             # never silently dropped.
             if terminal_seen:

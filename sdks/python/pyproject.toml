@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "coop-sdk"
-version = "0.3.0"
+version = "0.4.0"
 description = "Typed, dependency-free Python client for the Coop execution gateway"
 readme = "README.md"
 requires-python = ">=3.9"

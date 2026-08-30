@@ -1,7 +1,7 @@
 use crate::bus::WireEvent;
 use crate::AppState;
 use coop_exec::{ExecContext, Sink, Stream};
-use coop_types::{EffectiveJobSpec, EffectiveLimits, JobSpec, JobStatus, LimitEnforcement};
+use coop_types::{EffectiveLimits, JobSpec, JobStatus, LimitEnforcement};
 use futures_util::FutureExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -16,7 +16,9 @@ use tokio::task::JoinHandle;
 pub struct QueuedJob {
     pub job_id: String,
     pub tenant: String,
+    pub mem_mb: u32,
     admission: Option<OwnedSemaphorePermit>,
+    tenant_admission: Option<TenantAdmissionLease>,
 }
 
 impl std::fmt::Debug for QueuedJob {
@@ -35,6 +37,8 @@ impl std::fmt::Debug for QueuedJob {
 pub struct Admission {
     tx: mpsc::Sender<QueuedJob>,
     slots: Arc<Semaphore>,
+    tenant_depths: Arc<dashmap::DashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
+    per_tenant: usize,
     accepting: Arc<std::sync::atomic::AtomicBool>,
     capacity: usize,
 }
@@ -42,21 +46,42 @@ pub struct Admission {
 pub struct AdmissionReservation {
     channel: mpsc::OwnedPermit<QueuedJob>,
     slot: OwnedSemaphorePermit,
+    tenant_slot: TenantAdmissionLease,
+    tenant: String,
+    mem_mb: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryAdmissionError {
-    Full,
+    GlobalFull,
+    TenantFull,
     Closed,
 }
 
+struct TenantAdmissionLease {
+    depth: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for TenantAdmissionLease {
+    fn drop(&mut self) {
+        self.depth.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 impl Admission {
-    pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<QueuedJob>) {
+    pub fn channel(capacity: usize, per_tenant: usize) -> (Self, mpsc::Receiver<QueuedJob>) {
         assert!(capacity > 0, "admission capacity must be positive");
+        assert!(per_tenant > 0, "tenant admission capacity must be positive");
+        assert!(
+            per_tenant <= capacity,
+            "tenant admission capacity must not exceed global capacity"
+        );
         let (tx, rx) = mpsc::channel(capacity);
         let admission = Self {
             tx,
             slots: Arc::new(Semaphore::new(capacity)),
+            tenant_depths: Arc::new(dashmap::DashMap::new()),
+            per_tenant,
             accepting: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             capacity,
         };
@@ -65,33 +90,85 @@ impl Admission {
 
     /// Reserve without waiting. Both the global queued-job budget and the
     /// channel handoff are reserved before durable acceptance.
-    pub fn try_reserve(&self) -> Result<AdmissionReservation, TryAdmissionError> {
+    pub fn try_reserve(
+        &self,
+        tenant: &str,
+        mem_mb: u32,
+    ) -> Result<AdmissionReservation, TryAdmissionError> {
+        assert!(mem_mb > 0, "queued memory charge must be positive");
         if !self.accepting.load(std::sync::atomic::Ordering::Acquire) {
             return Err(TryAdmissionError::Closed);
         }
+        let tenant_depth = self
+            .tenant_depths
+            .entry(tenant.to_string())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+            .clone();
+        let tenant_slot = loop {
+            let depth = tenant_depth.load(std::sync::atomic::Ordering::Acquire);
+            if depth >= self.per_tenant {
+                return Err(TryAdmissionError::TenantFull);
+            }
+            if tenant_depth
+                .compare_exchange_weak(
+                    depth,
+                    depth + 1,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                break TenantAdmissionLease {
+                    depth: Arc::clone(&tenant_depth),
+                };
+            }
+        };
         let slot = Arc::clone(&self.slots)
             .try_acquire_owned()
-            .map_err(|_| TryAdmissionError::Full)?;
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::Closed => TryAdmissionError::Closed,
+                tokio::sync::TryAcquireError::NoPermits => TryAdmissionError::GlobalFull,
+            })?;
         let channel = self
             .tx
             .clone()
             .try_reserve_owned()
             .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => TryAdmissionError::Full,
+                mpsc::error::TrySendError::Full(_) => TryAdmissionError::GlobalFull,
                 mpsc::error::TrySendError::Closed(_) => TryAdmissionError::Closed,
             })?;
         if !self.accepting.load(std::sync::atomic::Ordering::Acquire) {
             return Err(TryAdmissionError::Closed);
         }
-        Ok(AdmissionReservation { channel, slot })
+        Ok(AdmissionReservation {
+            channel,
+            slot,
+            tenant_slot,
+            tenant: tenant.to_string(),
+            mem_mb,
+        })
     }
 
     /// Wait for recovery admission while retaining the same hard global
     /// bound. HTTP submission deliberately uses `try_reserve` instead.
-    pub async fn reserve(&self) -> Result<AdmissionReservation, TryAdmissionError> {
+    pub async fn reserve_recovery(
+        &self,
+        tenant: &str,
+        mem_mb: u32,
+    ) -> Result<AdmissionReservation, TryAdmissionError> {
+        assert!(mem_mb > 0, "queued memory charge must be positive");
         if !self.accepting.load(std::sync::atomic::Ordering::Acquire) {
             return Err(TryAdmissionError::Closed);
         }
+        let tenant_depth = self
+            .tenant_depths
+            .entry(tenant.to_string())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+            .clone();
+        tenant_depth.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let tenant_slot = TenantAdmissionLease {
+            depth: tenant_depth,
+        };
         let slot = Arc::clone(&self.slots)
             .acquire_owned()
             .await
@@ -108,7 +185,13 @@ impl Admission {
         if !self.accepting.load(std::sync::atomic::Ordering::Acquire) {
             return Err(TryAdmissionError::Closed);
         }
-        Ok(AdmissionReservation { channel, slot })
+        Ok(AdmissionReservation {
+            channel,
+            slot,
+            tenant_slot,
+            tenant: tenant.to_string(),
+            mem_mb,
+        })
     }
 
     /// Atomically stop new admission and wake asynchronous recovery waiters.
@@ -127,17 +210,30 @@ impl Admission {
     pub fn depth(&self) -> usize {
         self.capacity.saturating_sub(self.slots.available_permits())
     }
+
+    pub fn tenant_capacity(&self) -> usize {
+        self.per_tenant
+    }
+
+    pub fn tenant_depth(&self, tenant: &str) -> usize {
+        self.tenant_depths
+            .get(tenant)
+            .map(|depth| depth.load(std::sync::atomic::Ordering::Acquire))
+            .unwrap_or(0)
+    }
 }
 
 impl AdmissionReservation {
     /// Commit the reservation to a queued job. This contains no await point,
     /// so a successfully persisted accepted row cannot be cancelled between
     /// registration of its capacity lease and channel handoff.
-    pub fn send(self, job_id: String, tenant: String) {
+    pub fn send(self, job_id: String) {
         self.channel.send(QueuedJob {
             job_id,
-            tenant,
+            tenant: self.tenant,
+            mem_mb: self.mem_mb,
             admission: Some(self.slot),
+            tenant_admission: Some(self.tenant_slot),
         });
     }
 }
@@ -145,12 +241,14 @@ impl AdmissionReservation {
 impl QueuedJob {
     fn release_admission(&mut self) {
         self.admission.take();
+        self.tenant_admission.take();
     }
 }
 
 struct WorkItem {
     queued: QueuedJob,
     _tenant_permit: OwnedSemaphorePermit,
+    _memory_permit: OwnedSemaphorePermit,
 }
 
 /// Handles for the fair dispatcher and executor workers. Dropping this value
@@ -200,6 +298,7 @@ struct FinishedOp {
 
 struct JobSink {
     tx: mpsc::Sender<Op>,
+    metrics: Arc<crate::metrics::Metrics>,
     stdout_dropped: Arc<std::sync::atomic::AtomicBool>,
     stderr_dropped: Arc<std::sync::atomic::AtomicBool>,
     deferred_controls: Arc<std::sync::Mutex<Vec<Op>>>,
@@ -223,6 +322,10 @@ impl Sink for JobSink {
     }
 
     fn truncated(&self, stream: Stream) {
+        self.metrics.truncation(match stream {
+            Stream::Stdout => crate::metrics::TruncationKind::Stdout,
+            Stream::Stderr => crate::metrics::TruncationKind::Stderr,
+        });
         if let Err(error) = self.tx.try_send(Op::Truncated(stream)) {
             defer_control(&self.deferred_controls, error.into_inner());
         }
@@ -245,6 +348,17 @@ fn defer_control(queue: &std::sync::Mutex<Vec<Op>>, op: Op) {
 struct CancelGuard {
     map: Arc<dashmap::DashMap<String, crate::RunningJob>>,
     job_id: String,
+}
+
+struct JobTraceGuard {
+    map: Arc<dashmap::DashMap<String, crate::request_context::JobTraceContext>>,
+    job_id: String,
+}
+
+impl Drop for JobTraceGuard {
+    fn drop(&mut self) {
+        self.map.remove(&self.job_id);
+    }
 }
 
 impl Drop for CancelGuard {
@@ -366,7 +480,14 @@ async fn worker_loop(
             return Ok(());
         }
         let tenant = work.queued.tenant.clone();
-        handle_job(state.clone(), work.queued, worker_id, work._tenant_permit).await;
+        handle_job(
+            state.clone(),
+            work.queued,
+            worker_id,
+            work._tenant_permit,
+            work._memory_permit,
+        )
+        .await;
         if done_tx.send(tenant).is_err() {
             if *shutdown.borrow() {
                 return Ok(());
@@ -453,6 +574,21 @@ fn dispatch_available(
             };
 
             let queue = pending.get_mut(&tenant).expect("active tenant has queue");
+            let memory_mb = queue
+                .front()
+                .expect("active tenant queue is non-empty")
+                .mem_mb;
+            let Ok(memory_permit) =
+                Arc::clone(&state.memory_slots).try_acquire_many_owned(memory_mb)
+            else {
+                drop(permit);
+                // Preserve weighted fairness: once an older job is blocked
+                // on aggregate memory, stop backfilling smaller jobs. A
+                // completion notification retries this tenant first, so a
+                // steady stream of small jobs cannot starve a large request.
+                round_robin.push_front(tenant);
+                return Ok(());
+            };
             let queued = queue.pop_front().expect("active tenant queue is non-empty");
             if queue.is_empty() {
                 pending.remove(&tenant);
@@ -463,6 +599,7 @@ fn dispatch_available(
             match work_tx.try_send(WorkItem {
                 queued,
                 _tenant_permit: permit,
+                _memory_permit: memory_permit,
             }) {
                 Ok(()) => dispatched = true,
                 Err(mpsc::error::TrySendError::Full(work)) => {
@@ -524,22 +661,57 @@ impl WorkerPool {
     }
 }
 
-#[tracing::instrument(name = "job", skip_all, fields(job_id = %queued.job_id))]
+#[tracing::instrument(
+    name = "job",
+    skip_all,
+    fields(
+        job_id = %queued.job_id,
+        request_id = tracing::field::Empty,
+        trace_id = tracing::field::Empty,
+        span_id = tracing::field::Empty,
+        parent_span_id = tracing::field::Empty,
+        trace_flags = tracing::field::Empty,
+        linked_trace_id = tracing::field::Empty,
+        linked_span_id = tracing::field::Empty,
+    )
+)]
 async fn handle_job(
     state: AppState,
     mut queued: QueuedJob,
     worker_id: usize,
     _tenant_permit: OwnedSemaphorePermit,
+    _memory_permit: OwnedSemaphorePermit,
 ) {
     let job_id = queued.job_id.clone();
+    if let Some(context) = state.job_traces.get(&job_id) {
+        context.record_on_current_job_span();
+    }
+    let _job_trace_guard = JobTraceGuard {
+        map: Arc::clone(&state.job_traces),
+        job_id: job_id.clone(),
+    };
     let Some(row) = load_queued_job_retrying(&state, &job_id).await else {
         return;
     };
+    if row.tenant != queued.tenant {
+        tracing::error!(
+            envelope_tenant = %queued.tenant,
+            durable_tenant = %row.tenant,
+            "queued tenant lease disagreed with durable ownership"
+        );
+        finalize_without_execution_retrying(&state, &job_id, "tenant_lease_mismatch").await;
+        queued.release_admission();
+        return;
+    }
 
     // A cancelled-while-queued job arrives here after the DELETE endpoint
     // already finalized it. Skip silently; do not consume a worker slot.
     if let Some(status) = JobStatus::parse(&row.status) {
         if status.is_terminal() {
+            // Cancellation may have committed before a delayed scheduler
+            // envelope was received. Close any candidate/recovery channel so
+            // process-local ownership cannot outlive the durable terminal row.
+            state.bus.complete(&job_id);
             queued.release_admission();
             return;
         }
@@ -554,6 +726,46 @@ async fn handle_job(
             return;
         }
     };
+    let durable_mem_mb = match state.store.job_requested_mem_mb(&job_id).await {
+        Ok(Some(mem_mb)) => state.cfg.clamp_mem_mb(mem_mb),
+        Ok(None) => {
+            tracing::error!("queued job has no durable memory charge");
+            finalize_without_execution_retrying(&state, &job_id, "missing_memory_lease").await;
+            queued.release_admission();
+            return;
+        }
+        Err(error) => {
+            tracing::error!(%error, "could not load durable memory charge");
+            finalize_without_execution_retrying(&state, &job_id, "memory_lease_read_failed").await;
+            queued.release_admission();
+            return;
+        }
+    };
+    if queued.mem_mb != durable_mem_mb {
+        tracing::error!(
+            queued_mem_mb = queued.mem_mb,
+            durable_mem_mb,
+            "queued memory lease disagreed with the durable job specification"
+        );
+        finalize_without_execution_retrying(&state, &job_id, "memory_lease_mismatch").await;
+        queued.release_admission();
+        return;
+    }
+
+    if !state
+        .execution_provider
+        .isolation_class()
+        .satisfies(spec.requirements.minimum_isolation)
+    {
+        tracing::error!(
+            requested = ?spec.requirements.minimum_isolation,
+            available = ?state.execution_provider.isolation_class(),
+            "queued job isolation requirement cannot be satisfied"
+        );
+        finalize_without_execution_retrying(&state, &job_id, "minimum_isolation_unsatisfied").await;
+        queued.release_admission();
+        return;
+    }
 
     if matches!(state.sandbox_mode, coop_exec::SandboxMode::Off)
         && !state
@@ -570,8 +782,12 @@ async fn handle_job(
     }
 
     let mut execution_spec = spec.clone();
-    execution_spec.limits = execution_spec.limits.clone().clamped();
-    let isolated = matches!(state.sandbox_mode, coop_exec::SandboxMode::Namespaces);
+    execution_spec.limits = state.cfg.clamp_limits(execution_spec.limits.clone());
+    // The acceptance-time ceiling is durable policy. A later lower ceiling
+    // tightens it during recovery; increasing the server ceiling never grants
+    // an already-accepted queued job more memory than it originally received.
+    execution_spec.limits.mem_mb = queued.mem_mb;
+    let isolated = state.execution_provider.isolation_class() != coop_types::IsolationClass::None;
     // The request flag is not an egress grant. In the development subprocess
     // backend, however, host networking still exists and must be represented
     // truthfully in the effective spec and evidence receipt.
@@ -579,30 +795,16 @@ async fn handle_job(
     // The durable start precedes executor readiness. Persist an explicit
     // unobserved snapshot here; the terminal transaction replaces it with the
     // executor-observed effective spec once (and only if) provenance exists.
-    let effective_spec = EffectiveJobSpec {
-        language: execution_spec.language.clone(),
-        code: execution_spec.code.clone(),
-        stdin: execution_spec.stdin.clone(),
-        limits: EffectiveLimits::from_enforcement(
+    let effective_value = json!({
+        "storage_version": 2,
+        "limits": EffectiveLimits::from_enforcement(
             &execution_spec.limits,
             &LimitEnforcement::NONE,
             None,
         ),
-    };
-    let effective_value = match serde_json::to_value(&effective_spec) {
-        Ok(value) => value,
-        Err(e) => {
-            tracing::error!(error = %e, "could not serialize effective job spec");
-            finalize_without_execution_retrying(
-                &state,
-                &job_id,
-                "effective_spec_serialization_failed",
-            )
-            .await;
-            queued.release_admission();
-            return;
-        }
-    };
+        "requirements": execution_spec.requirements.clone(),
+        "isolation_class": serde_json::Value::Null,
+    });
 
     // Register cancellation ownership before the guarded durable start. This
     // closes the shutdown/cancel window in which a row could become running
@@ -689,9 +891,7 @@ async fn handle_job(
             0,
             None,
             None,
-            Some(coop_exec::ExecutionProvenance::not_ready(
-                state.sandbox_mode,
-            )),
+            Some(state.execution_provider.not_ready_provenance()),
         )
         .await;
         await_event_pump(&state, &job_id, pump).await;
@@ -707,9 +907,7 @@ async fn handle_job(
             0,
             Some(reason.to_string()),
             None,
-            Some(coop_exec::ExecutionProvenance::not_ready(
-                state.sandbox_mode,
-            )),
+            Some(state.execution_provider.not_ready_provenance()),
         )
         .await;
         await_event_pump(&state, &job_id, pump).await;
@@ -756,20 +954,31 @@ async fn handle_job(
     let stdout_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stderr_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let deferred_controls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let execution_observation = state
+        .metrics
+        .start_execution(crate::metrics::Language::classify(&spec.language));
     let coop_exec::ExecutionReport {
         outcome: result,
         provenance,
-    } = coop_exec::execute_reported(
-        ctx,
-        Arc::new(JobSink {
-            tx: op_tx.clone(),
-            stdout_dropped: Arc::clone(&stdout_dropped),
-            stderr_dropped: Arc::clone(&stderr_dropped),
-            deferred_controls: Arc::clone(&deferred_controls),
-        }),
-        state.sandbox_mode,
-    )
-    .await;
+    } = state
+        .execution_provider
+        .execute(
+            ctx,
+            Arc::new(JobSink {
+                tx: op_tx.clone(),
+                metrics: Arc::clone(&state.metrics),
+                stdout_dropped: Arc::clone(&stdout_dropped),
+                stderr_dropped: Arc::clone(&stderr_dropped),
+                deferred_controls: Arc::clone(&deferred_controls),
+            }),
+        )
+        .await;
+
+    let isolation_evidence_mismatch = execution_evidence_violates_requirement(
+        &result,
+        &provenance,
+        spec.requirements.minimum_isolation,
+    );
 
     let controls = {
         let mut queue = deferred_controls
@@ -786,53 +995,121 @@ async fn handle_job(
         (Stream::Stderr, &stderr_dropped),
     ] {
         if dropped.load(std::sync::atomic::Ordering::Relaxed) {
+            state
+                .metrics
+                .truncation(crate::metrics::TruncationKind::Evidence);
             let _ = op_tx.send(Op::EvidenceIncomplete).await;
             let _ = op_tx.send(Op::Truncated(stream)).await;
         }
     }
 
-    match result {
-        Ok(outcome) => {
-            let status = coop_types::JobStatus::from(outcome.status);
-            finish_via(
-                op_tx,
-                status.as_str(),
+    if isolation_evidence_mismatch {
+        execution_observation.finish(crate::metrics::JobOutcome::Error);
+        tracing::error!(
+            requested = ?spec.requirements.minimum_isolation,
+            observed = ?provenance.isolation_class,
+            bootstrap_ready = provenance.bootstrap_ready,
+            "executor-observed isolation evidence contradicted the admitted requirement"
+        );
+        let _ = op_tx
+            .send(Op::Violation(
+                "minimum_isolation_observation_mismatch",
+                json!({
+                    "minimum_isolation": spec.requirements.minimum_isolation,
+                    "observed_isolation": provenance.isolation_class,
+                    "bootstrap_ready": provenance.bootstrap_ready,
+                }),
+            ))
+            .await;
+        let (exit_code, duration_ms, telemetry) = match result {
+            Ok(outcome) => (
                 outcome.exit_code,
                 outcome.telemetry.wall_time_ms.min(i64::MAX as u64) as i64,
-                outcome.killed_by.clone(),
-                Some(outcome.telemetry.clone()),
-                Some(provenance),
-            )
-            .await;
-            tracing::info!(
-                status = status.as_str(),
-                exit_code = outcome.exit_code,
-                killed_by = outcome.killed_by.as_deref().unwrap_or(""),
-                duration_ms = outcome.telemetry.wall_time_ms,
-                "job finished"
-            );
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "executor failure");
-            let _ = op_tx
-                .send(Op::Violation("executor_error", executor_error_detail(&e)))
+                Some(outcome.telemetry),
+            ),
+            Err(_) => (None, started_at.elapsed().as_millis() as i64, None),
+        };
+        finish_via(
+            op_tx,
+            "error",
+            exit_code,
+            duration_ms,
+            Some("minimum_isolation_observation_mismatch".to_string()),
+            telemetry,
+            Some(provenance),
+        )
+        .await;
+    } else {
+        match result {
+            Ok(outcome) => {
+                let status = coop_types::JobStatus::from(outcome.status);
+                execution_observation.finish(crate::metrics::JobOutcome::classify(status.as_str()));
+                finish_via(
+                    op_tx,
+                    status.as_str(),
+                    outcome.exit_code,
+                    outcome.telemetry.wall_time_ms.min(i64::MAX as u64) as i64,
+                    outcome.killed_by.clone(),
+                    Some(outcome.telemetry.clone()),
+                    Some(provenance),
+                )
                 .await;
-            finish_via(
-                op_tx,
-                "error",
-                None,
-                started_at.elapsed().as_millis() as i64,
-                None,
-                None,
-                Some(provenance),
-            )
-            .await;
+                tracing::info!(
+                    status = status.as_str(),
+                    exit_code = outcome.exit_code,
+                    killed_by = outcome.killed_by.as_deref().unwrap_or(""),
+                    duration_ms = outcome.telemetry.wall_time_ms,
+                    "job finished"
+                );
+            }
+            Err(e) => {
+                execution_observation.finish(crate::metrics::JobOutcome::Error);
+                tracing::error!(error = %e, "executor failure");
+                let _ = op_tx
+                    .send(Op::Violation("executor_error", executor_error_detail(&e)))
+                    .await;
+                finish_via(
+                    op_tx,
+                    "error",
+                    None,
+                    started_at.elapsed().as_millis() as i64,
+                    None,
+                    None,
+                    Some(provenance),
+                )
+                .await;
+            }
         }
     }
 
-    let _ = tokio::fs::remove_dir_all(&workdir).await;
+    if state.execution_provider.has_recovery_state(&workdir) {
+        tracing::error!(
+            path = %workdir.display(),
+            "preserving provider recovery state after incomplete cleanup"
+        );
+    } else {
+        let _ = tokio::fs::remove_dir_all(&workdir).await;
+    }
     await_event_pump(&state, &job_id, pump).await;
     state.cancels.remove(&job_id);
+}
+
+fn execution_evidence_violates_requirement(
+    outcome: &std::io::Result<coop_exec::ExecOutcome>,
+    provenance: &coop_exec::ExecutionProvenance,
+    minimum: coop_types::IsolationClass,
+) -> bool {
+    if provenance.bootstrap_ready {
+        return !provenance.isolation_class.satisfies(minimum);
+    }
+
+    // A provider can legitimately fail or observe cancellation before its
+    // workload-ready boundary. Any other successful executor outcome without
+    // that boundary is contradictory evidence and must not remain successful.
+    matches!(
+        outcome,
+        Ok(result) if result.status != coop_types::OutcomeStatus::Cancelled
+    )
 }
 
 async fn await_event_pump(state: &AppState, job_id: &str, pump: JoinHandle<()>) {
@@ -848,7 +1125,14 @@ async fn load_queued_job_retrying(state: &AppState, job_id: &str) -> Option<coop
         if *state.shutdown.borrow() {
             return None;
         }
-        match state.store.get_job(job_id).await {
+        let started_at = std::time::Instant::now();
+        let result = state.store.get_job(job_id).await;
+        state.metrics.observe_storage(
+            crate::metrics::StorageOperation::Read,
+            started_at.elapsed(),
+            result.is_ok(),
+        );
+        match result {
             Ok(row) => {
                 if row.is_none() {
                     tracing::warn!(job_id, "queued job vanished from store");
@@ -894,11 +1178,17 @@ async fn start_job_retrying(
             finalize_queued_cancel_retrying(state, row).await;
             return Ok(StartOutcome::NotStarted);
         }
-        match state
+        let started_at = std::time::Instant::now();
+        let result = state
             .store
             .start_with_event_if_queued(&row.job_id, effective_spec)
-            .await
-        {
+            .await;
+        state.metrics.observe_storage(
+            crate::metrics::StorageOperation::Start,
+            started_at.elapsed(),
+            result.is_ok(),
+        );
+        match result {
             Ok(Some(event)) => return Ok(StartOutcome::Started(Some(event))),
             Ok(None) => match reconcile_start(state, &row.job_id).await {
                 Some(StartOutcome::Started(_)) => return Ok(StartOutcome::Started(None)),
@@ -952,7 +1242,7 @@ async fn finalize_cancelled_without_execution_retrying(
     reason: &str,
 ) {
     let output = OutputEvidence::default();
-    let provenance = coop_exec::ExecutionProvenance::not_ready(state.sandbox_mode);
+    let provenance = state.execution_provider.not_ready_provenance();
     finalize_job(
         state,
         job_id,
@@ -1051,39 +1341,76 @@ pub fn spawn_retention_sweeper(state: AppState) {
         let mut shutdown = state.shutdown.subscribe();
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ticker.tick().await; // first tick fires immediately; skip it
+        let mut catch_up = false;
         loop {
-            tokio::select! {
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() { break; }
-                    continue;
+            if catch_up {
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() { break; }
+                        continue;
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
                 }
-                _ = ticker.tick() => {}
+            } else {
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() { break; }
+                        continue;
+                    }
+                    _ = ticker.tick() => {}
+                }
             }
             let mut jobs_deleted = 0_u64;
             let mut events_deleted = 0_u64;
             let mut more_remaining = false;
+            let mut made_progress = false;
+            let mut failed = false;
+            let mut interrupted = false;
             for _ in 0..16 {
                 if *shutdown.borrow() {
+                    interrupted = true;
                     break;
                 }
-                match state.store.prune_older_than_batch(max_age_ms, 250).await {
+                let started_at = std::time::Instant::now();
+                let result = state.store.prune_older_than_batch(max_age_ms, 250).await;
+                state.metrics.observe_storage(
+                    crate::metrics::StorageOperation::Retention,
+                    started_at.elapsed(),
+                    result.is_ok(),
+                );
+                match result {
                     Ok(report) => {
                         jobs_deleted += report.jobs_deleted;
                         events_deleted += report.events_deleted;
                         more_remaining = report.more_remaining;
-                        if !more_remaining || report.jobs_deleted == 0 {
+                        let progress = report.jobs_deleted != 0 || report.events_deleted != 0;
+                        made_progress |= progress;
+                        if !more_remaining || !progress {
                             break;
                         }
                         tokio::task::yield_now().await;
                     }
                     Err(e) => {
+                        failed = true;
                         tracing::warn!(error = %e, "retention sweep failed");
+                        more_remaining = false;
                         break;
                     }
                 }
             }
-            if jobs_deleted > 0 {
+            catch_up = more_remaining && made_progress;
+            if failed {
+                state.metrics.retention_failed(jobs_deleted, events_deleted);
+            } else if interrupted {
+                state
+                    .metrics
+                    .retention_interrupted(jobs_deleted, events_deleted);
+            } else {
+                state
+                    .metrics
+                    .retention_succeeded(jobs_deleted, events_deleted);
+            }
+            if jobs_deleted > 0 || events_deleted > 0 {
                 tracing::info!(
                     jobs_deleted,
                     events_deleted,
@@ -1324,7 +1651,14 @@ async fn flush_event_batch(
         return;
     }
     let expected = pending.len();
-    match state.store.append_events_batch(job_id, pending).await {
+    let started_at = std::time::Instant::now();
+    let result = state.store.append_events_batch(job_id, pending).await;
+    state.metrics.observe_storage(
+        crate::metrics::StorageOperation::Events,
+        started_at.elapsed(),
+        result.is_ok(),
+    );
+    match result {
         Ok(events) => {
             if events.len() != expected {
                 evidence.persistence_complete = false;
@@ -1385,7 +1719,8 @@ async fn finalize_job(state: &AppState, job_id: &str, terminal: TerminalEvidence
 
     delay = Duration::from_millis(10);
     loop {
-        match state
+        let started_at = std::time::Instant::now();
+        let result = state
             .store
             .finalize_with_event_and_effective_spec(
                 job_id,
@@ -1395,8 +1730,13 @@ async fn finalize_job(state: &AppState, job_id: &str, terminal: TerminalEvidence
                 built.effective_spec.as_ref(),
                 built.receipt.as_ref(),
             )
-            .await
-        {
+            .await;
+        state.metrics.observe_storage(
+            crate::metrics::StorageOperation::Finalize,
+            started_at.elapsed(),
+            result.is_ok(),
+        );
+        match result {
             Ok(Some(event)) => {
                 state.bus.send(job_id, wire_event(event));
                 state.bus.complete(job_id);
@@ -1475,6 +1815,7 @@ async fn try_build_receipt(
         "duration_ms": terminal.duration_ms.max(0),
         "evidence_complete": terminal.output.persistence_complete,
         "requested_limits": requested.get("limits").cloned().unwrap_or(Value::Null),
+        "requirements": requested.get("requirements").cloned().unwrap_or_else(|| json!({"minimum_isolation": "none"})),
         "code_sha256": format!("{:x}", Sha256::digest(code.as_bytes())),
         "stdin_sha256": format!("{:x}", Sha256::digest(stdin.as_bytes())),
         "resource_usage": terminal.telemetry.map(|telemetry| json!({
@@ -1505,10 +1846,15 @@ async fn try_build_receipt(
     // evidence that namespace/rootfs/seccomp bootstrap actually completed.
     let mut observed_effective_spec = None;
     if let (Some(provenance), Some(spec)) = (terminal.provenance, requested_spec.as_ref()) {
-        let limits = spec.limits.clone().clamped();
+        let mut limits = state.cfg.clamp_limits(spec.limits.clone());
+        if let Some(accepted_mem_mb) = state.store.job_requested_mem_mb(job_id).await? {
+            limits.mem_mb = state.cfg.clamp_mem_mb(accepted_mem_mb);
+        }
         let effective_limits = provenance.effective_limits(&limits);
         let policy = json!({
             "backend": provenance.backend,
+            "minimum_isolation": spec.requirements.minimum_isolation,
+            "isolation_class": provenance.isolation_class,
             "bootstrap_ready": provenance.bootstrap_ready,
             "isolated": provenance.isolated,
             "seccomp": provenance.seccomp,
@@ -1518,21 +1864,28 @@ async fn try_build_receipt(
             "dedicated_bootstrap": provenance.dedicated_bootstrap,
             "effective_limits": effective_limits,
             "limit_enforcement": provenance.limit_enforcement,
+            "runtime_version": provenance.runtime_version,
+            "runtime_sha256": provenance.runtime_sha256,
+            "rootfs_sha256": provenance.rootfs_sha256,
+            "config_sha256": provenance.config_sha256,
         });
         let Some(policy_bytes) = serde_json::to_vec(&policy).ok() else {
             return Ok(BuiltTerminalEvidence::default());
         };
-        observed_effective_spec = serde_json::to_value(EffectiveJobSpec {
-            language: spec.language.clone(),
-            code: spec.code.clone(),
-            stdin: spec.stdin.clone(),
-            limits: effective_limits.clone(),
-        })
-        .ok();
+        observed_effective_spec = Some(json!({
+            "storage_version": 2,
+            "limits": effective_limits.clone(),
+            "requirements": spec.requirements.clone(),
+            "isolation_class": provenance
+                .bootstrap_ready
+                .then_some(provenance.isolation_class),
+        }));
         if observed_effective_spec.is_none() {
             return Ok(BuiltTerminalEvidence::default());
         }
         receipt["backend"] = json!(provenance.backend);
+        receipt["minimum_isolation"] = json!(spec.requirements.minimum_isolation);
+        receipt["isolation_class"] = json!(provenance.isolation_class);
         receipt["bootstrap_ready"] = json!(provenance.bootstrap_ready);
         receipt["isolated"] = json!(provenance.isolated);
         receipt["seccomp"] = json!(provenance.seccomp);
@@ -1542,6 +1895,10 @@ async fn try_build_receipt(
         receipt["dedicated_bootstrap"] = json!(provenance.dedicated_bootstrap);
         receipt["effective_limits"] = json!(effective_limits);
         receipt["limit_enforcement"] = json!(provenance.limit_enforcement);
+        receipt["runtime_version"] = json!(provenance.runtime_version);
+        receipt["runtime_sha256"] = json!(provenance.runtime_sha256);
+        receipt["rootfs_sha256"] = json!(provenance.rootfs_sha256);
+        receipt["config_sha256"] = json!(provenance.config_sha256);
         receipt["policy_sha256"] = json!(format!("{:x}", Sha256::digest(&policy_bytes)));
     }
     Ok(BuiltTerminalEvidence {
@@ -1593,6 +1950,74 @@ fn wire_event(event: coop_store::EventRow) -> WireEvent {
 mod admission_tests {
     use super::*;
 
+    fn observed_provenance(
+        isolation_class: coop_types::IsolationClass,
+        bootstrap_ready: bool,
+    ) -> coop_exec::ExecutionProvenance {
+        coop_exec::ExecutionProvenance {
+            backend: "test-provider".to_string(),
+            isolation_class,
+            bootstrap_ready,
+            isolated: isolation_class != coop_types::IsolationClass::None && bootstrap_ready,
+            private_rootfs: false,
+            dedicated_bootstrap: false,
+            seccomp: false,
+            network_allowed: None,
+            networking: None,
+            limit_enforcement: coop_types::LimitEnforcement::NONE,
+            runtime_version: None,
+            runtime_sha256: None,
+            rootfs_sha256: None,
+            config_sha256: None,
+        }
+    }
+
+    fn successful_outcome(
+        status: coop_types::OutcomeStatus,
+    ) -> std::io::Result<coop_exec::ExecOutcome> {
+        Ok(coop_exec::ExecOutcome {
+            status,
+            exit_code: Some(0),
+            killed_by: None,
+            telemetry: coop_exec::ExecTelemetry::default(),
+        })
+    }
+
+    #[test]
+    fn terminal_execution_fails_closed_on_contradictory_isolation_evidence() {
+        let gvisor = observed_provenance(coop_types::IsolationClass::GvisorApplicationKernel, true);
+        assert!(!execution_evidence_violates_requirement(
+            &successful_outcome(coop_types::OutcomeStatus::Succeeded),
+            &gvisor,
+            coop_types::IsolationClass::LinuxSharedKernel,
+        ));
+
+        let shared_kernel =
+            observed_provenance(coop_types::IsolationClass::LinuxSharedKernel, true);
+        assert!(execution_evidence_violates_requirement(
+            &successful_outcome(coop_types::OutcomeStatus::Succeeded),
+            &shared_kernel,
+            coop_types::IsolationClass::GvisorApplicationKernel,
+        ));
+
+        let not_ready = observed_provenance(coop_types::IsolationClass::None, false);
+        assert!(execution_evidence_violates_requirement(
+            &successful_outcome(coop_types::OutcomeStatus::Succeeded),
+            &not_ready,
+            coop_types::IsolationClass::None,
+        ));
+        assert!(!execution_evidence_violates_requirement(
+            &successful_outcome(coop_types::OutcomeStatus::Cancelled),
+            &not_ready,
+            coop_types::IsolationClass::GvisorApplicationKernel,
+        ));
+        assert!(!execution_evidence_violates_requirement(
+            &Err(std::io::Error::other("failed before ready")),
+            &not_ready,
+            coop_types::IsolationClass::GvisorApplicationKernel,
+        ));
+    }
+
     async fn monitor_test_state() -> (AppState, mpsc::Receiver<QueuedJob>) {
         let base = std::env::temp_dir().join(format!(
             "coop-scheduler-monitor-test-{}",
@@ -1602,18 +2027,35 @@ mod admission_tests {
         let jobs_root = base.join("jobs");
         std::fs::create_dir_all(&base).expect("create test directory");
         let cfg = crate::config::Config {
+            attestation_mode: crate::config::AttestationMode::Off,
+            attestation_key_file: None,
             addr: "127.0.0.1:0".to_string(),
             db_path: db.to_string_lossy().into_owned(),
             api_keys: std::collections::HashMap::new(),
+            metrics_token: None,
+            credentials: Default::default(),
+            jwt: None,
             workers: 1,
             tenant_concurrency: 1,
+            tenant_queue_capacity: 64,
             rate_per_min: 60,
+            max_job_mem_mb: 1024,
+            memory_budget_mb: 4096,
+            storage_global_mb: 16 * 1024,
+            storage_tenant_mb: 4 * 1024,
+            storage_free_reserve_mb: 0,
             sandbox: "off".to_string(),
             jobs_root: jobs_root.to_string_lossy().into_owned(),
             rootfs: None,
             sandbox_helper: None,
+            gvisor_runsc: None,
+            gvisor_rootfs_sha256: None,
+            gvisor_platform: "systrap".to_string(),
+            gvisor_uid: 65_534,
+            gvisor_gid: 65_534,
             production: false,
             unsafe_allow_naive: false,
+            unsafe_allow_public_dev: false,
             python_bin: None,
             node_bin: None,
             bash_bin: None,
@@ -1622,7 +2064,9 @@ mod admission_tests {
             seccomp: false,
         };
         let store = Arc::new(coop_store::Store::open(&db).await.expect("open test store"));
-        let (_app, state, queue_rx) = crate::build_app(cfg, store).await.expect("build test app");
+        let (_app, state, queue_rx) = crate::build_app(cfg, store, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("build test app");
         (state, queue_rx)
     }
 
@@ -1643,7 +2087,7 @@ mod admission_tests {
     #[test]
     fn global_bound_survives_channel_drain_and_reclaims_on_dequeue() {
         const CAPACITY: usize = 16;
-        let (admission, mut receiver) = Admission::channel(CAPACITY);
+        let (admission, mut receiver) = Admission::channel(CAPACITY, CAPACITY);
         let mut fair_pending = Vec::new();
         let mut accepted = 0_usize;
 
@@ -1651,8 +2095,8 @@ mod admission_tests {
         // into per-tenant queues. The old channel-only bound accepted all of
         // these attempts; the lease bound must stop exactly at CAPACITY.
         for n in 0..10_000 {
-            if let Ok(reservation) = admission.try_reserve() {
-                reservation.send(format!("job-{n}"), "tenant".to_string());
+            if let Ok(reservation) = admission.try_reserve("tenant", 256) {
+                reservation.send(format!("job-{n}"));
                 accepted += 1;
             }
             while let Ok(queued) = receiver.try_recv() {
@@ -1663,7 +2107,10 @@ mod admission_tests {
         assert_eq!(accepted, CAPACITY);
         assert_eq!(fair_pending.len(), CAPACITY);
         assert_eq!(admission.depth(), CAPACITY);
-        assert_eq!(admission.try_reserve().err(), Some(TryAdmissionError::Full));
+        assert_eq!(
+            admission.try_reserve("tenant", 256).err(),
+            Some(TryAdmissionError::TenantFull)
+        );
 
         // A cancelled/terminal envelope retains its slot until the scheduler
         // actually dequeues/drops it; cancel/refill churn cannot accumulate
@@ -1671,22 +2118,142 @@ mod admission_tests {
         fair_pending.pop();
         assert_eq!(admission.depth(), CAPACITY - 1);
         admission
-            .try_reserve()
+            .try_reserve("tenant", 256)
             .expect("capacity reclaimed")
-            .send("replacement".to_string(), "tenant".to_string());
+            .send("replacement".to_string());
         assert_eq!(admission.depth(), CAPACITY);
+    }
+
+    #[test]
+    fn tenant_and_global_queue_leases_are_atomic_and_distinguishable() {
+        let (admission, mut receiver) = Admission::channel(3, 1);
+        admission
+            .try_reserve("tenant-a", 256)
+            .unwrap()
+            .send("a-1".to_string());
+        let held_a = receiver.try_recv().unwrap();
+        assert_eq!(
+            admission.try_reserve("tenant-a", 256).err(),
+            Some(TryAdmissionError::TenantFull)
+        );
+        admission
+            .try_reserve("tenant-b", 256)
+            .unwrap()
+            .send("b-1".to_string());
+        admission
+            .try_reserve("tenant-c", 256)
+            .unwrap()
+            .send("c-1".to_string());
+        let held_b = receiver.try_recv().unwrap();
+        let held_c = receiver.try_recv().unwrap();
+        assert_eq!(
+            admission.try_reserve("tenant-d", 256).err(),
+            Some(TryAdmissionError::GlobalFull)
+        );
+        drop(held_a);
+        assert_eq!(admission.tenant_depth("tenant-a"), 0);
+        admission
+            .try_reserve("tenant-d", 256)
+            .expect("dropping an envelope reclaims both leases");
+        drop((held_b, held_c));
+    }
+
+    #[tokio::test]
+    async fn older_weighted_memory_request_cannot_be_starved_by_smaller_jobs() {
+        let (mut state, _queue_rx) = monitor_test_state().await;
+        state.memory_slots = Arc::new(Semaphore::new(1024));
+        let held = Arc::clone(&state.memory_slots)
+            .try_acquire_many_owned(512)
+            .unwrap();
+        let (admission, mut ingress) = Admission::channel(2, 1);
+        admission
+            .try_reserve("large", 1024)
+            .unwrap()
+            .send("large-job".to_string());
+        admission
+            .try_reserve("small", 512)
+            .unwrap()
+            .send("small-job".to_string());
+        let large = ingress.recv().await.unwrap();
+        let small = ingress.recv().await.unwrap();
+        let mut pending = HashMap::from([
+            ("large".to_string(), VecDeque::from([large])),
+            ("small".to_string(), VecDeque::from([small])),
+        ]);
+        let mut round_robin = VecDeque::from(["large".to_string(), "small".to_string()]);
+        let mut active = HashSet::from(["large".to_string(), "small".to_string()]);
+        let (work_tx, mut work_rx) = mpsc::channel(2);
+        dispatch_available(
+            &state,
+            &work_tx,
+            &mut pending,
+            &mut round_robin,
+            &mut active,
+        )
+        .unwrap();
+        assert!(
+            work_rx.try_recv().is_err(),
+            "small job backfilled past older large job"
+        );
+        drop(held);
+        dispatch_available(
+            &state,
+            &work_tx,
+            &mut pending,
+            &mut round_robin,
+            &mut active,
+        )
+        .unwrap();
+        let work = work_rx
+            .try_recv()
+            .expect("large job dispatched after memory release");
+        assert_eq!(work.queued.job_id, "large-job");
+        assert_eq!(state.memory_slots.available_permits(), 0);
+        drop(work);
+        assert_eq!(state.memory_slots.available_permits(), 1024);
+    }
+
+    #[tokio::test]
+    async fn grandfathered_recovery_overflow_blocks_only_that_tenants_new_admission() {
+        let (admission, mut receiver) = Admission::channel(4, 1);
+        admission
+            .reserve_recovery("tenant-a", 256)
+            .await
+            .unwrap()
+            .send("old-a-1".to_string());
+        admission
+            .reserve_recovery("tenant-a", 256)
+            .await
+            .unwrap()
+            .send("old-a-2".to_string());
+        assert_eq!(admission.tenant_depth("tenant-a"), 2);
+        assert_eq!(
+            admission.try_reserve("tenant-a", 256).err(),
+            Some(TryAdmissionError::TenantFull)
+        );
+        admission
+            .try_reserve("tenant-b", 256)
+            .expect("another tenant retains capacity")
+            .send("new-b".to_string());
+        drop(receiver.recv().await.unwrap());
+        drop(receiver.recv().await.unwrap());
+        drop(receiver.recv().await.unwrap());
+        assert_eq!(admission.depth(), 0);
     }
 
     #[tokio::test]
     async fn closing_saturated_admission_wakes_async_waiters() {
-        let (admission, mut receiver) = Admission::channel(1);
+        let (admission, mut receiver) = Admission::channel(1, 1);
         admission
-            .try_reserve()
+            .try_reserve("tenant", 256)
             .unwrap()
-            .send("held".to_string(), "tenant".to_string());
+            .send("held".to_string());
 
         let waiter_admission = admission.clone();
-        let waiter = tokio::spawn(async move { waiter_admission.reserve().await.err() });
+        let waiter =
+            tokio::spawn(
+                async move { waiter_admission.reserve_recovery("other", 256).await.err() },
+            );
         tokio::task::yield_now().await;
         admission.close();
         assert_eq!(
@@ -1700,7 +2267,7 @@ mod admission_tests {
         drop(receiver.try_recv().expect("held envelope"));
         assert_eq!(admission.depth(), 0);
         assert_eq!(
-            admission.try_reserve().err(),
+            admission.try_reserve("tenant", 256).err(),
             Some(TryAdmissionError::Closed)
         );
     }
@@ -1711,6 +2278,7 @@ mod admission_tests {
         let stdout_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sink = JobSink {
             tx,
+            metrics: Arc::new(crate::metrics::Metrics::new()),
             stdout_dropped: Arc::clone(&stdout_dropped),
             stderr_dropped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             deferred_controls: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1765,6 +2333,7 @@ mod admission_tests {
             code: "print('never ready')".to_string(),
             stdin: None,
             limits: coop_types::Limits::default(),
+            requirements: coop_types::JobRequirements::default(),
         };
         state
             .store
@@ -1780,17 +2349,16 @@ mod admission_tests {
             .store
             .start_with_event_if_queued(
                 job_id,
-                &serde_json::to_value(EffectiveJobSpec {
-                    language: spec.language.clone(),
-                    code: spec.code.clone(),
-                    stdin: None,
-                    limits: EffectiveLimits::from_enforcement(
+                &json!({
+                    "storage_version": 2,
+                    "limits": EffectiveLimits::from_enforcement(
                         &spec.limits,
                         &LimitEnforcement::NAMESPACE_SANDBOX,
                         Some(false),
                     ),
-                })
-                .unwrap(),
+                    "requirements": coop_types::JobRequirements::default(),
+                    "isolation_class": serde_json::Value::Null,
+                }),
             )
             .await
             .unwrap()
@@ -1879,6 +2447,9 @@ mod admission_tests {
                 .expect("observed effective spec persisted"),
         )
         .unwrap();
+        assert_eq!(persisted_effective["storage_version"], 2);
+        assert!(persisted_effective.get("code").is_none());
+        assert!(persisted_effective.get("stdin").is_none());
         for control in [
             "wall_seconds",
             "cpu_seconds",
@@ -1903,6 +2474,7 @@ mod admission_tests {
             code: "raise SystemExit('must not execute')".to_string(),
             stdin: None,
             limits: coop_types::Limits::default(),
+            requirements: coop_types::JobRequirements::default(),
         };
         state
             .store
@@ -1961,7 +2533,7 @@ mod admission_tests {
             .load(std::sync::atomic::Ordering::Acquire));
         assert!(*state.shutdown.borrow());
         assert_eq!(
-            state.admission.try_reserve().err(),
+            state.admission.try_reserve("tenant", 256).err(),
             Some(TryAdmissionError::Closed)
         );
         let _ = workers.shutdown(&state, Duration::from_millis(250)).await;
@@ -1989,7 +2561,7 @@ mod admission_tests {
             .load(std::sync::atomic::Ordering::Acquire));
         assert!(*state.shutdown.borrow());
         assert_eq!(
-            state.admission.try_reserve().err(),
+            state.admission.try_reserve("tenant", 256).err(),
             Some(TryAdmissionError::Closed)
         );
         let _ = failed_workers
@@ -2054,11 +2626,11 @@ mod admission_tests {
     #[tokio::test]
     async fn dispatcher_detects_closed_worker_handoff_channel() {
         let (state, _queue_rx) = monitor_test_state().await;
-        let (admission, admission_rx) = Admission::channel(1);
+        let (admission, admission_rx) = Admission::channel(1, 1);
         admission
-            .try_reserve()
+            .try_reserve("tenant", 256)
             .expect("test admission")
-            .send("queued-job".to_string(), "tenant".to_string());
+            .send("queued-job".to_string());
         let (work_tx, work_rx) = mpsc::channel::<WorkItem>(1);
         drop(work_rx);
         let (_done_tx, done_rx) = mpsc::unbounded_channel();

@@ -1,8 +1,12 @@
+pub mod attestation;
 pub mod auth;
 pub mod bus;
 pub mod config;
+pub mod metrics;
 pub mod openapi;
 pub mod ratelimit;
+pub mod readiness;
+pub(crate) mod request_context;
 pub mod routes;
 pub mod scheduler;
 pub mod transport;
@@ -39,6 +43,7 @@ pub struct LifetimeAdmission {
     global: Arc<Semaphore>,
     tenants: Arc<DashMap<String, Arc<Semaphore>>>,
     per_tenant: usize,
+    global_capacity: usize,
     accepting: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -62,6 +67,7 @@ impl LifetimeAdmission {
             global: Arc::new(Semaphore::new(global)),
             tenants: Arc::new(DashMap::new()),
             per_tenant,
+            global_capacity: global,
             accepting: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
@@ -104,6 +110,15 @@ impl LifetimeAdmission {
             slots.close();
         }
     }
+
+    pub fn capacity(&self) -> usize {
+        self.global_capacity
+    }
+
+    pub fn depth(&self) -> usize {
+        self.global_capacity
+            .saturating_sub(self.global.available_permits())
+    }
 }
 
 #[derive(Clone)]
@@ -119,8 +134,25 @@ pub struct AppState {
     pub bus: Bus,
     pub admission: scheduler::Admission,
     pub tenant_sems: Arc<DashMap<String, Arc<Semaphore>>>,
+    /// Weighted aggregate memory budget. Each dispatched job owns exactly its
+    /// server-clamped MiB request until execution/finalization returns.
+    pub memory_slots: Arc<Semaphore>,
     pub rate: Arc<ratelimit::RateLimiter>,
+    /// Fixed-cardinality, process-local operational telemetry. This registry
+    /// intentionally contains no tenant, job, request, trace, or raw path
+    /// dimensions.
+    pub metrics: Arc<metrics::Metrics>,
+    /// Digest of the separately scoped global scrape credential. `None`
+    /// disables `/metrics` without affecting tenant API availability.
+    pub metrics_token_digest: Option<[u8; 32]>,
+    /// O(1) readiness snapshot fed by one bounded background store probe.
+    pub readiness: Arc<readiness::ReadinessCache>,
+    pub jwt_verifier: Option<Arc<auth::JwtVerifier>>,
+    /// Optional Ed25519 signer plus the public verification material exposed
+    /// to authenticated clients. Exact artifacts/envelopes live in Store.
+    pub attestations: Arc<attestation::AttestationService>,
     pub sandbox_mode: coop_exec::SandboxMode,
+    pub execution_provider: Arc<dyn coop_exec::ExecutionProvider>,
     /// F-005: install a seccomp-BPF allowlist in sandboxed jobs (see Config).
     pub seccomp: bool,
     /// Exact host executables that passed the development executor's bounded
@@ -139,6 +171,10 @@ pub struct AppState {
     /// Entries are removed when the job finishes.
     pub cancels: Arc<DashMap<String, RunningJob>>,
     pub stream_tickets: Arc<DashMap<String, auth::StreamTicket>>,
+    /// Request correlation retained only while this process owns a job. The
+    /// durable integration boundary is documented separately; no source,
+    /// output, tenant secret, baggage, or raw trace state is retained here.
+    pub(crate) job_traces: Arc<DashMap<String, request_context::JobTraceContext>>,
     pub started_at: std::time::Instant,
     pub shutdown: watch::Sender<bool>,
     /// False only while the binary is reconciling durable startup state.
@@ -174,23 +210,67 @@ impl AppState {
 pub async fn build_app(
     cfg: Config,
     store: Arc<Store>,
+    bound_addr: std::net::SocketAddr,
 ) -> Result<(axum::Router, AppState, mpsc::Receiver<scheduler::QueuedJob>), String> {
+    cfg.validate_metrics_token_separation()?;
+    let expected_storage_limits = cfg.storage_limits();
+    if store.storage_limits() != expected_storage_limits {
+        return Err(
+            "Store policy does not match Config storage quotas; open it with Store::open_with_limits using the configured global, tenant, and free-space limits"
+                .to_string(),
+        );
+    }
     let rate_per_min = cfg.rate_per_min;
+    let metrics_token_digest = cfg.metrics_token.as_deref().map(metrics::token_digest);
     let workers = cfg.workers;
-    let (admission, queue_rx) = scheduler::Admission::channel(QUEUE_CAPACITY);
-    let sandbox_mode = resolve_sandbox(&cfg)?;
-    // F-005: only meaningful when kernel isolation is actually in play; the
-    // naive backend has no exec boundary to put a filter in front of.
-    let seccomp_enabled = cfg.seccomp && matches!(sandbox_mode, coop_exec::SandboxMode::Namespaces);
+    let memory_budget_mb = cfg.memory_budget_mb;
+    let (admission, queue_rx) =
+        scheduler::Admission::channel(QUEUE_CAPACITY, cfg.tenant_queue_capacity);
+    let jwt_verifier = match cfg.jwt.clone() {
+        Some(jwt) => Some(Arc::new(auth::JwtVerifier::build(jwt).await?)),
+        None => None,
+    };
+    // Load and validate private key material before executor discovery or any
+    // background task starts. Errors never include the key bytes.
+    let attestations = Arc::new(attestation::AttestationService::from_config(&cfg)?);
 
     // N-1: tenant isolation requires the jobs root to be server-private
     // (0700). The binary path enforces this in main(), but any embedder that
     // calls build_app directly must get the same guarantee, or the default-
     // mode parent lets sandboxed jobs enumerate sibling workdir names.
-    crate::config::prepare_jobs_root(
-        Path::new(&cfg.jobs_root),
-        cfg.production || matches!(sandbox_mode, coop_exec::SandboxMode::Namespaces),
-    )?;
+    let requested = cfg.sandbox.trim().to_ascii_lowercase();
+    let explicitly_isolated = matches!(
+        requested.as_str(),
+        "ns" | "namespaces" | "sandbox" | "gvisor" | "runsc"
+    );
+    let jobs_root = Path::new(&cfg.jobs_root);
+    crate::config::prepare_jobs_root(jobs_root, false)?;
+    let stale_gvisor = coop_exec::stale_gvisor_state_present(jobs_root)
+        .map_err(|error| format!("could not inspect stale gVisor state: {error}"))?;
+    let early_strict = cfg.production || explicitly_isolated || stale_gvisor;
+    if early_strict {
+        crate::config::prepare_jobs_root(jobs_root, true)?;
+        coop_exec::quiesce_stale_gvisor_workloads(jobs_root)
+            .await
+            .map_err(|error| format!("could not quiesce stale gVisor workloads: {error}"))?;
+    }
+    let sandbox_mode = resolve_sandbox(&cfg)?;
+    cfg.validate_resolved_listener_security(sandbox_mode)?;
+    cfg.validate_bound_listener_security(bound_addr, sandbox_mode)?;
+    if !early_strict && !matches!(sandbox_mode, coop_exec::SandboxMode::Off) {
+        crate::config::prepare_jobs_root(jobs_root, true)?;
+        coop_exec::quiesce_stale_gvisor_workloads(jobs_root)
+            .await
+            .map_err(|error| format!("could not quiesce stale gVisor workloads: {error}"))?;
+    }
+    let execution_provider = build_execution_provider(&cfg, sandbox_mode).await?;
+    execution_provider
+        .reconcile(Path::new(&cfg.jobs_root))
+        .await
+        .map_err(|error| format!("execution-provider crash reconciliation failed: {error}"))?;
+    // F-005: only meaningful when kernel isolation is actually in play; the
+    // naive backend has no exec boundary to put a filter in front of.
+    let seccomp_enabled = cfg.seccomp && matches!(sandbox_mode, coop_exec::SandboxMode::Namespaces);
 
     let mut resolved_naive_interpreters = HashMap::new();
     let available_languages = if matches!(sandbox_mode, coop_exec::SandboxMode::Off) {
@@ -247,14 +327,22 @@ pub async fn build_app(
         bus: Bus::default(),
         admission,
         tenant_sems: Arc::new(DashMap::new()),
+        memory_slots: Arc::new(Semaphore::new(memory_budget_mb as usize)),
         rate: Arc::new(ratelimit::RateLimiter::new(rate_per_min)),
+        metrics: Arc::new(metrics::Metrics::new()),
+        metrics_token_digest,
+        readiness: Arc::new(readiness::ReadinessCache::new()),
+        jwt_verifier,
+        attestations,
         sandbox_mode,
+        execution_provider,
         seccomp: seccomp_enabled,
         resolved_naive_interpreters: Arc::new(resolved_naive_interpreters),
         available_languages: Arc::new(available_languages),
         execution_start_gate: Arc::new(coop_exec::ExecutionStartGate::default()),
         cancels: Arc::new(DashMap::new()),
         stream_tickets: Arc::new(DashMap::new()),
+        job_traces: Arc::new(DashMap::new()),
         started_at: std::time::Instant::now(),
         shutdown,
         startup_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -279,14 +367,100 @@ pub async fn build_app(
         "worker pool configured"
     );
 
+    readiness::prime(&state).await;
     let app = routes::router(state.clone());
+    std::mem::drop(readiness::spawn_monitor(state.clone()));
+    std::mem::drop(attestation::spawn_worker(state.clone()));
     Ok((app, state, queue_rx))
+}
+
+async fn build_execution_provider(
+    _cfg: &Config,
+    mode: coop_exec::SandboxMode,
+) -> Result<Arc<dyn coop_exec::ExecutionProvider>, String> {
+    match mode {
+        coop_exec::SandboxMode::Off => Ok(Arc::new(coop_exec::OffProvider)),
+        coop_exec::SandboxMode::Namespaces => Ok(Arc::new(coop_exec::NamespaceProvider)),
+        coop_exec::SandboxMode::Gvisor => {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            {
+                let runsc = _cfg.gvisor_runsc.as_deref().ok_or_else(|| {
+                    "COOP_GVISOR_RUNSC is required for COOP_SANDBOX=gvisor".to_string()
+                })?;
+                let rootfs = _cfg
+                    .rootfs
+                    .as_deref()
+                    .ok_or_else(|| "COOP_ROOTFS is required for COOP_SANDBOX=gvisor".to_string())?;
+                let platform = coop_exec::gvisor::GvisorPlatform::parse(&_cfg.gvisor_platform)
+                    .map_err(|error| error.to_string())?;
+                let rootfs_sha256 = _cfg.gvisor_rootfs_sha256.clone().ok_or_else(|| {
+                    "COOP_GVISOR_ROOTFS_SHA256 is required for COOP_SANDBOX=gvisor".to_string()
+                })?;
+                let provider = coop_exec::gvisor::GvisorProvider::new(
+                    std::path::PathBuf::from(runsc),
+                    std::path::PathBuf::from(rootfs),
+                    platform,
+                    Some(_cfg.gvisor_uid),
+                    Some(_cfg.gvisor_gid),
+                    rootfs_sha256,
+                )
+                .await
+                .map_err(|error| format!("gVisor provider configuration failed: {error}"))?;
+                Ok(Arc::new(provider))
+            }
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            {
+                Err("gVisor execution is supported only on Linux x86_64".to_string())
+            }
+        }
+    }
+}
+
+/// Rebuild a Router for an already-constructed state only after validating
+/// the address of the listener that will serve it. This is primarily useful
+/// for embedders that replace process-local admission components before
+/// serving; the unchecked router constructor remains crate-private.
+pub fn router_for_bound_state(
+    state: AppState,
+    bound_addr: std::net::SocketAddr,
+) -> Result<axum::Router, String> {
+    state
+        .cfg
+        .validate_bound_listener_security(bound_addr, state.sandbox_mode)?;
+    Ok(routes::router(state))
 }
 
 /// F8: sandbox selection never silently degrades. Explicit namespace requests
 /// are validated against the host; auto/unknown configurations fail closed in
 /// production instead of falling back to unprotected execution.
 pub fn resolve_sandbox(cfg: &Config) -> Result<coop_exec::SandboxMode, String> {
+    if matches!(
+        cfg.sandbox.trim().to_ascii_lowercase().as_str(),
+        "gvisor" | "runsc"
+    ) {
+        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            return Err("COOP_SANDBOX=gvisor requires Linux x86_64".to_string());
+        }
+        let rootfs = cfg
+            .rootfs
+            .as_deref()
+            .ok_or_else(|| "COOP_ROOTFS is required for COOP_SANDBOX=gvisor".to_string())?;
+        validate_rootfs(Path::new(rootfs))?;
+        let runsc = cfg
+            .gvisor_runsc
+            .as_deref()
+            .ok_or_else(|| "COOP_GVISOR_RUNSC is required for COOP_SANDBOX=gvisor".to_string())?;
+        if !Path::new(runsc).is_absolute() {
+            return Err("COOP_GVISOR_RUNSC must be an absolute path".to_string());
+        }
+        let digest = cfg.gvisor_rootfs_sha256.as_deref().ok_or_else(|| {
+            "COOP_GVISOR_ROOTFS_SHA256 is required for COOP_SANDBOX=gvisor".to_string()
+        })?;
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("COOP_GVISOR_ROOTFS_SHA256 must be 64 hexadecimal characters".to_string());
+        }
+        return Ok(coop_exec::SandboxMode::Gvisor);
+    }
     if matches!(
         cfg.sandbox.trim().to_ascii_lowercase().as_str(),
         "off" | "none" | "naive"
@@ -595,6 +769,69 @@ mod tests {
             resolve_sandbox_with("off", true, false, false, false, true).unwrap(),
             coop_exec::SandboxMode::Off
         );
+    }
+
+    #[tokio::test]
+    async fn build_app_rejects_store_policy_mismatch_even_in_development() {
+        let base = std::env::temp_dir().join(format!(
+            "coop-store-policy-mismatch-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let db = base.join("coop.db");
+        let jobs = base.join("jobs");
+        let source = |key: &str| match key {
+            "COOP_API_KEYS" => Some("tenant:a-long-development-key".to_string()),
+            "COOP_SANDBOX" => Some("off".to_string()),
+            "COOP_STORAGE_TENANT_MB" => Some("128".to_string()),
+            "COOP_STORAGE_GLOBAL_MB" => Some("256".to_string()),
+            "COOP_STORAGE_FREE_RESERVE_MB" => Some("0".to_string()),
+            "COOP_JOBS_ROOT" => Some(jobs.to_string_lossy().into_owned()),
+            _ => None,
+        };
+        let cfg = Config::from_sources(&source, false).unwrap();
+        let store = Arc::new(Store::open(&db).await.unwrap());
+        match build_app(cfg, store, "127.0.0.1:0".parse().unwrap()).await {
+            Err(error) => assert!(error.contains("Store policy does not match"), "{error}"),
+            Ok(_) => panic!("development embedder bypassed configured storage quotas"),
+        }
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn embedded_router_contract_validates_the_actual_bound_listener() {
+        let base = std::env::temp_dir().join(format!(
+            "coop-bound-listener-contract-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let db = base.join("coop.db");
+        let jobs = base.join("jobs");
+        let source = |key: &str| match key {
+            "COOP_SANDBOX" => Some("off".to_string()),
+            "COOP_STORAGE_FREE_RESERVE_MB" => Some("0".to_string()),
+            "COOP_JOBS_ROOT" => Some(jobs.to_string_lossy().into_owned()),
+            _ => None,
+        };
+        let cfg = Config::from_sources(&source, false).unwrap();
+        let store = Arc::new(Store::open(&db).await.unwrap());
+        let public: std::net::SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        match build_app(cfg.clone(), Arc::clone(&store), public).await {
+            Err(error) => assert!(error.contains("non-loopback"), "{error}"),
+            Ok(_) => panic!("public embedder bypassed actual-listener validation"),
+        }
+
+        let (_app, state, _queue) = build_app(
+            cfg.clone(),
+            Arc::clone(&store),
+            "127.0.0.1:8080".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(router_for_bound_state(state, public).is_err());
+
+        let mut acknowledged = cfg;
+        acknowledged.unsafe_allow_public_dev = true;
+        assert!(build_app(acknowledged, store, public).await.is_ok());
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

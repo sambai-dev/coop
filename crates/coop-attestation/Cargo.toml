@@ -1,0 +1,42 @@
+[package]
+name = "coop-attestation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portable signed execution attestations for Coop"
+publish = false
+
+[lib]
+name = "coop_attestation"
+
+[[bin]]
+name = "coop-verify"
+path = "src/bin/coop-verify.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap"]
+
+[dependencies]
+base64.workspace = true
+clap = { workspace = true, optional = true }
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+pkcs8.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+rustix.workspace = true
+
+[dev-dependencies]
+jsonschema = { version = "0.33.0", default-features = false }
+serde_json = { version = "1", features = ["preserve_order"] }
+tempfile = "3"

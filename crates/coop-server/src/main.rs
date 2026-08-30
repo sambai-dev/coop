@@ -25,16 +25,66 @@ enum RuntimeStop {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    init_tracing();
 
     if let Err(error) = run().await {
         tracing::error!(%error, "coop terminated");
-        eprintln!("error: {error}");
         std::process::exit(1);
+    }
+}
+
+fn init_tracing() {
+    let filter =
+        || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let production = coop_server::config::is_production();
+    let configured = std::env::var("COOP_LOG_FORMAT").ok();
+    let (format, invalid) = select_log_format(configured.as_deref(), production);
+    match format {
+        LogFormat::Json => tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_target(true)
+            .init(),
+        LogFormat::Compact => tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .compact()
+            .with_target(true)
+            .init(),
+    }
+    if invalid {
+        let fallback = if production { "json" } else { "compact" };
+        tracing::warn!(
+            fallback,
+            "unsupported COOP_LOG_FORMAT; using privacy-safe fallback"
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogFormat {
+    Json,
+    Compact,
+}
+
+fn select_log_format(configured: Option<&str>, production: bool) -> (LogFormat, bool) {
+    let default = if production {
+        LogFormat::Json
+    } else {
+        LogFormat::Compact
+    };
+    let Some(configured) = configured.map(str::trim).filter(|value| !value.is_empty()) else {
+        return (default, false);
+    };
+    if configured.eq_ignore_ascii_case("json") {
+        (LogFormat::Json, false)
+    } else if configured.eq_ignore_ascii_case("compact") || configured.eq_ignore_ascii_case("text")
+    {
+        (LogFormat::Compact, false)
+    } else {
+        (default, true)
     }
 }
 
@@ -47,55 +97,76 @@ async fn run() -> Result<(), String> {
     let listener = TcpListener::bind(&addr)
         .await
         .map_err(|error| format!("failed to bind {addr}: {error}"))?;
+    let bound_addr = listener
+        .local_addr()
+        .map_err(|error| format!("failed to inspect bound listener {addr}: {error}"))?;
     let listener = WriteTimeoutListener::new(listener, HTTP_WRITE_PROGRESS_TIMEOUT);
 
     // The adjacent OS lock covers the stronger case: another process using a
     // different port but the same canonical SQLite state cannot run recovery
     // or workers concurrently. Keep the file handle alive for this run.
     let _instance_lock = acquire_instance_lock(Path::new(&cfg.db_path))?;
+    let store_limits = cfg.storage_limits();
+    let requested = cfg.sandbox.trim().to_ascii_lowercase();
+    let explicitly_isolated = matches!(
+        requested.as_str(),
+        "ns" | "namespaces" | "sandbox" | "gvisor" | "runsc"
+    );
+    let jobs_root = Path::new(&cfg.jobs_root);
+    // Always validate the private leaf before looking for provider-owned
+    // state. A previous gVisor crash must be quiesced even when the operator
+    // now requests Off; provider selection alone is not a cleanup boundary.
+    coop_server::config::prepare_jobs_root(jobs_root, false)?;
+    let stale_gvisor = coop_exec::stale_gvisor_state_present(jobs_root)
+        .map_err(|error| format!("could not inspect stale gVisor state: {error}"))?;
+    if cfg.production || explicitly_isolated || stale_gvisor {
+        coop_server::config::prepare_jobs_root(jobs_root, true)?;
+        coop_exec::quiesce_stale_gvisor_workloads(jobs_root)
+            .await
+            .map_err(|error| format!("could not quiesce stale gVisor workloads: {error}"))?;
+    }
     let store = Arc::new(
-        Store::open(Path::new(&cfg.db_path))
+        Store::open_with_limits(Path::new(&cfg.db_path), store_limits)
             .await
             .map_err(|error| format!("failed to open sqlite event store: {error}"))?,
     );
 
     // F8: an unsatisfiable sandbox configuration is a startup error, not a
     // silent downgrade to unprotected execution.
-    let (app, state, queue_rx) = build_app(cfg, store).await?;
+    let (app, state, queue_rx) = build_app(cfg, store, bound_addr).await?;
     state
         .startup_ready
         .store(false, std::sync::atomic::Ordering::Release);
 
-    if matches!(state.sandbox_mode, coop_exec::SandboxMode::Namespaces) {
-        let rootfs = state
-            .cfg
-            .rootfs
-            .as_deref()
-            .ok_or_else(|| "namespace preflight requires COOP_ROOTFS".to_string())?;
-        let helper = state
-            .cfg
-            .sandbox_helper
-            .as_deref()
-            .ok_or_else(|| "namespace preflight requires COOP_SANDBOX_HELPER".to_string())?;
-        coop_exec::namespace_sandbox_execution_preflight(
-            Path::new(rootfs),
-            Path::new(helper),
-            Path::new(&state.cfg.jobs_root),
-            state.seccomp,
-            &[
-                ("python", state.cfg.python_bin.as_deref()),
-                ("node", state.cfg.node_bin.as_deref()),
-                ("bash", state.cfg.bash_bin.as_deref()),
-            ],
-        )
+    state
+        .execution_provider
+        .reconcile(Path::new(&state.cfg.jobs_root))
         .await
-        .map_err(|error| format!("namespace execution preflight failed: {error}"))?;
-    }
+        .map_err(|error| format!("execution-provider crash reconciliation failed: {error}"))?;
+    state
+        .execution_provider
+        .preflight(coop_exec::ProviderPreflight {
+            jobs_root: PathBuf::from(&state.cfg.jobs_root),
+            rootfs: state.cfg.rootfs.as_ref().map(PathBuf::from),
+            helper: state.cfg.sandbox_helper.as_ref().map(PathBuf::from),
+            seccomp: state.seccomp,
+            interpreter_overrides: vec![
+                ("python".to_string(), state.cfg.python_bin.clone()),
+                ("node".to_string(), state.cfg.node_bin.clone()),
+                ("bash".to_string(), state.cfg.bash_bin.clone()),
+            ],
+        })
+        .await
+        .map_err(|error| format!("execution-provider preflight failed: {error}"))?;
 
     // Boot recovery: a process that was running when the previous server
     // stopped cannot be resumed, so finalize it with restart evidence. Queued
     // jobs remain accepted and are re-enqueued below.
     let recovered = recover_stale_running_retrying(&state).await?;
+    state.metrics.recovered(
+        coop_server::metrics::RecoveryKind::InterruptedRunning,
+        recovered,
+    );
     if recovered > 0 {
         tracing::warn!(
             recovered,
@@ -158,6 +229,10 @@ async fn run() -> Result<(), String> {
             recovery_finished = true;
             match classify_recovery_completion(completion) {
                 Ok(restored) => {
+                    state.metrics.recovered(
+                        coop_server::metrics::RecoveryKind::RestoredQueued,
+                        restored as u64,
+                    );
                     tracing::info!(restored, "durable queued-job recovery complete");
                     tokio::select! {
                         biased;
@@ -293,7 +368,14 @@ fn classify_recovery_shutdown_completion(
 async fn recover_stale_running_retrying(state: &coop_server::AppState) -> Result<u64, String> {
     let mut delay = Duration::from_millis(20);
     for attempt in 1..=STORAGE_RETRY_ATTEMPTS {
-        match state.store.recover_stale_running().await {
+        let started_at = std::time::Instant::now();
+        let result = state.store.recover_stale_running().await;
+        state.metrics.observe_storage(
+            coop_server::metrics::StorageOperation::Recovery,
+            started_at.elapsed(),
+            result.is_ok(),
+        );
+        match result {
             Ok(recovered) => return Ok(recovered),
             Err(error) if attempt == STORAGE_RETRY_ATTEMPTS => {
                 return Err(format!(
@@ -328,22 +410,68 @@ async fn recover_queued_jobs(state: coop_server::AppState) -> Result<usize, Stri
             }
             let reservation = state
                 .admission
-                .reserve()
+                .reserve_recovery(&row.tenant, state.cfg.clamp_mem_mb(row.requested_mem_mb))
                 .await
                 // Admission is closed only by AppState::begin_shutdown. The
                 // sticky watch publication follows immediately, but reserve
                 // can observe the close first; classify both orderings as the
                 // same expected recovery stop rather than a fatal boot error.
                 .map_err(|_| "shutdown requested".to_string())?;
+            // Publish process-local ownership before the durable recheck.
+            // A concurrent cancellation can now always close this channel;
+            // without this ordering a terminal row could retain a freshly
+            // registered channel forever after the cancellation completed.
             state.bus.register(&row.job_id);
-            reservation.send(row.job_id.clone(), row.tenant.clone());
-            restored += 1;
+            let current = match job_summary_retrying(&state, &row.job_id).await {
+                Ok(current) => current,
+                Err(error) => {
+                    state.bus.complete(&row.job_id);
+                    return Err(error);
+                }
+            };
+            match current {
+                Some(current) if current.status == "queued" && current.tenant == row.tenant => {
+                    reservation.send(row.job_id.clone());
+                    restored += 1;
+                }
+                // Cancellation, retention, or an unexpected lifecycle race
+                // won after the page read. Dropping the reservation releases
+                // both global and tenant leases; completing is idempotent if
+                // the cancellation path already removed the channel.
+                _ => state.bus.complete(&row.job_id),
+            }
         }
         cursor = page.last().map(JobCursor::from);
         if page_len < RECOVERY_PAGE_SIZE as usize {
             return Ok(restored);
         }
     }
+}
+
+async fn job_summary_retrying(
+    state: &coop_server::AppState,
+    job_id: &str,
+) -> Result<Option<coop_store::JobSummary>, String> {
+    let mut delay = Duration::from_millis(20);
+    for attempt in 1..=STORAGE_RETRY_ATTEMPTS {
+        if *state.shutdown.borrow() {
+            return Err("shutdown requested".to_string());
+        }
+        match state.store.get_job_summary(job_id).await {
+            Ok(row) => return Ok(row),
+            Err(error) if attempt == STORAGE_RETRY_ATTEMPTS => {
+                return Err(format!(
+                    "queued-job recovery status recheck failed after {STORAGE_RETRY_ATTEMPTS} attempts: {error}"
+                ));
+            }
+            Err(error) => {
+                tracing::warn!(%error, attempt, %job_id, "boot recovery status recheck failed; retrying");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(1));
+            }
+        }
+    }
+    unreachable!("retry loop returns on its final attempt")
 }
 
 async fn queued_page_retrying(
@@ -355,11 +483,17 @@ async fn queued_page_retrying(
         if *state.shutdown.borrow() {
             return Err("shutdown requested".to_string());
         }
-        match state
+        let started_at = std::time::Instant::now();
+        let result = state
             .store
             .queued_jobs_page(cursor, RECOVERY_PAGE_SIZE)
-            .await
-        {
+            .await;
+        state.metrics.observe_storage(
+            coop_server::metrics::StorageOperation::Recovery,
+            started_at.elapsed(),
+            result.is_ok(),
+        );
+        match result {
             Ok(page) => return Ok(page),
             Err(error) if attempt == STORAGE_RETRY_ATTEMPTS => {
                 return Err(format!(
@@ -648,6 +782,24 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_format_is_json_by_default_in_production_and_explicitly_overridable() {
+        assert_eq!(select_log_format(None, true), (LogFormat::Json, false));
+        assert_eq!(select_log_format(None, false), (LogFormat::Compact, false));
+        assert_eq!(
+            select_log_format(Some(" compact "), true),
+            (LogFormat::Compact, false)
+        );
+        assert_eq!(
+            select_log_format(Some("JSON"), false),
+            (LogFormat::Json, false)
+        );
+        assert_eq!(
+            select_log_format(Some("unsafe-unknown"), true),
+            (LogFormat::Json, true)
+        );
+    }
 
     #[test]
     fn retained_worker_failure_upgrades_operator_stop_to_fatal() {

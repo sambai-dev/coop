@@ -1,3 +1,4 @@
+import hashlib
 import http.client
 import io
 import json
@@ -5,13 +6,21 @@ import unittest
 import urllib.error
 import urllib.parse
 
-from coop import Coop, CoopError, Limits
+from coop import Coop, CoopError, Limits, _SameOriginRedirect, isolation_satisfies
 
 
 class Response:
-    def __init__(self, value, status=200):
-        self.body = json.dumps(value).encode() if value is not None else b""
+    def __init__(self, value, status=200, headers=None, *, raw=None, url=None):
+        self.body = (
+            raw
+            if raw is not None
+            else json.dumps(value).encode()
+            if value is not None
+            else b""
+        )
         self.status = status
+        self.headers = headers or {}
+        self.url = url
 
     def __enter__(self):
         return self
@@ -21,6 +30,9 @@ class Response:
 
     def read(self):
         return self.body
+
+    def geturl(self):
+        return self.url
 
 
 class QueueOpener:
@@ -35,6 +47,8 @@ class QueueOpener:
         value = self.values.pop(0)
         if isinstance(value, Exception):
             raise value
+        if isinstance(value, Response):
+            return value
         return Response(value)
 
 
@@ -51,6 +65,18 @@ class Socket:
 
 
 class CoopTests(unittest.TestCase):
+    def test_isolation_satisfaction_matches_the_server_lattice(self):
+        self.assertTrue(
+            isolation_satisfies("gvisor-application-kernel", "linux-shared-kernel")
+        )
+        self.assertTrue(isolation_satisfies("confidential-vm", "hardware-vm"))
+        self.assertFalse(
+            isolation_satisfies("linux-shared-kernel", "gvisor-application-kernel")
+        )
+        self.assertTrue(isolation_satisfies("wasm-capability", "wasm-capability"))
+        self.assertFalse(isolation_satisfies("hardware-vm", "wasm-capability"))
+        self.assertFalse(isolation_satisfies("wasm-capability", "linux-shared-kernel"))
+
     def test_truncated_response_is_a_retryable_transport_error(self):
         class TruncatedResponse(Response):
             def __init__(self):
@@ -115,6 +141,180 @@ class CoopTests(unittest.TestCase):
         client.submit("bash", "true", limits=Limits(mem_mb=64), wall_seconds=3)
         body = json.loads(opener.requests[0].data)
         self.assertEqual(body["limits"], {"mem_mb": 64, "wall_seconds": 3})
+
+    def test_submit_serializes_typed_atomic_execution_requirements(self):
+        opener = QueueOpener(
+            {"job_id": "j", "status": "queued", "stream_url": "/s", "replay_url": "/r"}
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+        client.submit(
+            "python",
+            "pass",
+            requirements={"minimum_isolation": "linux-shared-kernel"},
+        )
+        body = json.loads(opener.requests[0].data)
+        self.assertEqual(
+            body["requirements"], {"minimum_isolation": "linux-shared-kernel"}
+        )
+
+    def test_submit_accepts_empty_requirements_as_the_server_default(self):
+        opener = QueueOpener(
+            {"job_id": "j", "status": "queued", "stream_url": "/s", "replay_url": "/r"}
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+        client.submit("python", "pass", requirements={})
+        self.assertEqual(json.loads(opener.requests[0].data)["requirements"], {})
+
+    def test_submit_uses_one_idempotency_key_for_ambiguous_retries(self):
+        opener = QueueOpener(
+            urllib.error.URLError(TimeoutError("response was ambiguous")),
+            {
+                "job_id": "j",
+                "status": "queued",
+                "stream_url": "/s",
+                "replay_url": "/r",
+            },
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+
+        submitted = client.submit(
+            "python",
+            "print(1)",
+            idempotency_key="submit-123",
+            retry_ambiguous=True,
+            retry_backoff=0,
+        )
+
+        self.assertEqual(submitted["job_id"], "j")
+        self.assertEqual(len(opener.requests), 2)
+        self.assertEqual(opener.requests[0].data, opener.requests[1].data)
+        for request in opener.requests:
+            self.assertEqual(request.get_header("Idempotency-key"), "submit-123")
+
+    def test_submit_result_exposes_location_and_replay_metadata(self):
+        body = {
+            "job_id": "j",
+            "status": "queued",
+            "stream_url": "/s",
+            "replay_url": "/r",
+        }
+        opener = QueueOpener(
+            Response(
+                body,
+                status=201,
+                headers={
+                    "Location": "/v1/jobs/j",
+                    "Idempotency-Replayed": "false",
+                },
+            ),
+            Response(
+                body,
+                status=201,
+                headers={
+                    "Location": "/v1/jobs/j",
+                    "Idempotency-Replayed": "true",
+                },
+            ),
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+        first = client.submit_result("python", "pass", idempotency_key="submit-1")
+        replay = client.submit_result("python", "pass", idempotency_key="submit-1")
+        self.assertEqual(first["job"]["job_id"], "j")
+        self.assertEqual(first["location"], "/v1/jobs/j")
+        self.assertFalse(first["idempotency_replayed"])
+        self.assertEqual(replay["job"]["job_id"], "j")
+        self.assertTrue(replay["idempotency_replayed"])
+
+    def test_submit_does_not_retry_ambiguity_without_explicit_opt_in(self):
+        opener = QueueOpener(
+            urllib.error.URLError(TimeoutError("response was ambiguous"))
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+
+        with self.assertRaises(CoopError) as raised:
+            client.submit("python", "pass", idempotency_key="submit-456")
+
+        self.assertEqual(raised.exception.code, "request_timeout")
+        self.assertEqual(raised.exception.idempotency_key, "submit-456")
+        self.assertEqual(len(opener.requests), 1)
+
+    def test_unkeyed_ambiguous_submit_failure_is_not_safe_to_retry(self):
+        opener = QueueOpener(
+            urllib.error.URLError(TimeoutError("response was ambiguous"))
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+        with self.assertRaises(CoopError) as raised:
+            client.submit("python", "pass")
+        self.assertFalse(raised.exception.retryable)
+        self.assertIsNone(raised.exception.idempotency_key)
+
+    def test_submit_rejects_unsafe_retry_configuration_before_transport(self):
+        client = Coop("https://example.test", "secret", opener=QueueOpener())
+        for operation in (
+            lambda: client.submit("python", "pass", idempotency_key="bad\nkey"),
+            lambda: client.submit("python", "pass", idempotency_key="k" * 129),
+            lambda: client.submit(
+                "python", "pass", idempotency_key="key", max_ambiguous_retries=11
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                operation()
+        with self.assertRaises(TypeError):
+            client.submit("python", "pass", retry_ambiguous=1)  # type: ignore[arg-type]
+
+    def test_submit_generates_one_stable_key_for_opt_in_ambiguous_retry(self):
+        opener = QueueOpener(
+            urllib.error.URLError(TimeoutError("response was ambiguous")),
+            {
+                "job_id": "j",
+                "status": "queued",
+                "stream_url": "/s",
+                "replay_url": "/r",
+            },
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+        client.submit("python", "pass", retry_ambiguous=True, retry_backoff=0)
+        keys = [request.get_header("Idempotency-key") for request in opener.requests]
+        self.assertEqual(len(set(keys)), 1)
+        self.assertTrue(keys[0])
+
+    def test_keyed_submit_refuses_redirects_that_can_change_the_request(self):
+        request = urllib.request.Request(
+            "https://example.test/v1/jobs",
+            data=b"{}",
+            method="POST",
+            headers={"Idempotency-Key": "submit-1"},
+        )
+        handler = _SameOriginRedirect("https://example.test")
+        with self.assertRaises(CoopError) as raised:
+            handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "https://example.test/moved",
+            )
+        self.assertEqual(raised.exception.code, "unsafe_redirect")
+
+    def test_authenticated_reads_refuse_cross_origin_redirects(self):
+        request = urllib.request.Request(
+            "https://example.test/v1/jobs/job/attestation",
+            method="GET",
+            headers={"Authorization": "Bearer tenant-secret"},
+        )
+        handler = _SameOriginRedirect("https://example.test")
+        with self.assertRaises(CoopError) as raised:
+            handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "https://attacker.example/evidence",
+            )
+        self.assertEqual(raised.exception.code, "unsafe_redirect")
+        self.assertNotIn("tenant-secret", str(raised.exception))
 
     def test_structured_error_exposes_contract_fields(self):
         payload = {
@@ -410,10 +610,44 @@ class CoopTests(unittest.TestCase):
         self.assertEqual(opener.status_requests, 1)
 
     def test_cancel_accepts_an_empty_success_response(self):
-        opener = QueueOpener(None)
+        opener = QueueOpener(None, None)
         client = Coop("https://example.test", "secret", opener=opener)
         self.assertIsNone(client.cancel("j"))
+        self.assertEqual(
+            client.cancel_result("j"),
+            {
+                "job": None,
+                "cancellation_requested": True,
+                "already_terminal": False,
+            },
+        )
         self.assertEqual(opener.requests[0].method, "DELETE")
+
+    def test_cancel_normalizes_the_current_acknowledgement_envelope(self):
+        job = {"job_id": "j", "status": "running"}
+        opener = QueueOpener(
+            {
+                "job": job,
+                "cancellation_requested": True,
+                "already_terminal": False,
+            },
+            {
+                "job": job,
+                "cancellation_requested": True,
+                "already_terminal": False,
+            },
+            {
+                "job": {"job_id": "j", "status": "succeeded"},
+                "cancellation_requested": False,
+                "already_terminal": True,
+            },
+        )
+        client = Coop("https://example.test", "secret", opener=opener)
+        self.assertEqual(client.cancel_result("j")["job"], job)
+        self.assertEqual(client.cancel("j"), job)
+        terminal = client.cancel_result("j")
+        self.assertFalse(terminal["cancellation_requested"])
+        self.assertTrue(terminal["already_terminal"])
 
     def test_whoami_and_capabilities_are_typed_endpoints(self):
         opener = QueueOpener(
@@ -421,15 +655,208 @@ class CoopTests(unittest.TestCase):
             {
                 "version": "0.2.0",
                 "languages": ["python"],
-                "execution": {"backend": "gvisor", "isolated": True},
-                "limits": {"wall_seconds_max": 300},
-                "features": {"stream_tickets": True},
+                "execution": {
+                    "backend": "gvisor",
+                    "isolation_class": "gvisor-application-kernel",
+                    "isolated": True,
+                },
+                "limits": {
+                    "wall_seconds_max": 300,
+                    "concurrent_mem_mb_max": 8192,
+                },
+                "features": {
+                    "stream_tickets": True,
+                    "signed_attestations": True,
+                },
+                "attestations": {
+                    "enabled": True,
+                    "algorithm": "Ed25519",
+                    "envelope_format": "DSSE/in-toto Statement v1",
+                    "key_id": "ed25519:abc",
+                    "public_key_url": "/v1/attestation/public-key",
+                },
             },
         )
         client = Coop("https://example.test", "secret", opener=opener)
         self.assertEqual(client.whoami()["tenant"], "acme")
-        self.assertTrue(client.capabilities()["features"]["stream_tickets"])
+        capabilities = client.capabilities()
+        self.assertTrue(capabilities["features"]["stream_tickets"])
+        self.assertEqual(
+            capabilities["execution"]["isolation_class"],
+            "gvisor-application-kernel",
+        )
+        self.assertEqual(capabilities["limits"]["concurrent_mem_mb_max"], 8192)
+        self.assertTrue(capabilities["features"]["signed_attestations"])
+        self.assertEqual(capabilities["attestations"]["algorithm"], "Ed25519")
         self.assertEqual(opener.requests[0].full_url, "https://example.test/v1/whoami")
+
+    def test_attestation_public_key_is_typed_authenticated_discovery(self):
+        key = {
+            "algorithm": "Ed25519",
+            "key_id": "ed25519:abc",
+            "public_key_pem": "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n",
+            "trust_notice": "Pin this key out of band.",
+        }
+        opener = QueueOpener(key)
+        client = Coop("https://example.test/prefix", "tenant-secret", opener=opener)
+
+        self.assertEqual(client.attestation_public_key(), key)
+        request = opener.requests[0]
+        self.assertEqual(
+            request.full_url,
+            "https://example.test/prefix/v1/attestation/public-key",
+        )
+        self.assertEqual(request.get_header("Authorization"), "Bearer tenant-secret")
+
+    def test_attestation_downloads_preserve_binary_order_and_transport_metadata(self):
+        envelope = bytes([0, 255, 1, 128, 10, 13, 123, 125])
+        artifact = bytes([125, 123, 13, 10, 128, 1, 255, 0])
+
+        def binary_response(content, content_type):
+            return Response(
+                None,
+                raw=content,
+                headers={
+                    "Content-Type": content_type,
+                    "Content-Length": str(len(content)),
+                    "X-Content-Sha256": hashlib.sha256(content).hexdigest(),
+                },
+                url="https://example.test/v1/jobs/job%2Fone/evidence",
+            )
+
+        opener = QueueOpener(
+            binary_response(envelope, "application/vnd.dsse.envelope.v1+json"),
+            binary_response(artifact, "application/vnd.coop.execution-result.v1+json"),
+        )
+        client = Coop("https://example.test", "tenant-secret", opener=opener)
+
+        downloaded_envelope = client.download_attestation("job/one")
+        downloaded_artifact = client.download_result_artifact("job/one")
+
+        self.assertEqual(downloaded_envelope["content"], envelope)
+        self.assertEqual(list(downloaded_envelope["content"]), list(envelope))
+        self.assertEqual(downloaded_envelope["content_length"], len(envelope))
+        self.assertEqual(
+            downloaded_envelope["content_type"],
+            "application/vnd.dsse.envelope.v1+json",
+        )
+        self.assertEqual(
+            downloaded_envelope["sha256"], hashlib.sha256(envelope).hexdigest()
+        )
+        self.assertEqual(downloaded_artifact["content"], artifact)
+        self.assertEqual(
+            opener.requests[0].full_url,
+            "https://example.test/v1/jobs/job%2Fone/attestation",
+        )
+        self.assertEqual(
+            opener.requests[1].full_url,
+            "https://example.test/v1/jobs/job%2Fone/result-artifact",
+        )
+        self.assertEqual(
+            opener.requests[0].get_header("Accept"),
+            "application/vnd.dsse.envelope.v1+json",
+        )
+        for request in opener.requests:
+            self.assertEqual(
+                request.get_header("Authorization"), "Bearer tenant-secret"
+            )
+            self.assertNotIn("tenant-secret", request.full_url)
+
+    def test_artifact_download_rejects_missing_malformed_and_mismatched_digests(self):
+        content = b"exact bytes"
+        cases = (
+            ({"Content-Type": "application/octet-stream"}, "invalid_response"),
+            (
+                {
+                    "Content-Type": "application/octet-stream",
+                    "X-Content-Sha256": "not-a-digest",
+                },
+                "invalid_response",
+            ),
+            (
+                {
+                    "Content-Type": "application/octet-stream",
+                    "X-Content-Sha256": "0" * 64,
+                },
+                "content_digest_mismatch",
+            ),
+        )
+        for headers, expected_code in cases:
+            with self.subTest(expected_code=expected_code, headers=headers):
+                client = Coop(
+                    "https://example.test",
+                    "secret",
+                    opener=QueueOpener(Response(None, raw=content, headers=headers)),
+                )
+                with self.assertRaises(CoopError) as raised:
+                    client.download_attestation("job")
+                self.assertEqual(raised.exception.code, expected_code)
+
+    def test_artifact_download_preserves_structured_404(self):
+        body = io.BytesIO(
+            json.dumps(
+                {
+                    "error": {
+                        "code": "attestation_unavailable",
+                        "message": "no signed attestation",
+                        "request_id": "req-attest",
+                        "retryable": False,
+                    }
+                }
+            ).encode()
+        )
+        error = urllib.error.HTTPError(
+            "https://example.test/v1/jobs/job/attestation",
+            404,
+            "Not Found",
+            {"Content-Type": "application/json"},
+            body,
+        )
+        client = Coop("https://example.test", "secret", opener=QueueOpener(error))
+
+        with self.assertRaises(CoopError) as raised:
+            client.download_attestation("job")
+
+        self.assertEqual(raised.exception.status, 404)
+        self.assertEqual(raised.exception.code, "attestation_unavailable")
+        self.assertEqual(raised.exception.request_id, "req-attest")
+        self.assertFalse(raised.exception.retryable)
+
+    def test_artifact_download_rejects_cross_origin_responses_without_secret_text(self):
+        content = b"evidence"
+        response = Response(
+            None,
+            raw=content,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "X-Content-Sha256": hashlib.sha256(content).hexdigest(),
+            },
+            url="https://attacker.example/evidence",
+        )
+        client = Coop(
+            "https://example.test", "tenant-secret", opener=QueueOpener(response)
+        )
+
+        with self.assertRaises(CoopError) as raised:
+            client.download_result_artifact("job")
+
+        self.assertEqual(raised.exception.code, "unsafe_redirect")
+        self.assertNotIn("tenant-secret", str(raised.exception))
+        self.assertNotIn("tenant-secret", raised.exception.body)
+
+    def test_artifact_download_timeout_is_bounded_and_retryable(self):
+        opener = QueueOpener(urllib.error.URLError(TimeoutError("deadline")))
+        client = Coop("https://example.test", "secret", opener=opener)
+
+        with self.assertRaises(CoopError) as raised:
+            client.download_result_artifact("job", timeout=0.25)
+
+        self.assertEqual(raised.exception.code, "request_timeout")
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(opener.request_kwargs[0]["timeout"], 0.25)
+        for invalid in (0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                client.download_attestation("job", timeout=invalid)
 
     def test_job_detail_distinguishes_unknown_policy_and_output_evidence(self):
         stored_spec = {
@@ -444,6 +871,7 @@ class CoopTests(unittest.TestCase):
                 "max_file_mb": 16,
                 "allow_network": False,
             },
+            "requirements": {"minimum_isolation": "linux-shared-kernel"},
         }
         enforcement = {
             "wall_seconds": True,
@@ -458,6 +886,7 @@ class CoopTests(unittest.TestCase):
                 **stored_spec["limits"],
                 "allow_network": False,
             },
+            "isolation_class": "linux-shared-kernel",
         }
         base = {
             "tenant": "acme",
@@ -476,6 +905,7 @@ class CoopTests(unittest.TestCase):
             "effective_spec": None,
             "execution_policy": {
                 "sandbox": None,
+                "isolation_class": None,
                 "bootstrap_ready": None,
                 "isolated": None,
                 "seccomp": None,
@@ -484,6 +914,10 @@ class CoopTests(unittest.TestCase):
                 "private_rootfs": None,
                 "dedicated_bootstrap": None,
                 "limit_enforcement": None,
+                "runtime_version": None,
+                "runtime_sha256": None,
+                "rootfs_sha256": None,
+                "config_sha256": None,
             },
             "receipt": None,
         }
@@ -494,6 +928,7 @@ class CoopTests(unittest.TestCase):
             "effective_spec": effective_spec,
             "execution_policy": {
                 "sandbox": "namespaces+cgroups-v2+private-rootfs",
+                "isolation_class": "linux-shared-kernel",
                 "bootstrap_ready": True,
                 "isolated": True,
                 "seccomp": True,
@@ -502,6 +937,10 @@ class CoopTests(unittest.TestCase):
                 "private_rootfs": True,
                 "dedicated_bootstrap": True,
                 "limit_enforcement": enforcement,
+                "runtime_version": "python 3",
+                "runtime_sha256": "1" * 64,
+                "rootfs_sha256": "2" * 64,
+                "config_sha256": "3" * 64,
             },
             "receipt": {
                 "version": 1,
@@ -521,6 +960,8 @@ class CoopTests(unittest.TestCase):
                 },
                 "receipt_sha256": "b" * 64,
                 "backend": "namespaces+cgroups-v2+private-rootfs",
+                "minimum_isolation": "linux-shared-kernel",
+                "isolation_class": "linux-shared-kernel",
                 "bootstrap_ready": True,
                 "isolated": True,
                 "seccomp": True,
@@ -528,6 +969,10 @@ class CoopTests(unittest.TestCase):
                 "networking": "disabled",
                 "private_rootfs": True,
                 "dedicated_bootstrap": True,
+                "runtime_version": "python 3",
+                "runtime_sha256": "1" * 64,
+                "rootfs_sha256": "2" * 64,
+                "config_sha256": "3" * 64,
                 "effective_limits": effective_spec["limits"],
                 "limit_enforcement": enforcement,
                 "output": {
@@ -598,6 +1043,12 @@ class CoopTests(unittest.TestCase):
 
         self.assertIsNone(queued["effective_spec"])
         self.assertIsNone(queued["execution_policy"]["sandbox"])
+        self.assertEqual(
+            complete["effective_spec"]["isolation_class"], "linux-shared-kernel"
+        )
+        self.assertEqual(
+            complete["receipt"]["minimum_isolation"], "linux-shared-kernel"
+        )
         self.assertEqual(
             complete["receipt"]["output"]["encoding"],
             "utf8-event-lines-joined-by-lf-no-trailing-lf",
@@ -788,6 +1239,22 @@ class CoopTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 Coop(url, "secret")
+
+        for timeout in (float("nan"), float("inf"), 0):
+            with self.assertRaises(ValueError):
+                Coop("https://example.test", "secret", timeout=timeout)
+
+    def test_stream_rejects_non_finite_polling_before_transport(self):
+        client = Coop("https://example.test", "secret", opener=QueueOpener())
+        for interval in (float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                list(
+                    client.stream(
+                        "j",
+                        prefer_websocket=False,
+                        poll_interval=interval,
+                    )
+                )
 
 
 if __name__ == "__main__":

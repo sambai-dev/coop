@@ -1,0 +1,352 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-30T03:35:24.0791405Z",
+  "title": "Design System: Coop",
+  "extensions": {
+    "colorMeta": {
+      "workbench": {
+        "role": "neutral",
+        "displayName": "Workbench White",
+        "canonical": "#ffffff",
+        "tonalRamp": ["#0d1117", "#111827", "#526077", "#68758a", "#b8c2d0", "#dfe5ed", "#f7f9fc", "#ffffff"]
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Cool Canvas",
+        "canonical": "#f7f9fc",
+        "tonalRamp": ["#0d1117", "#111827", "#526077", "#68758a", "#b8c2d0", "#dfe5ed", "#f7f9fc", "#ffffff"]
+      },
+      "quiet-plane": {
+        "role": "neutral",
+        "displayName": "Quiet Plane",
+        "canonical": "#fbfcfe",
+        "tonalRamp": ["#0d1117", "#111827", "#526077", "#68758a", "#b8c2d0", "#dfe5ed", "#f7f9fc", "#ffffff"]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Hairline Divider",
+        "canonical": "#dfe5ed",
+        "tonalRamp": ["#0d1117", "#111827", "#526077", "#68758a", "#b8c2d0", "#dfe5ed", "#f7f9fc", "#ffffff"]
+      },
+      "border-strong": {
+        "role": "neutral",
+        "displayName": "Control Border",
+        "canonical": "#b8c2d0",
+        "tonalRamp": ["#0d1117", "#111827", "#526077", "#68758a", "#b8c2d0", "#dfe5ed", "#f7f9fc", "#ffffff"]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Operational Ink",
+        "canonical": "#111827",
+        "tonalRamp": ["#0d1117", "#111827", "#526077", "#68758a", "#b8c2d0", "#dfe5ed", "#f7f9fc", "#ffffff"]
+      },
+      "text-muted": {
+        "role": "neutral",
+        "displayName": "Muted Navy",
+        "canonical": "#526077",
+        "tonalRamp": ["#0d1117", "#111827", "#526077", "#68758a", "#b8c2d0", "#dfe5ed", "#f7f9fc", "#ffffff"]
+      },
+      "text-faint": {
+        "role": "neutral",
+        "displayName": "Faint Slate",
+        "canonical": "#68758a",
+        "tonalRamp": ["#0d1117", "#111827", "#526077", "#68758a", "#b8c2d0", "#dfe5ed", "#f7f9fc", "#ffffff"]
+      },
+      "kernel": {
+        "role": "primary",
+        "displayName": "Kernel Indigo",
+        "canonical": "#2458e6",
+        "tonalRamp": ["#10224f", "#1844c2", "#1d4ed8", "#345da8", "#2458e6", "#8db8ff", "#dbe7ff", "#eef4ff"]
+      },
+      "focus": {
+        "role": "primary",
+        "displayName": "Focus Indigo",
+        "canonical": "#1d4ed8",
+        "tonalRamp": ["#10224f", "#1844c2", "#1d4ed8", "#345da8", "#2458e6", "#8db8ff", "#dbe7ff", "#eef4ff"]
+      },
+      "healthy": {
+        "role": "secondary",
+        "displayName": "Evidence Green",
+        "canonical": "#18794e",
+        "tonalRamp": ["oklch(15% 0.1102 158.4)", "oklch(25% 0.1102 158.4)", "oklch(35% 0.1102 158.4)", "oklch(45% 0.1102 158.4)", "#18794e", "oklch(65% 0.1102 158.4)", "oklch(80% 0.1102 158.4)", "oklch(95% 0.1102 158.4)"]
+      },
+      "warning": {
+        "role": "secondary",
+        "displayName": "Caution Amber",
+        "canonical": "#8a5700",
+        "tonalRamp": ["#664100", "#744800", "#875300", "#8a5700", "#b87400", "#c17c00", "#f1c56c", "#fff9ed"]
+      },
+      "danger": {
+        "role": "secondary",
+        "displayName": "Boundary Red",
+        "canonical": "#c42d35",
+        "tonalRamp": ["#7f1d25", "#9f2028", "#a9212a", "#ad2029", "#c42d35", "#e49399", "#ff9898", "#fff3f3"]
+      },
+      "cancelled": {
+        "role": "secondary",
+        "displayName": "Cancelled Slate",
+        "canonical": "#64748b",
+        "tonalRamp": ["#0d1117", "#111827", "#526077", "#64748b", "#68758a", "#b8c2d0", "#dfe5ed", "#f7f9fc"]
+      },
+      "selection": {
+        "role": "primary",
+        "displayName": "Selected Wash",
+        "canonical": "#eef4ff",
+        "tonalRamp": ["#10224f", "#1844c2", "#1d4ed8", "#345da8", "#2458e6", "#8db8ff", "#dbe7ff", "#eef4ff"]
+      },
+      "code-bg": {
+        "role": "neutral",
+        "displayName": "Code Night",
+        "canonical": "#0d1117",
+        "tonalRamp": ["#0d1117", "#111827", "#18202b", "#222b37", "#475569", "#8491a4", "#d7dee8", "#e3e9f1"]
+      },
+      "code-text": {
+        "role": "neutral",
+        "displayName": "Code Frost",
+        "canonical": "#d7dee8",
+        "tonalRamp": ["#0d1117", "#111827", "#18202b", "#222b37", "#475569", "#8491a4", "#d7dee8", "#e3e9f1"]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Product identity and top-level empty-state headings."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Pane titles and primary section headings."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Controls, descriptive copy, and general operational content."
+      },
+      "small-body": {
+        "displayName": "Small Body",
+        "purpose": "Metadata, inspector explanations, and compact evidence copy."
+      },
+      "label": {
+        "displayName": "Operational Label",
+        "purpose": "Execution stages, status badges, and dense table labels."
+      },
+      "mono": {
+        "displayName": "Evidence Mono",
+        "purpose": "Output, events, code, JSON, timestamps, hashes, and exact machine values."
+      },
+      "run-identifier": {
+        "displayName": "Run Identifier",
+        "purpose": "The selected job ID and other primary machine identifiers."
+      }
+    },
+    "shadows": [
+      {
+        "name": "context-disclosure",
+        "value": "0 16px 38px rgba(31, 42, 61, .16)",
+        "purpose": "Lift the authenticated execution context above the command bar."
+      },
+      {
+        "name": "dialog-lift",
+        "value": "0 24px 70px rgba(24, 36, 54, .22)",
+        "purpose": "Separate the create-run dialog from its dimmed workbench."
+      },
+      {
+        "name": "toast-lift",
+        "value": "0 12px 28px rgba(31, 42, 61, .18)",
+        "purpose": "Lift temporary feedback at the viewport edge."
+      },
+      {
+        "name": "selection-rail",
+        "value": "inset 3px 0 0 var(--kernel)",
+        "purpose": "Mark the current run row structurally without elevating it."
+      }
+    ],
+    "motion": [
+      {
+        "name": "button-loading-turn",
+        "value": "850ms linear infinite",
+        "purpose": "Rotate an icon while a button-owned operation is pending."
+      },
+      {
+        "name": "status-loading-turn",
+        "value": "900ms linear infinite",
+        "purpose": "Rotate the open-ring marker for a running job."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "none",
+        "purpose": "Disable transitions and animations when reduced motion is requested while preserving textual state."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "tight-desktop",
+        "value": "1240px"
+      },
+      {
+        "name": "focused-workflow",
+        "value": "1060px"
+      },
+      {
+        "name": "stacked-controls",
+        "value": "720px"
+      },
+      {
+        "name": "compact-mobile",
+        "value": "440px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single dominant action for creating or queueing a run.",
+      "html": "<button class=\"ds-button-primary\" type=\"button\"><svg aria-hidden=\"true\" viewBox=\"0 0 16 16\"><path d=\"M8 3v10M3 8h10\"/></svg>New run</button>",
+      "css": ".ds-button-primary{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:38px;padding:8px 12px;border:1px solid var(--kernel,#2458e6);border-radius:5px;background:var(--kernel,#2458e6);color:#fff;font:600 13px/1 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;cursor:pointer}.ds-button-primary svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.ds-button-primary:hover{border-color:#1844c2;background:#1844c2}.ds-button-primary:focus-visible{outline:3px solid var(--focus,#1d4ed8);outline-offset:2px}.ds-button-primary:disabled{cursor:not-allowed;opacity:.55}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A concrete utility action that remains subordinate to the primary run action.",
+      "html": "<button class=\"ds-button-secondary\" type=\"button\"><svg aria-hidden=\"true\" viewBox=\"0 0 16 16\"><rect x=\"5\" y=\"5\" width=\"8\" height=\"8\" rx=\"1\"/><path d=\"M3 10H2.5A1.5 1.5 0 0 1 1 8.5v-6A1.5 1.5 0 0 1 2.5 1h6A1.5 1.5 0 0 1 10 2.5V3\"/></svg>Copy ID</button>",
+      "css": ".ds-button-secondary{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:38px;padding:8px 12px;border:1px solid var(--border-strong,#b8c2d0);border-radius:5px;background:var(--workbench,#fff);color:var(--text,#111827);font:600 13px/1 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;cursor:pointer}.ds-button-secondary svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.ds-button-secondary:hover{border-color:#8896a9;background:#f5f7fa}.ds-button-secondary:focus-visible{outline:3px solid var(--focus,#1d4ed8);outline-offset:2px}.ds-button-secondary:disabled{cursor:not-allowed;opacity:.55}"
+    },
+    {
+      "name": "Boundary Context Chip",
+      "kind": "chip",
+      "refersTo": "context-chip",
+      "description": "A dot-plus-label context readout that keeps runtime posture visible independently of run success.",
+      "html": "<div class=\"ds-boundary-chip ds-is-danger\"><span class=\"ds-boundary-dot\" aria-hidden=\"true\"></span><span>runtime</span><strong>off · none</strong></div>",
+      "css": ".ds-boundary-chip{display:inline-flex;align-items:center;gap:7px;min-height:36px;padding:6px 9px;border:1px solid var(--border,#dfe5ed);border-radius:5px;background:var(--workbench,#fff);color:var(--text-muted,#526077);font:400 13px/1.45 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;white-space:nowrap}.ds-boundary-chip strong{color:var(--text,#111827);font-weight:600}.ds-boundary-dot{width:8px;height:8px;border-radius:50%;background:var(--text-faint,#68758a);box-shadow:0 0 0 1px rgba(17,24,39,.1)}.ds-boundary-chip.ds-is-danger{border-color:#e4a4a8;background:#fff5f5;color:#a9212a}.ds-boundary-chip.ds-is-danger .ds-boundary-dot{background:var(--danger,#c42d35)}"
+    },
+    {
+      "name": "Run Search Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "A compact full-width search control for the loaded run ledger.",
+      "html": "<label class=\"ds-run-search\"><span class=\"ds-visually-hidden\">Search loaded runs</span><svg aria-hidden=\"true\" viewBox=\"0 0 16 16\"><circle cx=\"7\" cy=\"7\" r=\"4\"/><path d=\"m10 10 3 3\"/></svg><input type=\"search\" placeholder=\"Search runs\" autocomplete=\"off\"></label>",
+      "css": ".ds-run-search{position:relative;display:block;width:100%;max-width:360px}.ds-run-search input{width:100%;min-height:40px;padding:8px 34px;border:1px solid var(--border-strong,#b8c2d0);border-radius:5px;background:var(--workbench,#fff);color:var(--text,#111827);font:400 13px/1.45 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;caret-color:var(--kernel,#2458e6)}.ds-run-search input::placeholder{color:#5f6b7e;opacity:1}.ds-run-search input:hover{border-color:#8592a5}.ds-run-search input:focus-visible{outline:3px solid var(--focus,#1d4ed8);outline-offset:2px}.ds-run-search svg{position:absolute;top:13px;left:11px;width:14px;height:14px;fill:none;stroke:var(--text-faint,#68758a);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.ds-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}"
+    },
+    {
+      "name": "Selected Run Row",
+      "kind": "nav",
+      "refersTo": "selected-run-row",
+      "description": "The current ledger row, combining semantic status, machine identity, time, and duration.",
+      "html": "<button class=\"ds-run-row\" type=\"button\" aria-current=\"true\"><span class=\"ds-run-status\"><span aria-hidden=\"true\"></span>Succeeded</span><span class=\"ds-run-identity\"><strong>…be6539a0</strong><small>python&nbsp; 02:58:38 PM</small></span><span class=\"ds-run-duration\">1.4 s</span></button>",
+      "css": ".ds-run-row{display:grid;grid-template-columns:84px minmax(0,1fr) 54px;align-items:center;width:100%;min-height:58px;gap:8px;padding:8px 12px;border:0;border-bottom:1px solid var(--border,#dfe5ed);border-radius:0;background:var(--selection,#eef4ff);box-shadow:inset 3px 0 0 var(--kernel,#2458e6);color:var(--text,#111827);text-align:left;cursor:pointer}.ds-run-row:hover{background:#f7f9fc}.ds-run-row[aria-current=\"true\"]:hover{background:var(--selection,#eef4ff)}.ds-run-row:focus-visible{outline:3px solid var(--focus,#1d4ed8);outline-offset:-3px}.ds-run-status{display:inline-flex;align-items:center;gap:5px;color:var(--healthy,#18794e);font:700 9.5px/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.015em;text-transform:uppercase;white-space:nowrap}.ds-run-status>span{width:9px;height:9px;border:2px solid currentColor;border-radius:50%;background:currentColor}.ds-run-identity{display:grid;gap:3px;min-width:0}.ds-run-identity strong{overflow:hidden;font:650 11.5px/1.3 ui-sans-serif,system-ui,sans-serif;text-overflow:ellipsis;white-space:nowrap}.ds-run-identity small,.ds-run-duration{color:#586579;font:400 10.5px/1.2 ui-sans-serif,system-ui,sans-serif;font-variant-numeric:tabular-nums}.ds-run-duration{justify-self:end;white-space:nowrap}"
+    },
+    {
+      "name": "Execution Spine",
+      "kind": "custom",
+      "refersTo": "execution-spine",
+      "description": "The ordered Queued → Running → Terminal lifecycle with explicit timestamps and semantic completion.",
+      "html": "<ol class=\"ds-execution-spine\" aria-label=\"Execution lifecycle\"><li class=\"ds-spine-stage ds-is-done\"><span class=\"ds-spine-marker\" aria-hidden=\"true\"></span><span><strong>Queued</strong><time>02:58:38 PM</time></span></li><li class=\"ds-spine-stage ds-is-done\"><span class=\"ds-spine-marker\" aria-hidden=\"true\"></span><span><strong>Running</strong><time>02:58:38 PM</time></span></li><li class=\"ds-spine-stage ds-is-terminal-success\"><span class=\"ds-spine-marker\" aria-hidden=\"true\"></span><span><strong>Succeeded</strong><time>02:58:39 PM</time></span></li></ol>",
+      "css": ".ds-execution-spine{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin:0;padding:0;list-style:none}.ds-spine-stage{position:relative;display:grid;grid-template-columns:18px minmax(0,1fr);gap:7px;color:var(--text-faint,#68758a)}.ds-spine-stage:not(:last-child)::after{position:absolute;top:8px;left:18px;right:0;height:1px;background:var(--border-strong,#b8c2d0);content:\"\"}.ds-spine-marker{position:relative;z-index:1;width:17px;height:17px;border:1px solid var(--border-strong,#b8c2d0);border-radius:50%;background:var(--workbench,#fff)}.ds-spine-stage>span:last-child{position:relative;z-index:2;display:grid;gap:2px;padding-right:12px}.ds-spine-stage strong{color:inherit;font:700 10px/1.3 ui-sans-serif,system-ui,sans-serif;letter-spacing:.04em;text-transform:uppercase}.ds-spine-stage time{overflow:hidden;color:var(--text-muted,#526077);font:400 10px/1.3 \"SFMono-Regular\",Consolas,monospace;text-overflow:ellipsis;white-space:nowrap}.ds-spine-stage.ds-is-done{color:var(--kernel,#2458e6)}.ds-spine-stage.ds-is-done .ds-spine-marker{border-color:var(--kernel,#2458e6);background:var(--kernel,#2458e6)}.ds-spine-stage.ds-is-terminal-success{color:var(--healthy,#18794e)}.ds-spine-stage.ds-is-terminal-success .ds-spine-marker{border-color:currentColor;background:currentColor}"
+    },
+    {
+      "name": "Evidence Tabs",
+      "kind": "nav",
+      "refersTo": "tab-active",
+      "description": "Divider-bound navigation for output, events, result, and the responsive record view.",
+      "html": "<div class=\"ds-evidence-tabs\" role=\"tablist\" aria-label=\"Run evidence views\"><button class=\"ds-evidence-tab\" role=\"tab\" aria-selected=\"true\">Output <span>7</span></button><button class=\"ds-evidence-tab\" role=\"tab\" aria-selected=\"false\">Events <span>7</span></button><button class=\"ds-evidence-tab\" role=\"tab\" aria-selected=\"false\">Result</button><button class=\"ds-evidence-tab\" role=\"tab\" aria-selected=\"false\">Record</button></div>",
+      "css": ".ds-evidence-tabs{display:flex;align-items:flex-end;gap:2px;min-height:50px;padding:7px 14px 0;border-bottom:1px solid var(--border,#dfe5ed);overflow-x:auto}.ds-evidence-tab{min-height:40px;padding:8px 11px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--text-muted,#526077);font:600 13px/1 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;cursor:pointer;white-space:nowrap}.ds-evidence-tab:hover{color:var(--text,#111827)}.ds-evidence-tab:focus-visible{outline:3px solid var(--focus,#1d4ed8);outline-offset:2px}.ds-evidence-tab[aria-selected=\"true\"]{border-bottom-color:var(--kernel,#2458e6);color:var(--kernel,#2458e6)}.ds-evidence-tab span{display:inline-flex;min-width:20px;min-height:18px;align-items:center;justify-content:center;margin-left:4px;border-radius:4px;background:#edf2ff;color:var(--kernel,#2458e6);font:400 10px/1 \"SFMono-Regular\",Consolas,monospace}"
+    },
+    {
+      "name": "Output Ledger",
+      "kind": "custom",
+      "refersTo": "output-viewport",
+      "description": "The dark, horizontally exact ledger for ordered stdout, state, stderr, and violation lines.",
+      "html": "<div class=\"ds-output-ledger\" role=\"log\" aria-label=\"Run output\" tabindex=\"0\"><div class=\"ds-log-line ds-log-system\"><span>1</span><span>ACCEPTED</span><code>{\"language\":\"python\",\"requested_spec_sha256\":\"b92ef…\"}</code></div><div class=\"ds-log-line\"><span>2</span><span>OUT</span><code>tick 0</code></div><div class=\"ds-log-line ds-log-system\"><span>3</span><span>STATE</span><code>finished succeeded · exit 0 · 1.2 s</code></div></div>",
+      "css": ".ds-output-ledger{min-height:176px;overflow:auto;border:1px solid #222b37;border-radius:5px;background:var(--code-bg,#0d1117);color:var(--code-text,#d7dee8);font:400 12px/22px \"SFMono-Regular\",Consolas,\"Liberation Mono\",Menlo,monospace;scrollbar-color:#475569 #111827}.ds-output-ledger:focus-visible{outline:3px solid var(--focus,#1d4ed8);outline-offset:2px}.ds-log-line{display:grid;grid-template-columns:68px 54px minmax(max-content,1fr);height:22px;min-width:100%;border-bottom:1px solid #18202b;white-space:pre}.ds-log-line:hover{background:#151d28}.ds-log-line>span{padding:0 8px;color:#8491a4;text-align:right;user-select:none}.ds-log-line>span:nth-child(2){padding:0 7px;text-align:left;text-transform:uppercase}.ds-log-line code{padding:0 10px;font:inherit}.ds-log-system>span:nth-child(2),.ds-log-system code{color:#8db8ff}"
+    },
+    {
+      "name": "Evidence Section",
+      "kind": "card",
+      "refersTo": "evidence-section",
+      "description": "A flat inspector section that keeps an exact requested or observed payload under a plain heading.",
+      "html": "<section class=\"ds-evidence-section\"><header><h3>Requested policy</h3><button type=\"button\">Copy JSON</button></header><pre tabindex=\"0\" aria-label=\"Requested policy JSON\">{\n  \"language\": \"python\",\n  \"limits\": { \"wall_seconds\": 15 },\n  \"requirements\": { \"minimum_isolation\": \"none\" }\n}</pre></section>",
+      "css": ".ds-evidence-section{margin:0;padding:15px 16px;border-top:1px solid var(--border,#dfe5ed);background:var(--workbench,#fff);color:var(--text,#111827);font:400 11px/1.45 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}.ds-evidence-section header{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:11px}.ds-evidence-section h3{margin:0;font-size:12.5px;line-height:1.45}.ds-evidence-section button{min-height:34px;padding:6px 9px;border:1px solid transparent;border-radius:5px;background:transparent;color:var(--text-muted,#526077);font:600 12px/1 ui-sans-serif,system-ui,sans-serif;cursor:pointer}.ds-evidence-section button:hover{border-color:var(--border,#dfe5ed);background:#f5f7fa;color:var(--text,#111827)}.ds-evidence-section button:focus-visible,.ds-evidence-section pre:focus-visible{outline:3px solid var(--focus,#1d4ed8);outline-offset:2px}.ds-evidence-section pre{max-height:300px;margin:0;padding:10px;overflow:auto;border:1px solid #222b37;border-radius:5px;background:var(--code-bg,#0d1117);color:var(--code-text,#d7dee8);font:400 11px/1.5 \"SFMono-Regular\",Consolas,monospace}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Run-to-Proof Operations Desk",
+    "overview": "Coop is a precise, evidence-first control plane: cool-white working planes, ink and navy text, restrained indigo interaction, and fine structural rules. It should feel like a current operations product built for consequential work, never like a terminal-themed demo or a dashboard made from equal-weight cards.\n\nThe visual story follows the operator's job in one direction: connect a credential, choose or create a run, follow ordered execution, compare requested policy with observed posture, then export exact server-provided proof. Dense information stays legible because the interface uses rows, dividers, compact type, explicit labels, and honest state qualifiers instead of decoration.\n\nThe dashboard's three-pane desk is the flagship composition for this workflow: queue on the left, output-first run workspace in the center, and boundary/evidence inspector on the right. It is task-local, not a requirement that every Coop surface use three panes. New surfaces should inherit the same hierarchy, materials, and evidence discipline while choosing the composition their task needs.",
+    "keyCharacteristics": [
+      "Cool-white application planes separated by true one-pixel dividers.",
+      "Compact ink-first typography with monospace reserved for machine-authored facts.",
+      "One saturated indigo voice for action, selection, focus, and active navigation.",
+      "Semantic green, amber, red, and slate paired with explicit labels and shapes.",
+      "Dark material confined to code, raw output, and exact JSON evidence.",
+      "Responsive movement from simultaneous panes to focused queue, detail, and record views."
+    ],
+    "rules": [
+      {
+        "name": "The Indigo Means Intent Rule",
+        "body": "Use indigo for primary action, current selection, active navigation, focus, and execution progression; never spread it across decorative surfaces.",
+        "section": "colors"
+      },
+      {
+        "name": "The Semantic State Rule",
+        "body": "Green, amber, red, and slate must report a real state and remain paired with text, a marker, or both; color alone never carries status.",
+        "section": "colors"
+      },
+      {
+        "name": "The Dark Containment Rule",
+        "body": "Dark material belongs only to code, output, events, and exact evidence payloads. The application shell stays light.",
+        "section": "colors"
+      },
+      {
+        "name": "The Data Is Monospace Rule",
+        "body": "Use monospace for IDs, code, JSON, event channels, timestamps, hashes, and exact values; keep product prose and controls in the system sans.",
+        "section": "typography"
+      },
+      {
+        "name": "The Quiet Hierarchy Rule",
+        "body": "Do not introduce marketing-scale type. Operational hierarchy should be visible at a scan through weight, rhythm, and alignment.",
+        "section": "typography"
+      },
+      {
+        "name": "The Composition Stays Local Rule",
+        "body": "Preserve this queue → workspace → proof anatomy for the run ledger, but do not copy its three columns onto unrelated Coop surfaces.",
+        "section": "layout"
+      },
+      {
+        "name": "The Evidence Order Rule",
+        "body": "Responsive reflow may change simultaneity, never sequence: identity and state precede output; requested policy precedes observed posture; portable proof follows both.",
+        "section": "layout"
+      },
+      {
+        "name": "The Flat-by-Default Rule",
+        "body": "If an element does not overlap the workbench, separate it with plane, spacing, or divider before considering shadow.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Rows Are Rows Rule",
+        "body": "Queue items, metrics, telemetry, and evidence sections meet on shared dividers; do not convert them into individually rounded cards.",
+        "section": "shapes"
+      },
+      {
+        "name": "The Small-Radius Rule",
+        "body": "Keep controls technical and precise. Large bubbles, pill containers, and gratuitous rounding do not belong in this system.",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "Do build hierarchy with cool-white planes, true dividers, rows, and purposeful whitespace.",
+      "Do reserve indigo for action, selection, focus, active navigation, and ordered progression.",
+      "Do pair every status color with an explicit label, marker shape, or both.",
+      "Do use monospace for machine-authored facts and keep human guidance in the system sans.",
+      "Do keep requested policy, observed posture, and portable proof visually distinct and plainly qualified as server-reported.",
+      "Do preserve visible focus, 44px mobile targets, reduced-motion behavior, forced-colors support, and exact-content overflow."
+    ],
+    "donts": [
+      "Don't turn Coop into a terminal-themed shell or a collection of equal-weight decorative cards.",
+      "Don't use dark surfaces outside code, output, events, and exact JSON evidence.",
+      "Don't use semantic green, amber, or red as decoration or let color become the only status cue.",
+      "Don't merge requested controls with observed results or imply that server-provided evidence was independently verified.",
+      "Don't treat the dashboard's three-pane composition as a universal template for unrelated tasks.",
+      "Don't add gradients, oversized display type, pill-heavy chrome, or theatrical security styling unsupported by the product truth."
+    ]
+  }
+}

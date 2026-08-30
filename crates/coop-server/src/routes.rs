@@ -1,25 +1,28 @@
-use crate::auth::Tenant;
+use crate::auth::AuthContext;
 use crate::bus::WireEvent;
 use crate::AppState;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, FromRequest, Path, Query, Request, State};
-use axum::http::{header, HeaderValue, StatusCode, Version};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Version};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
-use coop_store::{JobCursor, JobRow, JobSummary, ListJobsQuery};
+use coop_store::{AttestationMetadata, JobCursor, JobRow, JobSummary, ListJobsQuery};
 use coop_types::{
-    EffectiveJobSpec, JobSpec, JobStatus, LimitEnforcement, CPU_MAX_SECONDS, FILE_MAX_MB,
-    MEM_MAX_MB, PIDS_MAX, SUPPORTED_LANGUAGES, WALL_MAX_SECONDS,
+    EffectiveJobSpec, IsolationClass, JobSpec, JobStatus, LimitEnforcement, CPU_MAX_SECONDS,
+    FILE_MAX_MB, PIDS_MAX, SUPPORTED_LANGUAGES, WALL_MAX_SECONDS,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+#[cfg(test)]
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
+use tracing::Instrument as _;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -52,7 +55,8 @@ pub(crate) fn api_error_with_retry(
     retryable: bool,
     retry_after_secs: Option<u64>,
 ) -> Response {
-    let request_id = Uuid::now_v7().to_string();
+    let request_id =
+        crate::request_context::current_request_id().unwrap_or_else(|| Uuid::now_v7().to_string());
     let mut response = (
         status,
         Json(ErrorEnvelope {
@@ -95,11 +99,28 @@ pub struct JobDetail {
     #[schema(value_type = Option<Object>)]
     pub receipt: Option<serde_json::Value>,
     pub receipt_sha256: Option<String>,
+    pub attestation: JobAttestationStatus,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct JobAttestationStatus {
+    pub available: bool,
+    pub tenant: Option<String>,
+    pub key_id: Option<String>,
+    pub receipt_sha256: Option<String>,
+    pub result_media_type: Option<String>,
+    pub result_sha256: Option<String>,
+    pub result_size_bytes: Option<u64>,
+    pub envelope_sha256: Option<String>,
+    pub envelope_size_bytes: Option<u64>,
+    pub envelope_url: Option<String>,
+    pub result_artifact_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ExecutionPolicy {
     pub sandbox: Option<String>,
+    pub isolation_class: Option<IsolationClass>,
     pub bootstrap_ready: Option<bool>,
     pub isolated: Option<bool>,
     pub seccomp: Option<bool>,
@@ -108,6 +129,10 @@ pub struct ExecutionPolicy {
     pub private_rootfs: Option<bool>,
     pub dedicated_bootstrap: Option<bool>,
     pub limit_enforcement: Option<LimitEnforcement>,
+    pub runtime_version: Option<String>,
+    pub runtime_sha256: Option<String>,
+    pub rootfs_sha256: Option<String>,
+    pub config_sha256: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -132,6 +157,11 @@ pub struct StreamTicketResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct WhoAmIResponse {
     pub tenant: String,
+    pub principal_id: String,
+    pub credential_id: Option<String>,
+    pub auth_method: String,
+    pub scopes: Vec<String>,
+    pub expires_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -141,11 +171,30 @@ pub struct CapabilitiesResponse {
     pub execution: ExecutionCapabilities,
     pub limits: LimitCapabilities,
     pub features: FeatureCapabilities,
+    pub attestations: AttestationCapabilities,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AttestationCapabilities {
+    pub enabled: bool,
+    pub algorithm: Option<String>,
+    pub envelope_format: Option<String>,
+    pub key_id: Option<String>,
+    pub public_key_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AttestationPublicKeyResponse {
+    pub algorithm: String,
+    pub key_id: String,
+    pub public_key_pem: String,
+    pub trust_notice: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ExecutionCapabilities {
     pub backend: String,
+    pub isolation_class: IsolationClass,
     pub isolated: bool,
     pub private_rootfs: bool,
     pub dedicated_bootstrap: bool,
@@ -159,6 +208,7 @@ pub struct LimitCapabilities {
     pub wall_seconds_max: u32,
     pub cpu_seconds_max: u32,
     pub mem_mb_max: u32,
+    pub concurrent_mem_mb_max: u32,
     pub pids_max: u32,
     pub file_mb_max: u32,
     pub output_lines_max: usize,
@@ -175,6 +225,7 @@ pub struct FeatureCapabilities {
     pub event_cursors: bool,
     pub stream_tickets: bool,
     pub receipts: bool,
+    pub signed_attestations: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -208,6 +259,26 @@ pub struct JobView {
     pub started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
     pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CancellationResponse {
+    pub job: JobView,
+    pub cancellation_requested: bool,
+    pub already_terminal: bool,
+}
+
+fn cancellation_response(
+    row: &JobSummary,
+    cancellation_requested: bool,
+    already_terminal: bool,
+) -> Response {
+    Json(CancellationResponse {
+        job: JobView::from_summary(row),
+        cancellation_requested,
+        already_terminal,
+    })
+    .into_response()
 }
 
 impl JobView {
@@ -276,31 +347,153 @@ const MAX_STDIN_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1_048_576;
 const SUBMIT_BODY_READ_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_INBOUND_STREAM_MESSAGE_BYTES: usize = 1_024;
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
 const STREAM_SEND_DEADLINE: Duration = Duration::from_secs(5);
 const STREAM_CLOSE_DEADLINE: Duration = Duration::from_millis(250);
 const LARGE_RESPONSE_CHUNK_BYTES: usize = 64 * 1_024;
-// Job ids are generated as UUIDv7 values, so this deliberately invalid id can
-// never collide with a durable row. An indexed summary miss is a constant-work
-// SQLite liveness probe; readiness must not aggregate the retained jobs table.
-const STORAGE_LIVENESS_PROBE_JOB_ID: &str = "__coop_storage_liveness_probe__";
+fn idempotency_request(
+    headers: &HeaderMap,
+    spec: &JobSpec,
+) -> Result<Option<coop_store::IdempotencyRequest>, Box<Response>> {
+    let mut values = headers.get_all("idempotency-key").iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_idempotency_key",
+            "Idempotency-Key must appear exactly once",
+            false,
+        )));
+    }
+    let key = value.to_str().map_err(|_| {
+        Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_idempotency_key",
+            "Idempotency-Key must contain visible ASCII",
+            false,
+        ))
+    })?;
+    if key.is_empty()
+        || key.len() > MAX_IDEMPOTENCY_KEY_BYTES
+        || !key.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        return Err(Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_idempotency_key",
+            format!("Idempotency-Key must be 1-{MAX_IDEMPOTENCY_KEY_BYTES} visible ASCII bytes"),
+            false,
+        )));
+    }
+    let value = serde_json::to_value(spec)
+        .map_err(|error| Box::new(internal_error("canonicalize idempotent job spec", error)))?;
+    let canonical = coop_store::canonical_json(&value);
+    Ok(Some(coop_store::IdempotencyRequest {
+        key: key.to_string(),
+        request_sha256: format!("{:x}", Sha256::digest(canonical.as_bytes())),
+    }))
+}
+
+fn idempotency_conflict() -> Response {
+    api_error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "idempotency_key_reused",
+        "Idempotency-Key was already used for a different canonical job specification",
+        false,
+    )
+}
+
+fn submission_response(job_id: String, replayed: bool) -> Response {
+    let location = format!("/v1/jobs/{job_id}");
+    let mut response = (
+        StatusCode::CREATED,
+        Json(SubmitResponse {
+            stream_url: format!("/v1/jobs/{job_id}/stream"),
+            replay_url: format!("/v1/jobs/{job_id}/replay"),
+            stream_ticket_url: format!("/v1/jobs/{job_id}/stream-ticket"),
+            job_id,
+            status: "queued".to_string(),
+        }),
+    )
+        .into_response();
+    if let Ok(value) = HeaderValue::from_str(&location) {
+        response.headers_mut().insert(header::LOCATION, value);
+    }
+    response.headers_mut().insert(
+        "idempotency-replayed",
+        HeaderValue::from_static(if replayed { "true" } else { "false" }),
+    );
+    response
+}
 
 pub struct SubmitPayload {
     spec: JobSpec,
     _permit: crate::LifetimePermit,
 }
 
+#[derive(Clone, Default)]
+struct SubmitBodyReadState(Arc<std::sync::atomic::AtomicBool>);
+
+impl SubmitBodyReadState {
+    fn mark_complete(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn is_complete(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+fn http1_submit_has_framed_body(req: &Request) -> bool {
+    matches!(
+        req.version(),
+        Version::HTTP_09 | Version::HTTP_10 | Version::HTTP_11
+    ) && req.method() == axum::http::Method::POST
+        && req.uri().path() == "/v1/jobs"
+        && (req.headers().contains_key(header::TRANSFER_ENCODING)
+            || req
+                .headers()
+                .get_all(header::CONTENT_LENGTH)
+                .iter()
+                .any(|value| value.as_bytes() != b"0"))
+}
+
+/// HTTP/1 has one ordered request stream per connection. If auth, scope,
+/// rate limiting, or extraction rejects a submission before its advertised
+/// body reaches EOF, dropping the body can otherwise leave Hyper draining an
+/// attacker-paced body after the submit-body permit has been released (or
+/// before one was acquired). Close only that HTTP/1 connection; HTTP/2 stream
+/// cancellation remains session-local and must not receive hop-by-hop
+/// `Connection` headers.
+async fn close_early_http1_submit_body(mut req: Request, next: axum::middleware::Next) -> Response {
+    let state = http1_submit_has_framed_body(&req).then(SubmitBodyReadState::default);
+    if let Some(state) = state.as_ref() {
+        req.extensions_mut().insert(state.clone());
+    }
+    let mut response = next.run(req).await;
+    if state.as_ref().is_some_and(|state| !state.is_complete()) {
+        response
+            .headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    }
+    response
+}
+
+#[allow(clippy::result_large_err)]
 impl FromRequest<AppState> for SubmitPayload {
     type Rejection = Response;
 
     async fn from_request(req: Request, state: &AppState) -> Result<Self, Self::Rejection> {
         let tenant = req
             .extensions()
-            .get::<Tenant>()
-            .map(|tenant| tenant.0.clone())
+            .get::<AuthContext>()
+            .map(|auth| auth.tenant_id.clone())
             .unwrap_or_else(|| "unauthenticated".to_string());
         extract_submit_payload(
             req,
             &state.submit_body_admission,
+            Some(state.metrics.as_ref()),
             &tenant,
             SUBMIT_BODY_READ_DEADLINE,
         )
@@ -308,50 +501,92 @@ impl FromRequest<AppState> for SubmitPayload {
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn extract_submit_payload(
     req: Request,
     admission: &crate::LifetimeAdmission,
+    metrics: Option<&crate::metrics::Metrics>,
     tenant: &str,
     deadline: Duration,
 ) -> Result<SubmitPayload, Response> {
     let request_version = req.version();
+    let body_read_state = req.extensions().get::<SubmitBodyReadState>().cloned();
     let permit = match admission.try_acquire(tenant) {
         Ok(permit) => permit,
         Err(crate::TryLifetimeError::Closed) => {
+            if let Some(metrics) = metrics {
+                record_lifetime_rejection(
+                    metrics,
+                    crate::metrics::AdmissionScope::SubmitBody,
+                    crate::TryLifetimeError::Closed,
+                );
+            }
             return Err(api_error_with_retry(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "shutting_down",
                 "server is shutting down",
                 true,
                 Some(1),
-            ))
+            ));
         }
         Err(crate::TryLifetimeError::GlobalFull) => {
+            if let Some(metrics) = metrics {
+                record_lifetime_rejection(
+                    metrics,
+                    crate::metrics::AdmissionScope::SubmitBody,
+                    crate::TryLifetimeError::GlobalFull,
+                );
+            }
             return Err(api_error_with_retry(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "submit_body_capacity",
                 "too many request bodies are currently being read",
                 true,
                 Some(1),
-            ))
+            ));
         }
         Err(crate::TryLifetimeError::TenantFull) => {
+            if let Some(metrics) = metrics {
+                record_lifetime_rejection(
+                    metrics,
+                    crate::metrics::AdmissionScope::SubmitBody,
+                    crate::TryLifetimeError::TenantFull,
+                );
+            }
             return Err(api_error_with_retry(
                 StatusCode::TOO_MANY_REQUESTS,
                 "tenant_submit_body_capacity",
                 "this tenant has too many request bodies currently being read",
                 true,
                 Some(1),
-            ))
+            ));
         }
     };
 
     match tokio::time::timeout(deadline, Json::<JobSpec>::from_request(req, &())).await {
-        Ok(Ok(Json(spec))) => Ok(SubmitPayload {
-            spec,
-            _permit: permit,
-        }),
-        Ok(Err(rejection)) => Err(json_rejection_response(rejection)),
+        Ok(Ok(Json(spec))) => {
+            if let Some(state) = body_read_state.as_ref() {
+                state.mark_complete();
+            }
+            Ok(SubmitPayload {
+                spec,
+                _permit: permit,
+            })
+        }
+        Ok(Err(rejection)) => {
+            // Axum buffers the complete body before deserializing JSON.
+            // Syntax/data failures therefore reached EOF, while content-type
+            // and byte-buffer failures may still leave attacker-paced bytes.
+            if matches!(
+                &rejection,
+                JsonRejection::JsonDataError(_) | JsonRejection::JsonSyntaxError(_)
+            ) {
+                if let Some(state) = body_read_state.as_ref() {
+                    state.mark_complete();
+                }
+            }
+            Err(json_rejection_response(rejection))
+        }
         Err(_) => {
             let mut response = api_error_with_retry(
                 StatusCode::REQUEST_TIMEOUT,
@@ -474,6 +709,19 @@ fn stream_admission_error(error: crate::TryLifetimeError) -> Response {
     }
 }
 
+fn record_lifetime_rejection(
+    metrics: &crate::metrics::Metrics,
+    scope: crate::metrics::AdmissionScope,
+    error: crate::TryLifetimeError,
+) {
+    let reason = match error {
+        crate::TryLifetimeError::Closed => crate::metrics::AdmissionReason::Closed,
+        crate::TryLifetimeError::GlobalFull => crate::metrics::AdmissionReason::GlobalFull,
+        crate::TryLifetimeError::TenantFull => crate::metrics::AdmissionReason::TenantFull,
+    };
+    metrics.reject(scope, reason);
+}
+
 fn guarded_json_response<T: Serialize>(
     status: StatusCode,
     value: &T,
@@ -483,6 +731,22 @@ fn guarded_json_response<T: Serialize>(
         Ok(encoded) => encoded,
         Err(error) => return internal_error("serialize JSON response", error),
     };
+    guarded_bytes_response(
+        status,
+        encoded,
+        permit,
+        HeaderValue::from_static("application/json"),
+        None,
+    )
+}
+
+fn guarded_bytes_response(
+    status: StatusCode,
+    encoded: Vec<u8>,
+    permit: crate::LifetimePermit,
+    content_type: HeaderValue,
+    sha256: Option<&str>,
+) -> Response {
     let encoded_len = encoded.len();
     let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(1);
     tokio::spawn(async move {
@@ -514,12 +778,14 @@ fn guarded_json_response<T: Serialize>(
         });
     let mut response = Response::new(axum::body::Body::from_stream(stream));
     *response.status_mut() = status;
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
     if let Ok(value) = HeaderValue::from_str(&encoded_len.to_string()) {
         response.headers_mut().insert(header::CONTENT_LENGTH, value);
+    }
+    if let Some(sha256) = sha256.and_then(|value| HeaderValue::from_str(value).ok()) {
+        response.headers_mut().insert("x-content-sha256", sha256);
     }
     response
 }
@@ -528,27 +794,28 @@ fn guarded_json_response<T: Serialize>(
 /// leases. The caller runs this future in a detached Tokio task before its
 /// next await, so dropping the HTTP request cannot cancel an in-flight SQLite
 /// COMMIT and strand a queued row without its scheduler envelope.
+#[cfg(test)]
 struct ReservedSubmissionCommit {
     reservation: crate::scheduler::AdmissionReservation,
     job_id: String,
-    tenant: String,
     event: Option<coop_store::EventRow>,
 }
 
+#[cfg(test)]
 impl ReservedSubmissionCommit {
     fn publish_and_handoff(self, publish: impl FnOnce(Option<coop_store::EventRow>)) {
         // Publishing the accepted event and committing the already-reserved
         // channel permit are synchronous. No cancellation point can split a
         // durable acceptance from its scheduler envelope.
         publish(self.event);
-        self.reservation.send(self.job_id, self.tenant);
+        self.reservation.send(self.job_id);
     }
 }
 
+#[cfg(test)]
 async fn commit_reserved_submission<P, PF, R, RF, E>(
     reservation: crate::scheduler::AdmissionReservation,
     job_id: String,
-    tenant: String,
     persist: P,
     mut reconcile: R,
 ) -> Result<ReservedSubmissionCommit, E>
@@ -563,7 +830,6 @@ where
         Ok(event) => Ok(ReservedSubmissionCommit {
             reservation,
             job_id,
-            tenant,
             event: Some(event),
         }),
         Err(commit_error) => {
@@ -578,7 +844,6 @@ where
                         return Ok(ReservedSubmissionCommit {
                             reservation,
                             job_id,
-                            tenant,
                             event: None,
                         });
                     }
@@ -598,98 +863,276 @@ where
     }
 }
 
-fn spawn_submission_commit(
-    state: AppState,
-    reservation: crate::scheduler::AdmissionReservation,
-    body_permit: crate::LifetimePermit,
+struct SubmissionAcceptance {
+    job_id: String,
+    replayed: bool,
+}
+
+struct PendingSubmission {
     job_id: String,
     tenant: String,
     language: String,
     spec_json: String,
-) -> tokio::task::JoinHandle<coop_store::StoreResult<()>> {
-    tokio::spawn(async move {
-        state.bus.register(&job_id);
-        let persist_store = Arc::clone(&state.store);
-        let persist_job_id = job_id.clone();
-        let persist_tenant = tenant.clone();
-        let persist_language = language.clone();
-        let reconcile_store = Arc::clone(&state.store);
-        let reconcile_job_id = job_id.clone();
-        let reconcile_tenant = tenant.clone();
-        let reconcile_language = language.clone();
-        let result = commit_reserved_submission(
-            reservation,
-            job_id.clone(),
-            tenant,
-            move || async move {
-                persist_store
-                    .create_job_with_event(
-                        &persist_job_id,
-                        &persist_tenant,
-                        &persist_language,
-                        &spec_json,
-                    )
-                    .await
-            },
-            move || {
-                let store = Arc::clone(&reconcile_store);
-                let job_id = reconcile_job_id.clone();
-                let tenant = reconcile_tenant.clone();
-                let language = reconcile_language.clone();
-                async move {
-                    store.get_job_summary(&job_id).await.map(|row| {
-                        row.is_some_and(|row| {
-                            row.tenant == tenant
-                                && row.language == language
-                                && row.status == "queued"
-                        })
-                    })
-                }
-            },
-        )
-        .await;
+    requested_mem_mb: u32,
+    idempotency: Option<coop_store::IdempotencyRequest>,
+    job_trace: crate::request_context::JobTraceContext,
+}
 
-        let result = match result {
-            Ok(committed) => {
-                let reconciled = committed.event.is_none();
-                committed.publish_and_handoff(|event| {
-                    if let Some(event) = event {
-                        state.bus.send(&job_id, wire_event(event));
-                    }
-                });
-                if reconciled {
-                    tracing::warn!(
-                        %job_id,
-                        "reconciled an ambiguously acknowledged durable job acceptance"
-                    );
-                }
-                Ok(())
+#[cfg(test)]
+#[derive(Clone)]
+struct SubmissionCommitPause {
+    key: String,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static SUBMISSION_COMMIT_PAUSE: std::sync::Mutex<Option<SubmissionCommitPause>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+async fn pause_after_submission_commit(idempotency: Option<&coop_store::IdempotencyRequest>) {
+    let pause = SUBMISSION_COMMIT_PAUSE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .filter(|pause| idempotency.is_some_and(|request| request.key == pause.key))
+        .cloned();
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
+}
+
+fn spawn_submission_commit(
+    state: AppState,
+    reservation: crate::scheduler::AdmissionReservation,
+    body_permit: crate::LifetimePermit,
+    pending: PendingSubmission,
+) -> tokio::task::JoinHandle<coop_store::StoreResult<SubmissionAcceptance>> {
+    let accept_span = pending.job_trace.accept_span(&pending.job_id);
+    let future = async move {
+        let PendingSubmission {
+            job_id,
+            tenant,
+            language,
+            spec_json,
+            requested_mem_mb,
+            idempotency,
+            job_trace,
+        } = pending;
+        let started_at = std::time::Instant::now();
+        // Establish process-local observation and retain the composite queue
+        // reservation before COMMIT can publish the durable idempotency row.
+        // A racing replay may therefore return only after both ownership
+        // structures already exist; this registration is never repeated
+        // after COMMIT, so a racing cancellation cannot be overwritten by a
+        // fresh nonterminal channel.
+        state.bus.register(&job_id);
+        let persisted = state
+            .store
+            .create_job_with_event_idempotent(
+                &job_id,
+                &tenant,
+                &language,
+                &spec_json,
+                requested_mem_mb,
+                idempotency.as_ref(),
+            )
+            .await;
+        state.metrics.observe_storage(
+            crate::metrics::StorageOperation::Accept,
+            started_at.elapsed(),
+            persisted.is_ok(),
+        );
+        #[cfg(test)]
+        pause_after_submission_commit(idempotency.as_ref()).await;
+        let result = match persisted {
+            Ok(coop_store::CreateJobOutcome::Created(event)) => {
+                state.bus.send(&job_id, wire_event(event));
+                reservation.send(job_id.clone());
+                state.job_traces.insert(job_id.clone(), job_trace);
+                state
+                    .metrics
+                    .submitted(crate::metrics::Language::classify(&language));
+                Ok(SubmissionAcceptance {
+                    job_id: job_id.clone(),
+                    replayed: false,
+                })
             }
-            Err(error) => {
+            Ok(coop_store::CreateJobOutcome::Replayed {
+                job_id: replayed_job_id,
+            }) => {
                 state.bus.remove(&job_id);
-                Err(error)
+                drop(reservation);
+                Ok(SubmissionAcceptance {
+                    job_id: replayed_job_id,
+                    replayed: true,
+                })
+            }
+            Err(commit_error) => {
+                // Distinguish a definitive capacity/validation rejection from
+                // a commit acknowledgement lost after the row became durable.
+                let mut delay = Duration::from_millis(10);
+                loop {
+                    let read_started_at = std::time::Instant::now();
+                    let summary = state.store.get_job_summary(&job_id).await;
+                    state.metrics.observe_storage(
+                        crate::metrics::StorageOperation::Read,
+                        read_started_at.elapsed(),
+                        summary.is_ok(),
+                    );
+                    match summary {
+                        Ok(Some(row))
+                            if row.tenant == tenant
+                                && row.language == language
+                                && row.status == "queued" =>
+                        {
+                            tracing::warn!(%job_id, "reconciled an ambiguously acknowledged durable job acceptance");
+                            reservation.send(job_id.clone());
+                            state.job_traces.insert(job_id.clone(), job_trace);
+                            state
+                                .metrics
+                                .submitted(crate::metrics::Language::classify(&language));
+                            break Ok(SubmissionAcceptance {
+                                job_id: job_id.clone(),
+                                replayed: false,
+                            });
+                        }
+                        Ok(_) => {
+                            let Some(request) = idempotency.as_ref() else {
+                                state.bus.remove(&job_id);
+                                drop(reservation);
+                                break Err(commit_error);
+                            };
+                            let read_started_at = std::time::Instant::now();
+                            let lookup = state.store.lookup_idempotency(&tenant, request).await;
+                            state.metrics.observe_storage(
+                                crate::metrics::StorageOperation::Read,
+                                read_started_at.elapsed(),
+                                lookup.is_ok(),
+                            );
+                            match lookup {
+                                Ok(coop_store::IdempotencyLookup::Replay {
+                                    job_id: replayed_job_id,
+                                }) => {
+                                    state.bus.remove(&job_id);
+                                    drop(reservation);
+                                    break Ok(SubmissionAcceptance {
+                                        job_id: replayed_job_id,
+                                        replayed: true,
+                                    });
+                                }
+                                Ok(coop_store::IdempotencyLookup::Conflict)
+                                    if coop_store::is_idempotency_conflict(&commit_error) =>
+                                {
+                                    state.bus.remove(&job_id);
+                                    drop(reservation);
+                                    break Err(commit_error);
+                                }
+                                Ok(_) => {
+                                    state.bus.remove(&job_id);
+                                    drop(reservation);
+                                    break Err(commit_error);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(error = %error, job_id = %job_id, "could not reconcile idempotent job acceptance; retaining leases")
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, job_id = %job_id, "could not reconcile job acceptance; retaining leases")
+                        }
+                    }
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(1));
+                }
             }
         };
+        if result.is_err() {
+            state.bus.remove(&job_id);
+            state.job_traces.remove(&job_id);
+        }
         // Keep parsed request memory and both submission capacity budgets
         // alive until durable commit/reconciliation and scheduler handoff.
         drop(body_permit);
         result
-    })
+    };
+    tokio::spawn(future.instrument(accept_span))
 }
 
-pub fn router(state: AppState) -> Router {
+pub(crate) fn router(state: AppState) -> Router {
     let api = Router::new()
-        .route("/v1/jobs", post(submit).get(list_jobs))
-        .route("/v1/jobs/{id}", get(get_job).delete(cancel_job))
-        .route("/v1/jobs/{id}/replay", get(replay))
-        .route("/v1/jobs/{id}/result", get(job_result))
-        .route("/v1/jobs/{id}/stream", get(stream))
-        .route("/v1/jobs/{id}/stream-ticket", post(stream_ticket))
-        .route("/v1/metrics", get(metrics))
-        .route("/v1/status", get(status))
-        .route("/v1/capabilities", get(capabilities))
-        .route("/v1/whoami", get(whoami))
-        .route("/whoami", get(whoami))
+        .route(
+            "/v1/jobs",
+            post(submit).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_submit)),
+        )
+        .route(
+            "/v1/jobs",
+            get(list_jobs).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}",
+            get(get_job).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}",
+            delete(cancel_job)
+                .route_layer(axum::middleware::from_fn(crate::auth::require_jobs_cancel)),
+        )
+        .route(
+            "/v1/jobs/{id}/replay",
+            get(replay).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}/result",
+            get(job_result).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}/attestation",
+            get(job_attestation)
+                .route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}/result-artifact",
+            get(job_result_artifact)
+                .route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}/stream",
+            get(stream).route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/jobs/{id}/stream-ticket",
+            post(stream_ticket)
+                .route_layer(axum::middleware::from_fn(crate::auth::require_jobs_read)),
+        )
+        .route(
+            "/v1/metrics",
+            get(metrics).route_layer(axum::middleware::from_fn(crate::auth::require_metrics_read)),
+        )
+        .route(
+            "/v1/status",
+            get(status).route_layer(axum::middleware::from_fn(crate::auth::require_service_read)),
+        )
+        .route(
+            "/v1/capabilities",
+            get(capabilities)
+                .route_layer(axum::middleware::from_fn(crate::auth::require_service_read)),
+        )
+        .route(
+            "/v1/attestation/public-key",
+            get(attestation_public_key)
+                .route_layer(axum::middleware::from_fn(crate::auth::require_service_read)),
+        )
+        .route(
+            "/v1/whoami",
+            get(whoami).route_layer(axum::middleware::from_fn(crate::auth::require_service_read)),
+        )
+        .route(
+            "/whoami",
+            get(whoami).route_layer(axum::middleware::from_fn(crate::auth::require_service_read)),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::ratelimit::middleware,
@@ -698,16 +1141,27 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             crate::auth::middleware,
         ))
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES));
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .layer(axum::middleware::from_fn(crate::auth::no_store))
+        .layer(axum::middleware::from_fn(close_early_http1_submit_body));
 
     Router::new()
         .route("/", get(dashboard))
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
+        .route("/metrics", get(operator_metrics))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth_protected_resource_metadata),
+        )
         .route("/openapi.json", get(crate::openapi::serve))
         .merge(api)
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::request_context::middleware,
+        ))
         .with_state(state)
 }
 
@@ -748,28 +1202,60 @@ fn internal_error(context: &str, e: impl std::fmt::Display) -> Response {
 #[utoipa::path(
     post,
     path = "/v1/jobs",
+    params(
+        ("Idempotency-Key" = Option<String>, Header, description = "Optional 1-128 byte visible-ASCII opaque key. Scoped to the authenticated tenant; replaying the same canonical request returns the original job, while reuse with a different request returns 422.")
+    ),
     request_body = JobSpec,
     responses(
-        (status = 201, description = "Job accepted", body = SubmitResponse),
+        (status = 201, description = "Job accepted or replayed", body = SubmitResponse,
+            headers(
+                ("Location" = String, description = "Canonical /v1/jobs/{job_id} resource"),
+                ("Idempotency-Replayed" = String, description = "true when this response replays an existing idempotent acceptance; false for a new acceptance")
+            )
+        ),
         (status = 400, description = "Invalid job spec", body = ErrorEnvelope),
         (status = 401, description = "Missing or invalid API key", body = ErrorEnvelope),
         (status = 408, description = "Request body read deadline exceeded", body = ErrorEnvelope),
         (status = 413, description = "Code or stdin too large", body = ErrorEnvelope),
         (status = 415, description = "JSON content type required", body = ErrorEnvelope),
-        (status = 422, description = "Configured runtime is unavailable", body = ErrorEnvelope),
+        (status = 422, description = "Configured runtime is unavailable or an idempotency key conflicts with a different canonical request", body = ErrorEnvelope),
         (status = 429, description = "Rate or per-tenant body capacity exceeded", body = ErrorEnvelope),
-        (status = 503, description = "Queue, global body, startup, or shutdown capacity unavailable", body = ErrorEnvelope)
+        (status = 503, description = "Queue, global body, startup, shutdown, or logical storage capacity unavailable", body = ErrorEnvelope),
+        (status = 507, description = "Filesystem free-space reserve prevents admission", body = ErrorEnvelope)
     )
 )]
 pub async fn submit(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
     SubmitPayload {
         spec,
         _permit: body_permit,
     }: SubmitPayload,
 ) -> Response {
+    let idempotency = match idempotency_request(&headers, &spec) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    if let Some(request) = idempotency.as_ref() {
+        match state
+            .store
+            .lookup_idempotency(&auth.tenant_id, request)
+            .await
+        {
+            Ok(coop_store::IdempotencyLookup::Replay { job_id }) => {
+                return submission_response(job_id, true)
+            }
+            Ok(coop_store::IdempotencyLookup::Conflict) => return idempotency_conflict(),
+            Ok(coop_store::IdempotencyLookup::Miss) => {}
+            Err(error) => return internal_error("lookup idempotent submission", error),
+        }
+    }
     if *state.shutdown.borrow() {
+        state.metrics.reject(
+            crate::metrics::AdmissionScope::Scheduler,
+            crate::metrics::AdmissionReason::Shutdown,
+        );
         return api_error_with_retry(
             StatusCode::SERVICE_UNAVAILABLE,
             "shutting_down",
@@ -782,12 +1268,32 @@ pub async fn submit(
         .startup_ready
         .load(std::sync::atomic::Ordering::Acquire)
     {
+        state.metrics.reject(
+            crate::metrics::AdmissionScope::Scheduler,
+            crate::metrics::AdmissionReason::Startup,
+        );
         return api_error_with_retry(
             StatusCode::SERVICE_UNAVAILABLE,
             "startup_recovery",
             "durable startup recovery is still in progress",
             true,
             Some(1),
+        );
+    }
+    if !state
+        .execution_provider
+        .isolation_class()
+        .satisfies(spec.requirements.minimum_isolation)
+    {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "minimum_isolation_unsatisfied",
+            format!(
+                "the configured provider {} cannot satisfy requested minimum isolation {}",
+                state.execution_provider.isolation_class(),
+                spec.requirements.minimum_isolation
+            ),
+            false,
         );
     }
     if !coop_types::is_supported_language(&spec.language) {
@@ -850,25 +1356,47 @@ pub async fn submit(
     // Reserve capacity before creating durable state. This is non-blocking:
     // saturated admission returns 503 immediately and cannot leave a zombie
     // queued row behind.
-    let permit = match state.admission.try_reserve() {
+    let mem_mb = state.cfg.clamp_limits(spec.limits.clone()).mem_mb;
+    let permit = match state.admission.try_reserve(&auth.tenant_id, mem_mb) {
         Ok(permit) => permit,
-        Err(crate::scheduler::TryAdmissionError::Full) => {
+        Err(crate::scheduler::TryAdmissionError::GlobalFull) => {
+            state.metrics.reject(
+                crate::metrics::AdmissionScope::Queue,
+                crate::metrics::AdmissionReason::GlobalFull,
+            );
             return api_error_with_retry(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "queue_saturated",
                 "job queue is saturated; retry later",
                 true,
                 Some(1),
-            )
+            );
+        }
+        Err(crate::scheduler::TryAdmissionError::TenantFull) => {
+            state.metrics.reject(
+                crate::metrics::AdmissionScope::Queue,
+                crate::metrics::AdmissionReason::TenantFull,
+            );
+            return api_error_with_retry(
+                StatusCode::TOO_MANY_REQUESTS,
+                "tenant_queue_saturated",
+                "this tenant has reached its queued-job capacity",
+                true,
+                Some(1),
+            );
         }
         Err(crate::scheduler::TryAdmissionError::Closed) => {
+            state.metrics.reject(
+                crate::metrics::AdmissionScope::Scheduler,
+                crate::metrics::AdmissionReason::Closed,
+            );
             return api_error_with_retry(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "scheduler_unavailable",
                 "job scheduler is unavailable",
                 true,
                 Some(1),
-            )
+            );
         }
     };
 
@@ -886,33 +1414,66 @@ pub async fn submit(
         state.clone(),
         permit,
         body_permit,
-        job_id.clone(),
-        tenant.0.clone(),
-        spec.language.clone(),
-        spec_json,
+        PendingSubmission {
+            job_id: job_id.clone(),
+            tenant: auth.tenant_id.clone(),
+            language: spec.language.clone(),
+            spec_json,
+            requested_mem_mb: mem_mb,
+            idempotency,
+            job_trace: crate::request_context::current_job_context(),
+        },
     );
-    match commit.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return internal_error("persist job", e),
+    let accepted = match commit.await {
+        Ok(Ok(accepted)) => accepted,
+        Ok(Err(e)) if coop_store::is_idempotency_conflict(&e) => return idempotency_conflict(),
+        Ok(Err(e)) => match coop_store::capacity_error_kind(&e) {
+            Some(coop_store::CapacityErrorKind::Tenant) => {
+                return api_error_with_retry(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "tenant_storage_quota",
+                    "this tenant has reached its retained storage quota",
+                    true,
+                    Some(1),
+                )
+            }
+            Some(coop_store::CapacityErrorKind::Global) => {
+                return api_error_with_retry(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "storage_capacity",
+                    "global retained storage capacity is exhausted",
+                    true,
+                    Some(1),
+                )
+            }
+            Some(coop_store::CapacityErrorKind::Filesystem) => {
+                return api_error_with_retry(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    "storage_reserve",
+                    "filesystem free-space reserve prevents accepting another job",
+                    true,
+                    Some(1),
+                )
+            }
+            None => return internal_error("persist job", e),
+        },
         Err(e) => {
             state.bus.remove(&job_id);
             return internal_error("join durable job acceptance", e);
         }
-    }
+    };
 
-    tracing::info!(job_id = %job_id, tenant = %tenant.0, language = %spec.language, "job submitted");
+    let accepted_job_id = &accepted.job_id;
+    tracing::info!(
+        job_id = %accepted_job_id,
+        replayed = accepted.replayed,
+        tenant = %auth.tenant_id,
+        principal = %auth.principal_id,
+        language = %spec.language,
+        "job submitted"
+    );
 
-    (
-        StatusCode::CREATED,
-        Json(SubmitResponse {
-            stream_url: format!("/v1/jobs/{job_id}/stream"),
-            replay_url: format!("/v1/jobs/{job_id}/replay"),
-            stream_ticket_url: format!("/v1/jobs/{job_id}/stream-ticket"),
-            job_id,
-            status: "queued".to_string(),
-        }),
-    )
-        .into_response()
+    submission_response(accepted.job_id, accepted.replayed)
 }
 
 #[utoipa::path(
@@ -932,7 +1493,7 @@ pub async fn submit(
 )]
 pub async fn list_jobs(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     if let Some(unknown) = params
@@ -997,7 +1558,7 @@ pub async fn list_jobs(
     match state
         .store
         .list_job_summaries_page(ListJobsQuery {
-            tenant: Some(tenant.0),
+            tenant: Some(auth.tenant_id),
             status,
             language,
             before,
@@ -1054,11 +1615,11 @@ fn decode_job_cursor(raw: &str) -> Result<JobCursor, String> {
 )]
 pub async fn get_job(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Response {
     match state.store.get_job_summary(&id).await {
-        Ok(Some(row)) if row.tenant == tenant.0 => {}
+        Ok(Some(row)) if row.tenant == auth.tenant_id => {}
         Ok(_) => {
             return api_error(
                 StatusCode::NOT_FOUND,
@@ -1070,15 +1631,28 @@ pub async fn get_job(
         Err(e) => return internal_error("get job summary", e),
     }
     // Acquire before selecting the multi-megabyte spec/receipt columns.
-    let permit = match acquire_large_response(&state, &tenant.0) {
+    let permit = match acquire_large_response(&state, &auth.tenant_id) {
         Ok(permit) => permit,
-        Err(error) => return large_response_error(error),
+        Err(error) => {
+            record_lifetime_rejection(
+                state.metrics.as_ref(),
+                crate::metrics::AdmissionScope::LargeResponse,
+                error,
+            );
+            return large_response_error(error);
+        }
     };
     match state.store.get_job(&id).await {
-        Ok(Some(row)) if row.tenant == tenant.0 => match job_detail(&state, &row) {
-            Ok(detail) => guarded_json_response(StatusCode::OK, &detail, permit),
-            Err(e) => internal_error("decode stored job detail", e),
-        },
+        Ok(Some(row)) if row.tenant == auth.tenant_id => {
+            let metadata = match state.store.attestation_metadata(&id).await {
+                Ok(metadata) => metadata,
+                Err(error) => return internal_error("load job attestation metadata", error),
+            };
+            match job_detail(&state, &row, metadata.as_ref()) {
+                Ok(detail) => guarded_json_response(StatusCode::OK, &detail, permit),
+                Err(e) => internal_error("decode stored job detail", e),
+            }
+        }
         Ok(_) => api_error(
             StatusCode::NOT_FOUND,
             "job_not_found",
@@ -1089,7 +1663,11 @@ pub async fn get_job(
     }
 }
 
-fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::Error> {
+fn job_detail(
+    _state: &AppState,
+    row: &JobRow,
+    attestation: Option<&AttestationMetadata>,
+) -> Result<JobDetail, serde_json::Error> {
     let requested_spec: JobSpec = serde_json::from_str(&row.spec_json)?;
     let receipt: Option<serde_json::Value> = row
         .receipt_json
@@ -1100,6 +1678,43 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
         .effective_spec_json
         .as_deref()
         .map(serde_json::from_str)
+        .transpose()?
+        .map(|value: serde_json::Value| {
+            if value
+                .get("storage_version")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2)
+            {
+                let limits = serde_json::from_value(
+                    value
+                        .get("limits")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                )?;
+                let requirements = value
+                    .get("requirements")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .unwrap_or_else(|| requested_spec.requirements.clone());
+                let isolation_class = value
+                    .get("isolation_class")
+                    .cloned()
+                    .map(serde_json::from_value::<Option<IsolationClass>>)
+                    .transpose()?
+                    .flatten();
+                Ok(EffectiveJobSpec {
+                    language: requested_spec.language.clone(),
+                    code: requested_spec.code.clone(),
+                    stdin: requested_spec.stdin.clone(),
+                    limits,
+                    requirements,
+                    isolation_class,
+                })
+            } else {
+                serde_json::from_value(value)
+            }
+        })
         .transpose()?;
     // Only receipts carrying the executor-observed readiness marker are
     // trusted as execution posture. Older receipts and in-flight rows cannot
@@ -1117,6 +1732,11 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
     let isolated = observed_receipt
         .and_then(|value| value.get("isolated"))
         .and_then(serde_json::Value::as_bool);
+    let isolation_class = observed_receipt
+        .and_then(|value| value.get("isolation_class"))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?;
     let network_allowed = observed_receipt
         .and_then(|value| value.get("network_allowed"))
         .and_then(serde_json::Value::as_bool);
@@ -1138,6 +1758,12 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
         .cloned()
         .map(serde_json::from_value)
         .transpose()?;
+    let receipt_string = |name: &str| {
+        observed_receipt
+            .and_then(|value| value.get(name))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
     let effective_limits = observed_receipt
         .and_then(|value| value.get("effective_limits"))
         .cloned()
@@ -1167,6 +1793,7 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
         effective_spec,
         execution_policy: ExecutionPolicy {
             sandbox,
+            isolation_class,
             bootstrap_ready: observed,
             isolated,
             seccomp,
@@ -1175,35 +1802,186 @@ fn job_detail(_state: &AppState, row: &JobRow) -> Result<JobDetail, serde_json::
             private_rootfs,
             dedicated_bootstrap,
             limit_enforcement,
+            runtime_version: receipt_string("runtime_version"),
+            runtime_sha256: receipt_string("runtime_sha256"),
+            rootfs_sha256: receipt_string("rootfs_sha256"),
+            config_sha256: receipt_string("config_sha256"),
         },
         receipt,
         receipt_sha256,
+        attestation: match attestation {
+            Some(attestation) => JobAttestationStatus {
+                available: true,
+                tenant: Some(row.tenant.clone()),
+                key_id: Some(attestation.key_id.clone()),
+                receipt_sha256: Some(attestation.receipt_sha256.clone()),
+                result_media_type: Some(attestation.result_media_type.clone()),
+                result_sha256: Some(attestation.result_sha256.clone()),
+                result_size_bytes: Some(attestation.result_size_bytes),
+                envelope_sha256: Some(attestation.envelope_sha256.clone()),
+                envelope_size_bytes: Some(attestation.envelope_size_bytes),
+                envelope_url: Some(format!("/v1/jobs/{}/attestation", row.job_id)),
+                result_artifact_url: Some(format!("/v1/jobs/{}/result-artifact", row.job_id)),
+            },
+            None => JobAttestationStatus {
+                available: false,
+                tenant: None,
+                key_id: None,
+                receipt_sha256: None,
+                result_media_type: None,
+                result_sha256: None,
+                result_size_bytes: None,
+                envelope_sha256: None,
+                envelope_size_bytes: None,
+                envelope_url: None,
+                result_artifact_url: None,
+            },
+        },
     })
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/jobs/{id}/attestation",
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, description = "Exact persisted DSSE envelope bytes"),
+        (status = 404, body = ErrorEnvelope),
+        (status = 429, body = ErrorEnvelope),
+        (status = 503, body = ErrorEnvelope),
+        (status = 401, body = ErrorEnvelope)
+    )
+)]
+pub async fn job_attestation(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Response {
+    match owns_job(&state, &id, &auth.tenant_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "job_not_found",
+                "job not found",
+                false,
+            )
+        }
+        Err(error) => return internal_error("authorize job attestation", error),
+    }
+    let permit = match acquire_large_response(&state, &auth.tenant_id) {
+        Ok(permit) => permit,
+        Err(error) => {
+            record_lifetime_rejection(
+                state.metrics.as_ref(),
+                crate::metrics::AdmissionScope::LargeResponse,
+                error,
+            );
+            return large_response_error(error);
+        }
+    };
+    match state.store.attestation_envelope(&id).await {
+        Ok(Some((metadata, bytes))) => guarded_bytes_response(
+            StatusCode::OK,
+            bytes,
+            permit,
+            HeaderValue::from_static(crate::attestation::DSSE_ENVELOPE_MEDIA_TYPE),
+            Some(&metadata.envelope_sha256),
+        ),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "attestation_unavailable",
+            "this job does not have a persisted signed attestation",
+            false,
+        ),
+        Err(error) => internal_error("load job attestation", error),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/jobs/{id}/result-artifact",
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, description = "Exact result artifact bytes authenticated by the DSSE envelope"),
+        (status = 404, body = ErrorEnvelope),
+        (status = 429, body = ErrorEnvelope),
+        (status = 503, body = ErrorEnvelope),
+        (status = 401, body = ErrorEnvelope)
+    )
+)]
+pub async fn job_result_artifact(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Response {
+    match owns_job(&state, &id, &auth.tenant_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "job_not_found",
+                "job not found",
+                false,
+            )
+        }
+        Err(error) => return internal_error("authorize job result artifact", error),
+    }
+    let permit = match acquire_large_response(&state, &auth.tenant_id) {
+        Ok(permit) => permit,
+        Err(error) => {
+            record_lifetime_rejection(
+                state.metrics.as_ref(),
+                crate::metrics::AdmissionScope::LargeResponse,
+                error,
+            );
+            return large_response_error(error);
+        }
+    };
+    match state.store.attestation_result_artifact(&id).await {
+        Ok(Some((metadata, bytes))) => {
+            let content_type = HeaderValue::from_str(&metadata.result_media_type)
+                .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+            guarded_bytes_response(
+                StatusCode::OK,
+                bytes,
+                permit,
+                content_type,
+                Some(&metadata.result_sha256),
+            )
+        }
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "result_artifact_unavailable",
+            "this job does not have a persisted attested result artifact",
+            false,
+        ),
+        Err(error) => internal_error("load job result artifact", error),
+    }
 }
 
 /// Cancel a job. Running jobs are terminated by the executor's containment
 /// boundary (cgroup-wide in namespace mode) and finish as `cancelled`; queued jobs are marked
 /// `cancelled` immediately so the scheduler skips them. Idempotent: an
-/// already-terminal job returns 409 with its current status.
+/// already-terminal job returns 200 with `already_terminal=true` and its current status.
 #[utoipa::path(
     delete,
     path = "/v1/jobs/{id}",
     params(("id" = String, Path, description = "Job id")),
     responses(
-        (status = 200, description = "Cancellation accepted"),
+        (status = 200, description = "Cancellation state", body = CancellationResponse),
         (status = 404, description = "Unknown or foreign job", body = ErrorEnvelope),
-        (status = 409, description = "Job already in a terminal state", body = ErrorEnvelope),
         (status = 401, description = "Missing or invalid API key", body = ErrorEnvelope)
     )
 )]
 #[allow(clippy::needless_return)]
 pub async fn cancel_job(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Response {
     let row = match state.store.get_job_summary(&id).await {
-        Ok(Some(row)) if row.tenant == tenant.0 => row,
+        Ok(Some(row)) if row.tenant == auth.tenant_id => row,
         Ok(_) => {
             return api_error(
                 StatusCode::NOT_FOUND,
@@ -1217,22 +1995,20 @@ pub async fn cancel_job(
 
     match JobStatus::parse(&row.status) {
         Some(status) if status.is_terminal() => {
-            // Idempotency guard: cancelling a finished job is a caller error,
-            // not a silent success.
-            return api_error(
-                StatusCode::CONFLICT,
-                "job_already_terminal",
-                format!("job already {}", row.status),
-                false,
-            );
+            return cancellation_response(&row, false, true);
         }
         _ => {}
     }
 
     if let Some(flag) = state.cancels.get(&id) {
         flag.cancel.cancel();
-        tracing::info!(job_id = %id, tenant = %tenant.0, "job cancellation requested (running)");
-        return StatusCode::OK.into_response();
+        tracing::info!(
+            job_id = %id,
+            tenant = %auth.tenant_id,
+            principal = %auth.principal_id,
+            "job cancellation requested (running)"
+        );
+        return cancellation_response(&row, true, false);
     }
 
     // Queued (or just-started) path: conditional DB cancel. On success the
@@ -1243,21 +2019,37 @@ pub async fn cancel_job(
     let queued_receipt = crate::scheduler::build_queued_cancel_receipt(&state, &id).await;
     match state
         .store
-        .cancel_queued_with_event(&id, &tenant.0, queued_receipt.as_ref())
+        .cancel_queued_with_event(&id, &auth.tenant_id, queued_receipt.as_ref())
         .await
     {
         Ok(Some(event)) => {
             state.bus.send(&id, wire_event(event));
             state.bus.complete(&id);
-            tracing::info!(job_id = %id, tenant = %tenant.0, "queued job cancelled");
-            return StatusCode::OK.into_response();
+            tracing::info!(
+                job_id = %id,
+                tenant = %auth.tenant_id,
+                principal = %auth.principal_id,
+                "queued job cancelled"
+            );
+            return match state.store.get_job_summary(&id).await {
+                Ok(Some(current)) if current.tenant == auth.tenant_id => {
+                    cancellation_response(&current, true, false)
+                }
+                Ok(_) => api_error(
+                    StatusCode::NOT_FOUND,
+                    "job_not_found",
+                    "job not found",
+                    false,
+                ),
+                Err(error) => internal_error("reload cancelled job", error),
+            };
         }
         Ok(None) => {
             let running = state
                 .cancels
                 .entry(id.clone())
                 .or_insert_with(|| crate::RunningJob {
-                    tenant: tenant.0.clone(),
+                    tenant: auth.tenant_id.clone(),
                     cancel: Arc::new(coop_exec::ExecutionCancellation::default()),
                 })
                 .clone();
@@ -1268,14 +2060,18 @@ pub async fn cancel_job(
                     if JobStatus::parse(&current.status).is_some_and(|s| s.is_terminal()) =>
                 {
                     state.cancels.remove(&id);
-                    return api_error(
-                        StatusCode::CONFLICT,
-                        "job_already_terminal",
-                        format!("job already {}", current.status),
-                        false,
-                    );
+                    return cancellation_response(&current, false, true);
                 }
-                Ok(Some(_)) => {}
+                Ok(Some(current)) => {
+                    running.cancel.cancel();
+                    tracing::info!(
+                        job_id = %id,
+                        tenant = %auth.tenant_id,
+                        principal = %auth.principal_id,
+                        "job cancellation requested (race — flag installed)"
+                    );
+                    return cancellation_response(&current, true, false);
+                }
                 Ok(None) => {
                     state.cancels.remove(&id);
                     return api_error(
@@ -1290,13 +2086,6 @@ pub async fn cancel_job(
                     return internal_error("recheck job for cancel", e);
                 }
             }
-            running.cancel.cancel();
-            tracing::info!(
-                job_id = %id,
-                tenant = %tenant.0,
-                "job cancellation requested (race — flag installed)"
-            );
-            return StatusCode::OK.into_response();
         }
         Err(e) => return internal_error("cancel queued job", e),
     }
@@ -1326,12 +2115,16 @@ fn wire_event(event: coop_store::EventRow) -> WireEvent {
 )]
 pub async fn metrics(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Response {
     let mut body = String::with_capacity(512);
     body.push_str("# HELP coop_jobs_current Current tenant jobs by status.\n");
     body.push_str("# TYPE coop_jobs_current gauge\n");
-    match state.store.count_by_status_for_tenant(&tenant.0).await {
+    match state
+        .store
+        .count_by_status_for_tenant(&auth.tenant_id)
+        .await
+    {
         Ok(rows) => {
             for (status, n) in rows {
                 body.push_str(&format!("coop_jobs_current{{status=\"{status}\"}} {n}\n"));
@@ -1340,16 +2133,96 @@ pub async fn metrics(
         Err(e) => return internal_error("count jobs for metrics", e),
     }
     body.push_str(&format!(
-        "# HELP coop_running_jobs Jobs currently executing.\n# TYPE coop_running_jobs gauge\ncoop_running_jobs {}\n",
+        "# HELP coop_job_lifecycle_owners_current Tenant jobs currently owned by the scheduler across pre-start, execution, and finalization.\n# TYPE coop_job_lifecycle_owners_current gauge\ncoop_job_lifecycle_owners_current {}\n",
         state
             .cancels
             .iter()
-            .filter(|entry| entry.tenant == tenant.0)
+            .filter(|entry| entry.tenant == auth.tenant_id)
             .count()
     ));
     (
         StatusCode::OK,
         [("content-type", "text/plain; version=0.0.4")],
+        body,
+    )
+        .into_response()
+}
+
+/// Global process metrics. This surface has a credential separate from tenant
+/// API keys, never emits tenant/job/request/trace labels, and performs no store
+/// I/O while serving a scrape.
+pub async fn operator_metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(expected) = state.metrics_token_digest.as_ref() else {
+        return no_store(api_error(
+            StatusCode::NOT_FOUND,
+            "metrics_disabled",
+            "global operator metrics are not configured",
+            false,
+        ));
+    };
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, credential)| {
+            scheme.eq_ignore_ascii_case("bearer") && !credential.is_empty()
+        })
+        .map(|(_, credential)| credential);
+    if !presented.is_some_and(|token| crate::metrics::token_matches(expected, token)) {
+        let mut response = api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_metrics_token",
+            "a valid operator metrics bearer token is required",
+            false,
+        );
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer realm=\"coop-metrics\""),
+        );
+        return no_store(response);
+    }
+
+    let format = crate::metrics::negotiate(headers.get(header::ACCEPT));
+    let startup = state
+        .startup_ready
+        .load(std::sync::atomic::Ordering::Acquire);
+    let storage = state.readiness.storage_ready();
+    let scheduler = !*state.shutdown.borrow();
+    let accepting = startup && storage && scheduler;
+    let snapshot = crate::metrics::RuntimeSnapshot {
+        capacity: crate::metrics::CapacitySnapshot {
+            queue_used: state.admission.depth(),
+            queue_limit: state.admission.capacity(),
+            submit_bodies_used: state.submit_body_admission.depth(),
+            submit_bodies_limit: state.submit_body_admission.capacity(),
+            streams_used: state.stream_admission.depth(),
+            streams_limit: state.stream_admission.capacity(),
+            result_waits_used: state.result_wait_admission.depth(),
+            result_waits_limit: state.result_wait_admission.capacity(),
+            large_responses_used: state.large_response_admission.depth(),
+            large_responses_limit: state.large_response_admission.capacity(),
+        },
+        readiness: crate::metrics::ReadinessSnapshot {
+            ready: accepting,
+            startup,
+            storage,
+            // Scheduler supervision publishes shutdown after retaining a fatal
+            // diagnosis, so this remains a cached, O(1) component.
+            scheduler,
+            accepting,
+        },
+    };
+    let body = state.metrics.render(format, snapshot);
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(format.content_type()),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (header::VARY, HeaderValue::from_static("accept")),
+        ],
         body,
     )
         .into_response()
@@ -1374,11 +2247,11 @@ pub async fn metrics(
 )]
 pub async fn replay(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    match owns_job(&state, &id, &tenant.0).await {
+    match owns_job(&state, &id, &auth.tenant_id).await {
         Ok(true) => {}
         Ok(false) => {
             return api_error(
@@ -1430,9 +2303,16 @@ pub async fn replay(
         None => 1_000,
     };
     // Bound both event materialization and the subsequent transfer.
-    let permit = match acquire_large_response(&state, &tenant.0) {
+    let permit = match acquire_large_response(&state, &auth.tenant_id) {
         Ok(permit) => permit,
-        Err(error) => return large_response_error(error),
+        Err(error) => {
+            record_lifetime_rejection(
+                state.metrics.as_ref(),
+                crate::metrics::AdmissionScope::LargeResponse,
+                error,
+            );
+            return large_response_error(error);
+        }
     };
     match state.store.events_after(&id, after, limit).await {
         Ok(events) => {
@@ -1471,7 +2351,7 @@ pub async fn replay(
 )]
 pub async fn job_result(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -1491,7 +2371,7 @@ pub async fn job_result(
     };
 
     let mut row = match state.store.get_job_summary(&id).await {
-        Ok(Some(row)) if row.tenant == tenant.0 => row,
+        Ok(Some(row)) if row.tenant == auth.tenant_id => row,
         Ok(_) => {
             return api_error(
                 StatusCode::NOT_FOUND,
@@ -1507,10 +2387,19 @@ pub async fn job_result(
     if !terminal && wait_seconds > 0 {
         let mut shutdown = state.shutdown.subscribe();
         if !*shutdown.borrow() {
-            _wait_permit = Some(match state.result_wait_admission.try_acquire(&tenant.0) {
-                Ok(permit) => permit,
-                Err(error) => return result_wait_error(error),
-            });
+            _wait_permit = Some(
+                match state.result_wait_admission.try_acquire(&auth.tenant_id) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        record_lifetime_rejection(
+                            state.metrics.as_ref(),
+                            crate::metrics::AdmissionScope::ResultWait,
+                            error,
+                        );
+                        return result_wait_error(error);
+                    }
+                },
+            );
             // During readiness-gated startup recovery, durable queued rows
             // can briefly predate their in-process completion watch. Poll the
             // indexed summary until recovery registers the watch, then switch
@@ -1556,7 +2445,7 @@ pub async fn job_result(
                     completion = None;
                 }
                 row = match state.store.get_job_summary(&id).await {
-                    Ok(Some(row)) if row.tenant == tenant.0 => row,
+                    Ok(Some(row)) if row.tenant == auth.tenant_id => row,
                     Ok(_) => {
                         return api_error(
                             StatusCode::NOT_FOUND,
@@ -1578,7 +2467,7 @@ pub async fn job_result(
         // One post-notification read is enough. If completion raced with the
         // durable transition, this read observes the committed state.
         row = match state.store.get_job_summary(&id).await {
-            Ok(Some(row)) if row.tenant == tenant.0 => row,
+            Ok(Some(row)) if row.tenant == auth.tenant_id => row,
             Ok(_) => {
                 return api_error(
                     StatusCode::NOT_FOUND,
@@ -1593,9 +2482,16 @@ pub async fn job_result(
 
     // Only completed/non-waiting callers compete for response memory; a
     // completion burst cannot materialize more than the response cap.
-    let permit = match acquire_large_response(&state, &tenant.0) {
+    let permit = match acquire_large_response(&state, &auth.tenant_id) {
         Ok(permit) => permit,
-        Err(error) => return large_response_error(error),
+        Err(error) => {
+            record_lifetime_rejection(
+                state.metrics.as_ref(),
+                crate::metrics::AdmissionScope::LargeResponse,
+                error,
+            );
+            return large_response_error(error);
+        }
     };
     match state.store.events_for(&id).await {
         Ok(events) => {
@@ -1669,7 +2565,7 @@ fn fold_result(row: &JobSummary, events: &[coop_store::EventRow]) -> ResultView 
 )]
 pub async fn stream(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     ws: WebSocketUpgrade,
@@ -1683,7 +2579,7 @@ pub async fn stream(
             Some(1),
         );
     }
-    match owns_job(&state, &id, &tenant.0).await {
+    match owns_job(&state, &id, &auth.tenant_id).await {
         Ok(true) => {}
         Ok(false) => {
             return api_error(
@@ -1709,9 +2605,16 @@ pub async fn stream(
         },
         None => 0,
     };
-    let stream_permit = match state.stream_admission.try_acquire(&tenant.0) {
+    let stream_permit = match state.stream_admission.try_acquire(&auth.tenant_id) {
         Ok(permit) => permit,
-        Err(error) => return stream_admission_error(error),
+        Err(error) => {
+            record_lifetime_rejection(
+                state.metrics.as_ref(),
+                crate::metrics::AdmissionScope::Stream,
+                error,
+            );
+            return stream_admission_error(error);
+        }
     };
     ws.max_message_size(MAX_INBOUND_STREAM_MESSAGE_BYTES)
         .max_frame_size(MAX_INBOUND_STREAM_MESSAGE_BYTES)
@@ -1731,7 +2634,7 @@ pub async fn stream(
 )]
 pub async fn stream_ticket(
     State(state): State<AppState>,
-    Extension(tenant): Extension<Tenant>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Response {
     if *state.shutdown.borrow() {
@@ -1743,7 +2646,7 @@ pub async fn stream_ticket(
             Some(1),
         );
     }
-    match owns_job(&state, &id, &tenant.0).await {
+    match owns_job(&state, &id, &auth.tenant_id).await {
         Ok(true) => {}
         Ok(false) => {
             return api_error(
@@ -1767,7 +2670,7 @@ pub async fn stream_ticket(
             Some(1),
         );
     }
-    let (ticket, expires_at_ms) = crate::auth::issue_stream_ticket(&state, &id, &tenant.0);
+    let (ticket, expires_at_ms) = crate::auth::issue_stream_ticket(&state, &id, &auth);
     if *state.shutdown.borrow() {
         state.stream_tickets.remove(&ticket);
         return api_error_with_retry(
@@ -2062,7 +2965,32 @@ async fn job_terminal(store: &coop_store::Store, job_id: &str) -> coop_store::St
     responses((status = 200, description = "Process liveness"))
 )]
 pub async fn health() -> Response {
-    Json(serde_json::json!({ "ok": true })).into_response()
+    let mut response = Json(serde_json::json!({ "ok": true })).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+#[utoipa::path(
+    get,
+    path = "/.well-known/oauth-protected-resource",
+    responses(
+        (status = 200, description = "RFC 9728 OAuth protected-resource metadata"),
+        (status = 404, body = ErrorEnvelope)
+    ),
+    security()
+)]
+pub async fn oauth_protected_resource_metadata(State(state): State<AppState>) -> Response {
+    match &state.cfg.jwt {
+        Some(jwt) => Json(jwt.protected_resource_metadata()).into_response(),
+        None => api_error(
+            StatusCode::NOT_FOUND,
+            "oauth_not_configured",
+            "OAuth protected-resource metadata is unavailable",
+            false,
+        ),
+    }
 }
 
 #[utoipa::path(
@@ -2079,50 +3007,54 @@ pub async fn ready(State(state): State<AppState>) -> Response {
         .startup_ready
         .load(std::sync::atomic::Ordering::Acquire)
     {
-        return api_error_with_retry(
+        return no_store(api_error_with_retry(
             StatusCode::SERVICE_UNAVAILABLE,
             "startup_recovery",
             "durable startup recovery is still in progress",
             true,
             Some(1),
-        );
+        ));
     }
-    match state
-        .store
-        .get_job_summary(STORAGE_LIVENESS_PROBE_JOB_ID)
-        .await
-    {
-        Ok(_) if !*state.shutdown.borrow() => {
-            Json(serde_json::json!({ "ok": true })).into_response()
-        }
-        Ok(_) => api_error_with_retry(
+    if *state.shutdown.borrow() {
+        return no_store(api_error_with_retry(
             StatusCode::SERVICE_UNAVAILABLE,
             "shutting_down",
             "server is shutting down",
             true,
             Some(1),
-        ),
-        Err(e) => {
-            tracing::error!(error = %e, "readiness storage check failed");
-            api_error_with_retry(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "storage_unavailable",
-                "event store is unavailable",
-                true,
-                Some(1),
-            )
-        }
+        ));
     }
+    if !state.readiness.storage_ready() {
+        return no_store(api_error_with_retry(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "the cached event-store readiness probe is unhealthy or stale",
+            true,
+            Some(1),
+        ));
+    }
+    no_store(Json(serde_json::json!({ "ok": true })).into_response())
+}
+
+fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 fn execution_capabilities(state: &AppState) -> ExecutionCapabilities {
-    let isolated = matches!(state.sandbox_mode, coop_exec::SandboxMode::Namespaces);
+    let isolation_class = state.execution_provider.isolation_class();
+    let isolated = isolation_class != IsolationClass::None;
     ExecutionCapabilities {
         backend: state.sandbox_mode.as_str().to_string(),
+        isolation_class,
         isolated,
         private_rootfs: isolated && state.cfg.rootfs.is_some(),
-        dedicated_bootstrap: isolated && state.cfg.sandbox_helper.is_some(),
-        seccomp: isolated && state.seccomp,
+        dedicated_bootstrap: isolated
+            && (state.cfg.sandbox_helper.is_some()
+                || matches!(state.sandbox_mode, coop_exec::SandboxMode::Gvisor)),
+        seccomp: matches!(state.sandbox_mode, coop_exec::SandboxMode::Namespaces) && state.seccomp,
         networking: if isolated { "disabled" } else { "host" }.to_string(),
         limit_enforcement: if isolated {
             LimitEnforcement::NAMESPACE_SANDBOX
@@ -2145,7 +3077,8 @@ pub async fn capabilities(State(state): State<AppState>) -> Response {
         limits: LimitCapabilities {
             wall_seconds_max: WALL_MAX_SECONDS,
             cpu_seconds_max: CPU_MAX_SECONDS,
-            mem_mb_max: MEM_MAX_MB,
+            mem_mb_max: state.cfg.max_job_mem_mb,
+            concurrent_mem_mb_max: state.cfg.memory_budget_mb,
             pids_max: PIDS_MAX,
             file_mb_max: FILE_MAX_MB,
             output_lines_max: coop_types::MAX_OUTPUT_LINES,
@@ -2160,7 +3093,52 @@ pub async fn capabilities(State(state): State<AppState>) -> Response {
             event_cursors: true,
             stream_tickets: true,
             receipts: true,
+            signed_attestations: state.attestations.enabled(),
         },
+        attestations: AttestationCapabilities {
+            enabled: state.attestations.enabled(),
+            algorithm: state.attestations.enabled().then(|| "Ed25519".to_string()),
+            envelope_format: state
+                .attestations
+                .enabled()
+                .then(|| "DSSE/in-toto Statement v1".to_string()),
+            key_id: state.attestations.key_id().map(str::to_string),
+            public_key_url: state
+                .attestations
+                .enabled()
+                .then(|| "/v1/attestation/public-key".to_string()),
+        },
+    })
+    .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/attestation/public-key",
+    responses(
+        (status = 200, body = AttestationPublicKeyResponse),
+        (status = 404, body = ErrorEnvelope),
+        (status = 401, body = ErrorEnvelope)
+    )
+)]
+pub async fn attestation_public_key(State(state): State<AppState>) -> Response {
+    let (Some(key_id), Some(public_key_pem)) = (
+        state.attestations.key_id(),
+        state.attestations.public_key_pem(),
+    ) else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "attestations_disabled",
+            "this server has no attestation signing key",
+            false,
+        );
+    };
+    Json(AttestationPublicKeyResponse {
+        algorithm: "Ed25519".to_string(),
+        key_id: key_id.to_string(),
+        public_key_pem: public_key_pem.to_string(),
+        trust_notice: "The key id identifies this key but is not a trust anchor. Pin or distribute the public key through an authenticated out-of-band channel before relying on signatures."
+            .to_string(),
     })
     .into_response()
 }
@@ -2170,8 +3148,21 @@ pub async fn capabilities(State(state): State<AppState>) -> Response {
     path = "/v1/whoami",
     responses((status = 200, body = WhoAmIResponse), (status = 401, body = ErrorEnvelope))
 )]
-pub async fn whoami(Extension(tenant): Extension<Tenant>) -> Response {
-    Json(WhoAmIResponse { tenant: tenant.0 }).into_response()
+pub async fn whoami(Extension(auth): Extension<AuthContext>) -> Response {
+    Json(WhoAmIResponse {
+        tenant: auth.tenant_id,
+        principal_id: auth.principal_id,
+        credential_id: auth.credential_id,
+        auth_method: auth.method.as_str().to_string(),
+        scopes: auth
+            .scopes
+            .names()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        expires_at_ms: auth.expires_at_ms,
+    })
+    .into_response()
 }
 
 /// Version + sandbox mode detail, behind the authenticated API surface
@@ -2184,12 +3175,11 @@ pub async fn whoami(Extension(tenant): Extension<Tenant>) -> Response {
         (status = 401, description = "Missing or invalid API key", body = ErrorEnvelope)
     )
 )]
-pub async fn status(State(state): State<AppState>) -> Response {
-    let storage_ready = state
-        .store
-        .get_job_summary(STORAGE_LIVENESS_PROBE_JOB_ID)
-        .await
-        .is_ok();
+pub async fn status(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Response {
+    let storage_ready = state.readiness.storage_ready();
     Json(StatusResponse {
         version: crate::VERSION.to_string(),
         sandbox: state.sandbox_mode.as_str().to_string(),
@@ -2202,9 +3192,13 @@ pub async fn status(State(state): State<AppState>) -> Response {
         execution: execution_capabilities(&state),
         scheduler: SchedulerStatus {
             workers: state.cfg.workers,
-            queue_capacity: state.admission.capacity(),
-            queue_depth: state.admission.depth(),
-            running: state.cancels.len(),
+            queue_capacity: state.admission.tenant_capacity(),
+            queue_depth: state.admission.tenant_depth(&auth.tenant_id),
+            running: state
+                .cancels
+                .iter()
+                .filter(|entry| entry.tenant == auth.tenant_id)
+                .count(),
             shutting_down: *state.shutdown.borrow(),
         },
         storage_ready,
@@ -2212,7 +3206,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
-const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-JKWf++1p6cejiOMJq6kcdylN4cYL3LeuydoiIM64MK4='; style-src 'sha256-BzeKOrleFRyiaWvVhMJMi/Z9OXSk2nGkYEfG61+CmcU='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-oOtuToXQs0B3tWWs5yov6UadpucxsPXH4tQ1dSePwlk='; style-src 'sha256-IPEJ2JSNy0PyVjnAQQIxWy3GhU0S/z6ZXAwlTszs4BM='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 async fn dashboard() -> Response {
     let mut response = Html(include_str!("dashboard.html")).into_response();
@@ -2238,6 +3232,7 @@ mod tests {
     use std::convert::Infallible;
     use std::pin::Pin;
     use std::task::{Context, Poll};
+    use tower::ServiceExt;
 
     #[derive(Default)]
     struct MessageSink {
@@ -2251,9 +3246,36 @@ mod tests {
         let source = include_str!("dashboard.html");
         assert!(source.contains("No runtimes available"));
         assert!(source.contains("dom.jobLanguage.disabled = true"));
-        assert!(source.contains("dom.submitRun.disabled = true"));
+        assert!(source.contains("dom.submitRun.disabled = Boolean(reason)"));
         assert!(source
             .contains("dom.languageFilter.replaceChildren(new Option(\"All languages\", \"\"))"));
+    }
+
+    #[test]
+    fn dashboard_submits_the_six_class_isolation_contract_atomically() {
+        let source = include_str!("dashboard.html");
+        for isolation in [
+            "none",
+            "linux-shared-kernel",
+            "gvisor-application-kernel",
+            "wasm-capability",
+            "hardware-vm",
+            "confidential-vm",
+        ] {
+            assert!(
+                source.contains(&format!("value=\"{isolation}\"")),
+                "dashboard isolation selector is missing {isolation}"
+            );
+        }
+        assert!(source.contains("requirements: { minimum_isolation: minimumIsolation }"));
+        assert!(source.contains("execution.isolation_class"));
+        assert!(source.contains("state.identity.scopes.includes(scope)"));
+        assert!(source.contains("gVisor does not claim the namespace guest seccomp filter"));
+        assert!(source.contains("job.attestation"));
+        assert!(source.contains("attestation.envelope_url"));
+        assert!(source.contains("attestation.result_artifact_url"));
+        assert!(source.contains("url.origin !== window.location.origin"));
+        assert!(source.contains("not a trust anchor"));
     }
 
     fn base64_standard(bytes: &[u8]) -> String {
@@ -2328,6 +3350,13 @@ mod tests {
             .await
             .expect("dashboard body");
         let html = std::str::from_utf8(&body).expect("UTF-8 dashboard");
+        assert!(html.contains("localStorage.removeItem(\"coop_api_key\")"));
+        assert!(html.contains("localStorage.removeItem(\"coop_key\")"));
+        assert!(html.contains("sessionStorage.removeItem(\"coop_api_key\")"));
+        assert!(html.contains("sessionStorage.removeItem(\"coop_key\")"));
+        assert!(!html.contains(".getItem("));
+        assert!(!html.contains("storageGet"));
+        assert!(!html.contains("rememberKey"));
         let style = inline_block(html, "<style>", "</style>");
         let script = inline_block(html, "<script>", "</script>");
         let style_digest = Sha256::digest(style.as_bytes());
@@ -2617,6 +3646,7 @@ mod tests {
             extract_submit_payload(
                 submit_request(axum::body::Body::from_stream(stalled)),
                 &held_admission,
+                None,
                 "tenant-a",
                 Duration::from_secs(5),
             )
@@ -2627,6 +3657,7 @@ mod tests {
         let tenant_error = extract_submit_payload(
             submit_request(axum::body::Body::from(r#"{"language":"bash","code":":"}"#)),
             &admission,
+            None,
             "tenant-a",
             Duration::from_secs(1),
         )
@@ -2638,6 +3669,7 @@ mod tests {
         let other = extract_submit_payload(
             submit_request(axum::body::Body::from(r#"{"language":"bash","code":":"}"#)),
             &admission,
+            None,
             "tenant-b",
             Duration::from_secs(1),
         )
@@ -2651,6 +3683,7 @@ mod tests {
         let timeout = extract_submit_payload(
             submit_request(axum::body::Body::from_stream(never)),
             &timeout_admission,
+            None,
             "tenant-a",
             Duration::from_millis(10),
         )
@@ -2668,6 +3701,7 @@ mod tests {
             extract_submit_payload(
                 submit_request(axum::body::Body::from(r#"{"language":"bash","code":":"}"#,)),
                 &timeout_admission,
+                None,
                 "tenant-a",
                 Duration::from_secs(1),
             )
@@ -2690,6 +3724,7 @@ mod tests {
         let response = extract_submit_payload(
             submit_request(axum::body::Body::from_stream(body)),
             &admission,
+            None,
             "tenant-b",
             Duration::from_secs(1),
         )
@@ -2705,9 +3740,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_body_rejections_record_closed_global_and_tenant_reasons() {
+        let metrics = crate::metrics::Metrics::new();
+        let admission = crate::LifetimeAdmission::new(2, 1);
+        let _tenant_a = admission.try_acquire("tenant-a").unwrap();
+        let tenant = extract_submit_payload(
+            submit_request(axum::body::Body::empty()),
+            &admission,
+            Some(&metrics),
+            "tenant-a",
+            Duration::from_secs(1),
+        )
+        .await
+        .err()
+        .expect("tenant body capacity rejects");
+        assert_eq!(tenant.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let _tenant_b = admission.try_acquire("tenant-b").unwrap();
+        let global = extract_submit_payload(
+            submit_request(axum::body::Body::empty()),
+            &admission,
+            Some(&metrics),
+            "tenant-c",
+            Duration::from_secs(1),
+        )
+        .await
+        .err()
+        .expect("global body capacity rejects");
+        assert_eq!(global.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let closed_admission = crate::LifetimeAdmission::new(1, 1);
+        closed_admission.close();
+        let closed = extract_submit_payload(
+            submit_request(axum::body::Body::empty()),
+            &closed_admission,
+            Some(&metrics),
+            "tenant-a",
+            Duration::from_secs(1),
+        )
+        .await
+        .err()
+        .expect("closed body admission rejects");
+        assert_eq!(closed.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        for (reason, expected) in [
+            (crate::metrics::AdmissionReason::TenantFull, 1),
+            (crate::metrics::AdmissionReason::GlobalFull, 1),
+            (crate::metrics::AdmissionReason::Closed, 1),
+        ] {
+            assert_eq!(
+                metrics.rejection_count(crate::metrics::AdmissionScope::SubmitBody, reason),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn aborted_submit_waiter_cannot_cancel_ambiguous_commit_or_release_lease() {
-        let (admission, mut queued_rx) = crate::scheduler::Admission::channel(1);
-        let reservation = admission.try_reserve().expect("queue reservation");
+        let (admission, mut queued_rx) = crate::scheduler::Admission::channel(1, 1);
+        let reservation = admission
+            .try_reserve("tenant-a", 256)
+            .expect("queue reservation");
         let body_admission = crate::LifetimeAdmission::new(1, 1);
         let body_permit = body_admission
             .try_acquire("tenant-a")
@@ -2717,6 +3810,8 @@ mod tests {
         let durable = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let durable_after_commit = Arc::clone(&durable);
         let durable_for_reconcile = Arc::clone(&durable);
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+        let detached_metrics = Arc::clone(&metrics);
 
         // This is the exact ownership pattern used by submit(): the HTTP
         // waiter owns only a JoinHandle, while the detached continuation owns
@@ -2725,7 +3820,6 @@ mod tests {
             let result = commit_reserved_submission(
                 reservation,
                 "committed-job".to_string(),
-                "tenant-a".to_string(),
                 move || async move {
                     let _ = commit_entered_tx.send(());
                     let _ = commit_release_rx.await;
@@ -2740,7 +3834,10 @@ mod tests {
                 },
             )
             .await
-            .map(|committed| committed.publish_and_handoff(|_| {}));
+            .map(|committed| {
+                committed.publish_and_handoff(|_| {});
+                detached_metrics.submitted(crate::metrics::Language::Python);
+            });
             drop(body_permit);
             result
         });
@@ -2750,6 +3847,11 @@ mod tests {
         waiter.abort();
         let _ = waiter.await;
         assert_eq!(admission.depth(), 1, "queue lease survives handler abort");
+        assert_eq!(
+            metrics.submitted_count(crate::metrics::Language::Python),
+            0,
+            "an uncommitted attempt is not submitted"
+        );
         assert_eq!(
             body_admission.try_acquire("tenant-a").err(),
             Some(crate::TryLifetimeError::GlobalFull),
@@ -2764,6 +3866,11 @@ mod tests {
         assert!(durable.load(std::sync::atomic::Ordering::Acquire));
         assert_eq!(queued.job_id, "committed-job");
         assert_eq!(queued.tenant, "tenant-a");
+        assert_eq!(
+            metrics.submitted_count(crate::metrics::Language::Python),
+            1,
+            "detached durable success counts exactly once"
+        );
         assert_eq!(
             admission.depth(),
             1,
@@ -2791,21 +3898,31 @@ mod tests {
         let mut too_large =
             submit_request(axum::body::Body::from(r#"{"language":"bash","code":":"}"#));
         DefaultBodyLimit::max(8).apply(&mut too_large);
-        let response =
-            extract_submit_payload(too_large, &admission, "tenant-a", Duration::from_secs(1))
-                .await
-                .err()
-                .expect("tiny encoded limit rejects the body");
+        let response = extract_submit_payload(
+            too_large,
+            &admission,
+            None,
+            "tenant-a",
+            Duration::from_secs(1),
+        )
+        .await
+        .err()
+        .expect("tiny encoded limit rejects the body");
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
         let mut wrong_type =
             submit_request(axum::body::Body::from(r#"{"language":"bash","code":":"}"#));
         wrong_type.headers_mut().remove(header::CONTENT_TYPE);
-        let response =
-            extract_submit_payload(wrong_type, &admission, "tenant-a", Duration::from_secs(1))
-                .await
-                .err()
-                .expect("JSON extractor requires JSON content type");
+        let response = extract_submit_payload(
+            wrong_type,
+            &admission,
+            None,
+            "tenant-a",
+            Duration::from_secs(1),
+        )
+        .await
+        .err()
+        .expect("JSON extractor requires JSON content type");
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 
@@ -2815,11 +3932,16 @@ mod tests {
         let never = futures_util::stream::pending::<Result<axum::body::Bytes, Infallible>>();
         let mut request = submit_request(axum::body::Body::from_stream(never));
         *request.version_mut() = Version::HTTP_2;
-        let response =
-            extract_submit_payload(request, &admission, "tenant-a", Duration::from_millis(10))
-                .await
-                .err()
-                .expect("stalled HTTP/2 stream times out");
+        let response = extract_submit_payload(
+            request,
+            &admission,
+            None,
+            "tenant-a",
+            Duration::from_millis(10),
+        )
+        .await
+        .err()
+        .expect("stalled HTTP/2 stream times out");
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
         assert!(!response.headers().contains_key(header::CONNECTION));
     }
@@ -2876,5 +3998,108 @@ mod tests {
         let _reclaimed = admission
             .try_acquire("tenant-a")
             .expect("EOF reclaims response admission");
+    }
+
+    #[tokio::test]
+    async fn committed_idempotent_replay_and_cancel_cannot_leave_bus_or_queue_leases() {
+        let base = std::env::temp_dir().join(format!("coop-handoff-race-{}", uuid::Uuid::now_v7()));
+        let db = base.join("coop.db");
+        let jobs = base.join("jobs");
+        let source = |key: &str| match key {
+            "COOP_API_KEYS" => Some("tenant:test-key-with-enough-entropy".to_string()),
+            "COOP_SANDBOX" => Some("off".to_string()),
+            "COOP_STORAGE_FREE_RESERVE_MB" => Some("0".to_string()),
+            "COOP_JOBS_ROOT" => Some(jobs.to_string_lossy().into_owned()),
+            _ => None,
+        };
+        let cfg = crate::config::Config::from_sources(&source, false).unwrap();
+        let store = Arc::new(
+            coop_store::Store::open_with_limits(&db, cfg.storage_limits())
+                .await
+                .unwrap(),
+        );
+        let (app, state, mut queue_rx) =
+            crate::build_app(cfg, Arc::clone(&store), "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *SUBMISSION_COMMIT_PAUSE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SubmissionCommitPause {
+            key: "race-key".to_string(),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+
+        let submit_request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/jobs")
+                .header(header::AUTHORIZATION, "Bearer test-key-with-enough-entropy")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "race-key")
+                .body(axum::body::Body::from(
+                    r#"{"language":"python","code":"print(1)"}"#,
+                ))
+                .unwrap()
+        };
+        let first_app = app.clone();
+        let first = tokio::spawn(async move { first_app.oneshot(submit_request()).await.unwrap() });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("first submit committed before handoff pause");
+
+        // The replay can observe the durable mapping while the original task
+        // is paused only because bus registration and the composite queue
+        // reservation were established before COMMIT.
+        let replay = tokio::time::timeout(
+            Duration::from_secs(2),
+            app.clone().oneshot(submit_request()),
+        )
+        .await
+        .expect("replay did not wait on missing process-local ownership")
+        .unwrap();
+        assert_eq!(replay.status(), StatusCode::CREATED);
+        assert_eq!(replay.headers()["idempotency-replayed"], "true");
+        let replay_body = axum::body::to_bytes(replay.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let replay_body: serde_json::Value = serde_json::from_slice(&replay_body).unwrap();
+        let job_id = replay_body["job_id"].as_str().unwrap().to_string();
+        assert!(state.bus.subscribe(&job_id).is_some());
+
+        let cancel = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/jobs/{job_id}"))
+                    .header(header::AUTHORIZATION, "Bearer test-key-with-enough-entropy")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancel.status(), StatusCode::OK);
+        assert!(state.bus.subscribe(&job_id).is_none());
+
+        release.notify_one();
+        let first = first.await.unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let envelope = tokio::time::timeout(Duration::from_secs(2), queue_rx.recv())
+            .await
+            .expect("scheduler envelope missing")
+            .expect("queue closed");
+        assert_eq!(envelope.job_id, job_id);
+        drop(envelope);
+        assert_eq!(state.admission.depth(), 0);
+        assert_eq!(state.admission.tenant_depth("tenant"), 0);
+        assert!(state.bus.subscribe(&job_id).is_none());
+        *SUBMISSION_COMMIT_PAUSE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let _ = std::fs::remove_dir_all(base);
     }
 }

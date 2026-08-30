@@ -102,15 +102,32 @@ async fn spawn_app_with_root() -> (Router, String) {
         addr: "127.0.0.1:0".to_string(),
         db_path: db.to_string_lossy().into_owned(),
         api_keys,
+        metrics_token: None,
+        attestation_mode: coop_server::config::AttestationMode::Off,
+        attestation_key_file: None,
+        credentials: Default::default(),
+        jwt: None,
         workers: 2,
         tenant_concurrency: 4,
+        tenant_queue_capacity: 64,
         rate_per_min: 10_000,
+        max_job_mem_mb: 1024,
+        memory_budget_mb: 4096,
+        storage_global_mb: 16 * 1024,
+        storage_tenant_mb: 4 * 1024,
+        storage_free_reserve_mb: 0,
         sandbox: "ns".to_string(),
         jobs_root,
         rootfs: std::env::var("COOP_ROOTFS").ok(),
         sandbox_helper: std::env::var("COOP_SANDBOX_HELPER").ok(),
+        gvisor_runsc: None,
+        gvisor_rootfs_sha256: None,
+        gvisor_platform: "systrap".to_string(),
+        gvisor_uid: 65_534,
+        gvisor_gid: 65_534,
         production: false,
         unsafe_allow_naive: false,
+        unsafe_allow_public_dev: false,
         python_bin: None,
         node_bin: None,
         bash_bin: None,
@@ -119,7 +136,9 @@ async fn spawn_app_with_root() -> (Router, String) {
         seccomp: true,
     };
     let store = Arc::new(Store::open(&db).await.expect("open store"));
-    let (app, state, queue_rx) = coop_server::build_app(cfg, store).await.expect("build app");
+    let (app, state, queue_rx) = coop_server::build_app(cfg, store, "127.0.0.1:0".parse().unwrap())
+        .await
+        .expect("build app");
     // Read everything needed off `state` before it moves into the workers.
     let cfg_jobs_root = state.cfg.jobs_root.clone();
     eprintln!(

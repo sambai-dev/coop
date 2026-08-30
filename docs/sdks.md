@@ -2,12 +2,13 @@
 
 Coop ships small reference clients under `sdks/`. They intentionally mirror the HTTP API and are suitable for embedding in agent tool loops. The OpenAPI document remains the canonical contract for generated clients.
 
-The v0.3 release workflow tests SDK source and installs both the built Python wheel and source distribution before including them, plus the npm package tarball, in the checksummed, attested GitHub release. It does not publish PyPI or npm registries. Use an exact GitHub release asset or the source-checkout paths below until a separately authenticated registry release is announced.
+The v0.4 release workflow tests SDK source and installs both the built Python wheel and source distribution before including them, plus the npm package tarball, in the checksummed, attested GitHub release. It does not publish PyPI or npm registries. Use an exact GitHub release asset or the source-checkout paths below until a separately authenticated registry release is announced.
 
-To install the v0.3.0 release, activate the intended Python virtual environment and download the exact release assets into an otherwise empty working directory. This example verifies both the checksum manifest and GitHub provenance before installation:
+To install the v0.4.0 release, activate the intended Python virtual environment and download the exact release assets into an otherwise empty working directory. This example verifies both the checksum manifest and GitHub provenance before installation:
 
 ```bash
-version=0.3.0
+set -euo pipefail
+version=0.4.0
 python_asset="coop_sdk-${version}-py3-none-any.whl"
 typescript_asset="coop-sdk-${version}.tgz"
 sdk_asset_dir="$PWD"
@@ -15,15 +16,30 @@ gh release download "v${version}" --repo sambai-dev/coop \
   --pattern "$python_asset" \
   --pattern "$typescript_asset" \
   --pattern SHA256SUMS
-sha256sum --check --ignore-missing SHA256SUMS
-gh attestation verify "$python_asset" --repo sambai-dev/coop
-gh attestation verify "$typescript_asset" --repo sambai-dev/coop
+verify_github_asset() {
+  gh release verify-asset "v${version}" "$1" --repo sambai-dev/coop
+  gh attestation verify "$1" \
+    --repo sambai-dev/coop \
+    --signer-workflow sambai-dev/coop/.github/workflows/release.yml \
+    --source-ref "refs/tags/v${version}" \
+    --predicate-type https://slsa.dev/provenance/v1 \
+    --deny-self-hosted-runners
+}
+verify_github_asset SHA256SUMS
+for asset in "$python_asset" "$typescript_asset"; do
+  expected=$(awk -v file="$asset" '
+    $2 == file && $1 ~ /^[0-9a-f]{64}$/ { digest=$1; count++ }
+    END { if (count != 1) exit 1; print digest }
+  ' SHA256SUMS)
+  printf '%s  %s\n' "$expected" "$asset" | sha256sum --check --strict -
+  verify_github_asset "$asset"
+done
 python -m pip install --no-deps "./$python_asset"
 # Run this last command from the consuming Node.js project:
 npm install "${sdk_asset_dir}/${typescript_asset}"
 ```
 
-The release also includes `coop_sdk-0.3.0.tar.gz` for consumers that require a Python source distribution. On macOS or Windows, use the platform checksum commands shown in [deployment](deployment.md) in place of `sha256sum`; the asset names and `gh attestation verify` commands are unchanged.
+The release also includes `coop_sdk-0.4.0.tar.gz` for consumers that require a Python source distribution. On macOS or Windows, use the platform checksum commands shown in [deployment](deployment.md) in place of `sha256sum`; keep the same release-asset and constrained workflow-provenance verification.
 
 ## Python
 
@@ -44,11 +60,19 @@ print(result["stdout"])
 
 Pass resource fields inside the `limits` object. The client accepts a default transport timeout and per-call deadlines; close/cancel work when the upstream agent request is abandoned.
 
+Both SDKs accept `requirements.minimum_isolation` using the server's exact
+isolation-class strings. `submit_result()` / `submitResult()` preserve the
+ordinary submission body while exposing `Location` and
+`Idempotency-Replayed`. Idempotency keys are limited to 128 visible ASCII
+bytes; ambiguous retries are explicit opt-ins and always reuse the same key.
+
 In both clients, `get` and `wait` return a job detail rather than the sparse
 submission shape. The requested spec is complete, with nullable stored `stdin`
 and all requested limits. `EffectiveJobSpec` uses `EffectiveLimits`, whose
 individual values can be null when the backend did not enforce a control or
-never reached its ready boundary. `LimitEnforcement` provides an explicit
+never reached its ready boundary. Its nullable `isolation_class` is observed
+execution evidence, not a copy of capability configuration.
+`LimitEnforcement` provides an explicit
 boolean for each resource control. In development subprocess mode, only wall
 time is effective; CPU, memory, process, and file values are null. The whole
 effective spec and execution-policy fields are nullable for queued, migrated,
@@ -57,6 +81,39 @@ event-chain, durable output, executor-output, and resource schemas are
 exported. Recovery receipts intentionally omit evidence that could not be
 reconstructed after a restart, so those execution-specific members remain
 optional; requested limits may also be partial on migrated records.
+
+`JobDetail.attestation` reports signed-evidence availability, the tenant bound
+into that evidence, immutable digests, sizes, media type, key ID, and
+tenant-scoped relative download URLs.
+`download_attestation` / `downloadAttestation` and
+`download_result_artifact` / `downloadResultArtifact` return exact bytes with
+content type and length. They reject a missing, malformed, or mismatched
+`X-Content-Sha256` and never decode then re-encode JSON. This validates HTTP
+content integrity only. It does not verify DSSE or establish trust in the
+advertised key.
+
+Save both byte arrays directly and verify them offline with an independently
+pinned public key:
+
+```bash
+coop-verify verify \
+  --envelope job.dsse.json \
+  --subject job-result.json \
+  --public-key trusted-coop-attestation.pub.pem \
+  --tenant "$EXPECTED_TENANT" \
+  --subject-name "coop://jobs/$JOB_ID/result" \
+  --media-type application/vnd.coop.execution-result.v1+json
+```
+
+Use a tenant expected by the surrounding workflow (normally checked against
+the authenticated `JobDetail.tenant` or `whoami` response), rather than copying
+an untrusted tenant out of the downloaded JSON. The exact result and signed
+predicate both carry that tenant; migrated v0.3 receipts may still omit it.
+
+The typed `attestation_public_key()` / `attestationPublicKey()` endpoint is
+useful for discovery and rotation diagnostics, but its own `trust_notice` is
+literal: authenticate and pin the key out of band. A successful verifier exit
+authenticates the claim and exact subject, not a successful execution outcome.
 
 ## TypeScript
 
@@ -78,11 +135,11 @@ server does not enable permissive CORS. Cross-origin browser access requires an
 explicit origin allowlist at the reverse proxy, and exposes the bearer key to
 the frontend runtime.
 
-Node versions without a global `WebSocket` fall back to cursor replay. Both SDKs mint a one-use stream ticket before opening a WebSocket. Legacy API-key query compatibility is disabled by default and accepts only an explicit opt-in plus an unstructured v0.1 endpoint-missing response; structured v0.2 errors never put a key in a URL. Review [api.md](api.md) before enabling it for a trusted legacy server.
+Node versions without a global `WebSocket` fall back to cursor replay. Both SDKs mint a one-use stream ticket before opening a WebSocket. Legacy API-key query compatibility is disabled by default and accepts only an explicit opt-in plus an unstructured v0.1 endpoint-missing response; structured Coop errors never put a key in a URL. Review [api.md](api.md) before enabling it for a trusted legacy server.
 
-`wait` and `result` reject non-finite deadlines, treat a zero budget as an immediate timeout, and cap each in-flight request to the remaining overall budget. A structured v0.2 `job_not_found` response is returned to the caller and is never mistaken for evidence that `/result` or `/stream-ticket` is a missing legacy route.
+`wait` and `result` reject non-finite deadlines, treat a zero budget as an immediate timeout, and cap each in-flight request to the remaining overall budget. A structured `job_not_found` response is returned to the caller and is never mistaken for evidence that `/result` or `/stream-ticket` is a missing legacy route.
 
-The server may deliberately close a response connection after 30 seconds with zero socket write progress, and every connection (including an upgraded WebSocket) has a 10-minute absolute lifetime. Both clients treat an early EOF, a rejected response body, or a `Content-Length` mismatch as a retryable transport failure rather than parsing partial JSON. It is safe to retry detail, result, and replay reads with bounded backoff. Persist a replay cursor only after the whole page has decoded successfully; after a failure, request the previous cursor again and deduplicate events by `(job_id, seq)`. A WebSocket reconnect mints a new one-use ticket and resumes from the last accepted sequence. Submission is different: do not automatically repeat a timed-out `POST /v1/jobs`, because the first request may already have committed a durable job.
+The server may deliberately close a response connection after 30 seconds with zero socket write progress, and every connection (including an upgraded WebSocket) has a 10-minute absolute lifetime. Both clients treat an early EOF, a rejected response body, or a `Content-Length` mismatch as a retryable transport failure rather than parsing partial JSON. It is safe to retry detail, result, and replay reads with bounded backoff. Persist a replay cursor only after the whole page has decoded successfully; after a failure, request the previous cursor again and deduplicate events by `(job_id, seq)`. A WebSocket reconnect mints a new one-use ticket and resumes from the last accepted sequence. Submission is different: repeat an ambiguously acknowledged `POST /v1/jobs` only when it carried an `Idempotency-Key`, and reuse the exact key and canonical job specification.
 
 ## Integration pattern
 
@@ -94,8 +151,12 @@ Expose one narrow tool to the model:
 4. return bounded stdout, stderr, terminal status, and violations to the agent;
 5. retain the Coop job ID in the parent trace for investigation.
 
-Do not give a model the Coop API key or let it choose the Coop base URL. Keep both in the trusted tool adapter. Avoid transparently retrying submissions because a network timeout does not prove the server rejected the first request.
+Do not give a model the Coop API key or let it choose the Coop base URL. Keep
+both in the trusted tool adapter. Configure the adapter's minimum isolation as
+operator policy and validate the terminal observed class. Do not transparently
+retry an unkeyed submission because a network timeout does not prove the server
+rejected the first request.
 
 ## Compatibility
 
-The clients follow the v0.2 routes. Before upgrading either side independently, run its tests against the target server and compare `/openapi.json`. Coop does not yet promise a multi-major compatibility window.
+The clients follow the additive v0.4 routes while retaining documented legacy fallbacks. Before upgrading either side independently, run its tests against the target server and compare `/openapi.json`. Coop does not yet promise a multi-major compatibility window.

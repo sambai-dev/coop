@@ -17,6 +17,7 @@ path = "src/main.rs"
 coop-types = { workspace = true }
 coop-store = { workspace = true }
 coop-exec = { workspace = true }
+coop-attestation = { workspace = true }
 axum = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
@@ -32,5 +33,14 @@ uuid = { workspace = true }
 futures-util = { workspace = true }
 dashmap = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+base64 = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
+ed25519-dalek = { workspace = true }
+jsonwebtoken = { workspace = true, features = ["use_pem"] }
+sqlx = { workspace = true }

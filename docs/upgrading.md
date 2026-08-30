@@ -15,7 +15,11 @@ Coop uses semantic versioning while the API is pre-1.0: minor releases may conta
 
 Do not downgrade a database after a new version has migrated it unless the release notes explicitly describe that path. Restore the pre-upgrade backup instead.
 
-v0.2 records schema version 2 in both migration history and SQLite `user_version`, refuses a database marked newer than the binary, and validates foreign keys before committing. Legacy jobs/events are preserved during the v1-to-v2 migration; old events have hash version 0 and remain explicitly unverifiable rather than being assigned fabricated hashes.
+v0.4 records schema version 4 in both migration history and SQLite
+`user_version`, refuses newer or physically downgraded/partial schemas, and
+validates row types, UTF-8, digests, accounting ledgers, triggers, indexes, and
+foreign keys before committing. Legacy jobs/events are preserved; old events
+remain explicitly unverifiable rather than receiving fabricated hashes.
 
 ## From v0.1.x to v0.2.0
 
@@ -56,3 +60,52 @@ compatible. Agent operators should give each harness a separate tenant key,
 set `COOP_MCP_REQUIRE_ISOLATION=true`, restrict its language allowlist, and
 remove alternate execution tools when Coop must be mandatory rather than an
 optional tool.
+
+## From v0.3.x to v0.4.0
+
+Treat v0.4 as a security- and deployment-sensitive upgrade:
+
+1. drain v0.3, back up SQLite plus WAL/SHM consistently, and keep the complete
+   v0.3 binary/image/rootfs/config rollback set;
+2. test v0.4 against a copy—the schema-v3-to-v4 migration adds admitted-memory
+   and accounting integrity plus attestation/outbox tables and is forward-only;
+   migrated terminal receipts keep their exact v0.3 bytes and checksum, while
+   first-time v0.4 attestations bind the authoritative `jobs.tenant` separately;
+3. install Rust 1.98-built `coop`, `coop-verify`, `coop-sandbox-init`, and
+   `coop-oci-init` from the same release;
+4. rebuild the private rootfs and manifest, provision the exact reviewed
+   `runsc`, set its manifest SHA-256, and run the real gVisor gate;
+5. generate an owner-only Ed25519 key, retain its derived public key through an
+   authenticated operator channel, and set `COOP_ATTESTATION_MODE=sign` plus
+   `COOP_ATTESTATION_KEY_FILE`. Production refuses an implicit unsigned start;
+   `off` must be explicit;
+6. migrate legacy keys to the indexed credential file/pepper or configure the
+   strict JWT issuer/audience/JWKS/tenant mapping and required scopes;
+7. set tenant/global queue, memory, retained-byte, and disk-reserve budgets
+   from measured host capacity;
+8. update MCP policy from the legacy boolean to the exact
+   `COOP_MCP_MINIMUM_ISOLATION` class and enable Tasks only where the host
+   negotiates the 2026 extension;
+9. run `scripts/verify-production.py` with the explicit public-key pin and the
+   packaged `coop-verify` binary/image, then run the real Python/MCP adapter
+   verifier and all language canaries before restoring traffic. The production
+   script passes the exact signed-artifact bytes to the offline verifier and
+   does not trust the server key endpoint.
+
+Do not run a v0.3 binary against a migrated schema-v4 database. Restore the
+pre-upgrade backup for rollback. Signing is durable but eventual, so consumers
+requiring portable evidence must wait until `attestation.available` is true
+and must pin the public key outside the signer API.
+Restart reconstruction charges the exact pending attestation reserve. A store
+that becomes logically full after that correction remains open so signing or
+retention can converge, but tenant/global growth fails until capacity is
+released.
+The revision-1 upgrade also inspects any pre-fix persisted attestation files:
+exact tenant-bound rows are preserved, while unbound or malformed rows are
+removed from availability and requeued for signing from authoritative job
+state. Under explicit signing-off policy they remain unavailable and are
+waived until a later signing-enabled restart reseeds them.
+Legacy `COOP_API_KEYS` tenant IDs must now meet the same identity contract as
+indexed credentials and OIDC mappings: 1–128 safe printable ASCII characters.
+Validate legacy tenant names before restart so every accepted job can be
+encoded into the tenant-bound portable attestation profile.

@@ -1,6 +1,6 @@
 {
   "name": "coop-sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Typed browser and Node.js client for the Coop execution gateway",
   "type": "module",
   "sideEffects": false,
@@ -21,8 +21,10 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "pack-smoke": "node tests/package-smoke.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.typecheck.json",
-    "test": "npm run build && node --test tests/*.test.mjs"
+    "test": "npm run build && node tests/coop.test.mjs && npm run pack-smoke"
   },
   "engines": {
     "node": ">=18"

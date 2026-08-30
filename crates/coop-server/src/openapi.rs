@@ -1,12 +1,16 @@
 use crate::bus::WireEvent;
 use crate::routes::{
+    AttestationCapabilities, AttestationPublicKeyResponse, CancellationResponse,
     CapabilitiesResponse, ErrorBody, ErrorEnvelope, ExecutionCapabilities, ExecutionPolicy,
-    FeatureCapabilities, JobDetail, JobView, LimitCapabilities, ListJobsResponse, ReplayResponse,
-    ResultView, SchedulerStatus, StatusResponse, StreamTicketResponse, SubmitResponse,
-    WhoAmIResponse,
+    FeatureCapabilities, JobAttestationStatus, JobDetail, JobView, LimitCapabilities,
+    ListJobsResponse, ReplayResponse, ResultView, SchedulerStatus, StatusResponse,
+    StreamTicketResponse, SubmitResponse, WhoAmIResponse,
 };
 use axum::Json;
-use coop_types::{EffectiveJobSpec, EffectiveLimits, JobSpec, LimitEnforcement, Limits};
+use coop_types::{
+    EffectiveJobSpec, EffectiveLimits, IsolationClass, JobRequirements, JobSpec, LimitEnforcement,
+    Limits,
+};
 use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
@@ -24,23 +28,31 @@ use utoipa::{Modify, OpenApi};
         crate::routes::cancel_job,
         crate::routes::replay,
         crate::routes::job_result,
+        crate::routes::job_attestation,
+        crate::routes::job_result_artifact,
         crate::routes::stream,
         crate::routes::stream_ticket,
         crate::routes::metrics,
         crate::routes::status,
         crate::routes::capabilities,
+        crate::routes::attestation_public_key,
         crate::routes::whoami,
+        crate::routes::oauth_protected_resource_metadata,
         crate::routes::health,
         crate::routes::ready
     ),
     components(schemas(
         JobSpec,
+        JobRequirements,
+        IsolationClass,
         Limits,
         EffectiveJobSpec,
         EffectiveLimits,
         LimitEnforcement,
         JobView,
+        CancellationResponse,
         JobDetail,
+        JobAttestationStatus,
         ExecutionPolicy,
         ResultView,
         SubmitResponse,
@@ -52,6 +64,8 @@ use utoipa::{Modify, OpenApi};
         ExecutionCapabilities,
         LimitCapabilities,
         FeatureCapabilities,
+        AttestationCapabilities,
+        AttestationPublicKeyResponse,
         StatusResponse,
         SchedulerStatus,
         WireEvent,
@@ -112,11 +126,40 @@ mod tests {
             serde_json::json!([])
         );
         let submit_responses = &value["paths"]["/v1/jobs"]["post"]["responses"];
-        for status in ["408", "415", "422", "429", "503"] {
+        assert_eq!(
+            submit_responses["201"]["headers"]["Location"]["schema"]["type"],
+            "string"
+        );
+        assert_eq!(
+            submit_responses["201"]["headers"]["Idempotency-Replayed"]["schema"]["type"],
+            "string"
+        );
+        for status in ["408", "415", "422", "429", "503", "507"] {
             assert!(
                 submit_responses.get(status).is_some(),
                 "submit OpenAPI missing {status} response"
             );
         }
+        let submit = &value["paths"]["/v1/jobs"]["post"];
+        let idempotency = submit["parameters"]
+            .as_array()
+            .and_then(|parameters| {
+                parameters
+                    .iter()
+                    .find(|parameter| parameter["name"] == "Idempotency-Key")
+            })
+            .expect("submit OpenAPI declares Idempotency-Key");
+        assert_eq!(idempotency["in"], "header");
+        assert_eq!(idempotency["required"], false);
+        assert!(submit_responses["201"]["headers"]["Location"].is_object());
+        assert!(submit_responses["201"]["headers"]["Idempotency-Replayed"].is_object());
+        assert!(submit_responses["422"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("idempotency key conflicts")));
+        assert!(
+            value["components"]["schemas"]["LimitCapabilities"]["properties"]
+                ["concurrent_mem_mb_max"]
+                .is_object()
+        );
     }
 }

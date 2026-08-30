@@ -12,7 +12,10 @@ A readiness check should:
 4. verify the terminal status, output, receipt/evidence completeness,
    `bootstrap_ready`, isolation facts, network posture, and every expected
    `limit_enforcement` flag;
-5. alert if latency or queue depth exceeds the deployment budget.
+5. wait for `attestation.available`, download the exact envelope/result,
+   compare declared digests and fields, and verify the signature with an
+   independently pinned public key;
+6. alert if latency, queue depth, or signing convergence exceeds policy.
 
 Never route untrusted production traffic to a server reporting the plain subprocess backend. Its only effective resource control is wall time; requested CPU, memory, process, and file limits are not enforced.
 
@@ -24,16 +27,21 @@ Compose and the systemd template allow a 45-second stop grace period. Keep the s
 
 ## Monitoring
 
-Scrape authenticated `/v1/metrics` only from the operator network. Metric names and labels are operational signals, not durable billing records. Combine them with structured logs and alerts for:
+`/v1/metrics` is scoped to the authenticated tenant. Configure a separate
+`COOP_METRICS_TOKEN` and scrape global `/metrics` from the operator network for
+bounded process/admission/storage telemetry. Neither surface is a durable
+billing record. Combine them with JSON logs and alerts for:
 
 - queue rejection and sustained queueing
-- sandbox bootstrap or rootfs validation failures
+- runsc/provider bootstrap, digest, rootfs-manifest, or OCI-config failures
 - cgroup cleanup failures or leaked descendants
 - output truncation and policy violations
 - timeout, OOM, cancellation, and internal-error rates
 - SQLite busy, I/O, migration, or disk-capacity errors
 - unexpected restarts and boot-recovered jobs
+- persistent attestation retries, unavailable terminal signatures, or key-load failures
 - rate-limit pressure by tenant
+- tenant/global queue, aggregate-memory, logical-storage, and disk-reserve pressure
 - response-capacity pressure, incomplete-response retries, and HTTP write-progress timeouts
 
 Keep host metrics for memory, CPU, cgroup count, disk latency/free space, inode use, and kernel audit events. The server process itself is outside each job's cgroup, so host-level capacity matters.
@@ -57,7 +65,16 @@ The default run submits two warmups plus 50 measured jobs and normally makes 104
 
 `COOP_RETENTION_HOURS` controls deletion of terminal jobs and their events. A value of `0` disables automatic deletion. Retention is not archival: copy required evidence to your controlled archive before its deadline.
 
-Capacity planning must include the main SQLite file plus `-wal` and `-shm` companions, logs, backups, and temporary job staging. Output caps bound each job but do not bound total retained volume.
+Capacity planning must include the main SQLite file plus `-wal` and `-shm`
+companions, exact result artifacts, DSSE envelopes, the temporary signing
+reserve, logs, backups, and job/runtime staging. Transactional logical quotas
+bound retained rows; `COOP_STORAGE_FREE_RESERVE_MB` protects real filesystem
+headroom. Neither replaces host disk/inode monitoring.
+
+Retention tombstones and deletes terminal jobs in bounded batches. Foreign
+keys cascade events, idempotency mappings, attestations, and signing-outbox
+rows. Export any required envelope/result/public-key history before the job's
+deadline.
 
 ## Online backup
 
@@ -80,7 +97,9 @@ For a filesystem-level copy:
 1. drain and stop Coop;
 2. verify no `coop` process has the database open;
 3. copy the database and any WAL/SHM files together, or checkpoint first;
-4. copy configuration metadata, the Coop binary/image digest, private-rootfs digest, and release version;
+4. copy configuration metadata, Coop/image/runtime/rootfs digests, release
+   version, signed envelopes, and public-key history; back up the private
+   signing key separately under a stronger key-custody policy;
 5. restart and run a canary.
 
 ## Restore test
@@ -90,7 +109,8 @@ Restores should be rehearsed on an isolated host:
 1. verify backup checksum and decrypt to a private path;
 2. start the same Coop version against a copy of the restored database;
 3. run `PRAGMA integrity_check;`;
-4. verify several jobs, ordered event chains, and receipts;
+4. verify several jobs, ordered event chains, receipts, exact artifacts, and
+   signatures against the historical public keys;
 5. upgrade the copy if required and repeat verification;
 6. destroy the rehearsal copy securely.
 
@@ -98,4 +118,4 @@ Never point two live Coop instances at the same SQLite file. Coop takes an adjac
 
 ## Rootfs maintenance
 
-Treat the private rootfs as an immutable release artifact. Build a new tree, patch interpreters and libraries, compute its manifest/digest, run all language canaries and hostile tests, then switch `COOP_ROOTFS` during a controlled restart. Do not mutate the live tree while jobs are running.
+Treat the private rootfs as an immutable deployment input, not as a Coop GitHub release asset. Build a new tree, patch interpreters and libraries, compute and preserve its manifest/digest and package inventory, run all language canaries and hostile tests, then switch `COOP_ROOTFS` during a controlled restart. Do not mutate the live tree while jobs are running.

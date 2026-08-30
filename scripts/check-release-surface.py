@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import json
 import re
+import runpy
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -45,14 +45,14 @@ def toml_string(relative: str, section: str, key: str) -> str:
 
 def check_versions() -> str:
     version = toml_string("Cargo.toml", "workspace.package", "version")
-    require(version == "0.3.0", f"unexpected workspace release version: {version}")
+    require(version == "0.4.0", f"unexpected workspace release version: {version}")
 
     toolchain = toml_string("rust-toolchain.toml", "toolchain", "channel")
     rust_version = toml_string("Cargo.toml", "workspace.package", "rust-version")
     require(toolchain == f"{rust_version}.0", "Cargo and rust-toolchain Rust versions differ")
     root_manifest = read("Cargo.toml")
     lockfile = read("Cargo.lock")
-    for crate in ["coop-types", "coop-store", "coop-exec", "coop-server"]:
+    for crate in ["coop-attestation", "coop-types", "coop-store", "coop-exec", "coop-server"]:
         manifest = read(f"crates/{crate}/Cargo.toml")
         require(
             "version.workspace = true" in manifest,
@@ -66,7 +66,7 @@ def check_versions() -> str:
             is not None,
             f"Cargo.lock does not record {crate} {version}",
         )
-    for dependency in ["coop-types", "coop-store", "coop-exec"]:
+    for dependency in ["coop-attestation", "coop-types", "coop-store", "coop-exec"]:
         require(
             re.search(
                 rf'^{re.escape(dependency)}\s*=\s*\{{[^\n}}]*version\s*=\s*"{re.escape(version)}"',
@@ -80,6 +80,15 @@ def check_versions() -> str:
     python_version = toml_string("sdks/python/pyproject.toml", "project", "version")
     typescript_package = json.loads(read("sdks/typescript/package.json"))
     typescript_version = typescript_package["version"]
+    typescript_scripts = typescript_package.get("scripts", {})
+    require(
+        typescript_scripts.get("prepack") == "npm run build",
+        "TypeScript package must build its ignored dist entrypoints before packing",
+    )
+    require(
+        "pack-smoke" in typescript_scripts,
+        "TypeScript package lacks a packed-artifact consumer smoke",
+    )
     for label, candidate in [
         ("Python SDK", python_version),
         ("TypeScript SDK", typescript_version),
@@ -88,6 +97,16 @@ def check_versions() -> str:
     require(
         f'__version__ = "{version}"' in read("sdks/python/coop.py"),
         "Python module version differs from its package metadata",
+    )
+    python_lock = read("sdks/python/uv.lock")
+    locked_python_project = re.search(
+        r'\[\[package\]\]\s+name = "coop-sdk"\s+version = "([^"]+)"',
+        python_lock,
+    )
+    require(
+        locked_python_project is not None
+        and locked_python_project.group(1) == python_version,
+        "Python uv.lock project version differs from pyproject.toml",
     )
     typescript_lock = json.loads(read("sdks/typescript/package-lock.json"))
     lock_root = typescript_lock["packages"][""]
@@ -101,6 +120,12 @@ def check_versions() -> str:
     require(
         f"ARG VERSION={version}" in read("Dockerfile"),
         "Dockerfile default version differs from the workspace",
+    )
+    ci_workflow = read(".github/workflows/ci.yml")
+    require(
+        "version=$(awk" in ci_workflow
+        and '--build-arg "VERSION=$version"' in ci_workflow,
+        "CI container build does not derive its OCI version from Cargo.toml",
     )
     require(
         f"FROM rust:{toolchain}-" in read("Dockerfile"),
@@ -152,6 +177,7 @@ def check_markdown_links() -> int:
         *(ROOT / "integrations").glob("**/*.md"),
         ROOT / "sdks" / "python" / "README.md",
         ROOT / "sdks" / "typescript" / "README.md",
+        ROOT / "crates" / "coop-attestation" / "README.md",
     ]
     checked = 0
     failures: list[str] = []
@@ -174,6 +200,7 @@ def check_markdown_links() -> int:
 
 
 def check_pins_and_packaging() -> int:
+    version = toml_string("Cargo.toml", "workspace.package", "version")
     workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
     action_count = 0
     for workflow in workflows:
@@ -200,12 +227,20 @@ def check_pins_and_packaging() -> int:
         )
 
     for required in [
-        "cargo build --locked --release -p coop-server -p coop-exec --bins",
+        'COOP_GIT_REVISION="${VCS_REF}" cargo build --locked --release',
+        "-p coop-server -p coop-exec -p coop-attestation --bins",
+        'COOP_GIT_REVISION="${VCS_REF}" cargo build',
         "coop-sandbox-init /usr/local/bin/coop-sandbox-init",
+        "coop-oci-init /usr/local/bin/coop-oci-init",
+        "coop-verify /usr/local/bin/coop-verify",
+        "scripts/container-entrypoint.sh /usr/local/bin/coop-container-entrypoint",
+        'ENTRYPOINT ["/usr/local/bin/coop-container-entrypoint"]',
+        'CMD ["/usr/local/bin/coop"]',
         "COOP_ROOTFS=/opt/coop/rootfs",
         "COOP_SANDBOX_HELPER=/usr/local/bin/coop-sandbox-init",
         "install -d -o root -g root -m 0700 /data /var/lib/coop/jobs /opt/coop",
         "install -d -o root -g root -m 0755 /opt/coop/rootfs",
+        "/run/coop-bootstrap /run/coop-runtime /run/coop-secrets",
         'test "$(dpkg --print-architecture)" = amd64',
     ]:
         require(required in dockerfile, f"Docker helper/rootfs contract missing: {required}")
@@ -215,7 +250,7 @@ def check_pins_and_packaging() -> int:
         for line in read(".dockerignore").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
-    for required in ["target", "target-*"]:
+    for required in ["target", "target-*", ".coop-runtime"]:
         require(required in dockerignore_lines, f"Docker context does not exclude {required}")
 
     snapshot_match = re.search(r"^ARG DEBIAN_SNAPSHOT=(\S+)$", dockerfile, re.MULTILINE)
@@ -223,6 +258,10 @@ def check_pins_and_packaging() -> int:
     snapshot = snapshot_match.group(1)
     for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"]:
         workflow_source = read(workflow)
+        require(
+            "COOP_GIT_REVISION: ${{ github.sha }}" in workflow_source,
+            f"{workflow} does not embed the checked-out revision",
+        )
         require(
             "cargo install cargo-audit --version 0.22.2 --locked" in workflow_source,
             f"{workflow} does not install the exact locked cargo-audit release",
@@ -285,6 +324,15 @@ def check_pins_and_packaging() -> int:
             )
 
     release = read(".github/workflows/release.yml")
+    for revision_contract in [
+        '[[ "$COOP_GIT_REVISION" =~ ^[0-9a-f]{40}$ ]]',
+        "checkout_revision=$(git rev-parse --verify 'HEAD^{commit}')",
+        'test "$COOP_GIT_REVISION" = "$checkout_revision"',
+    ]:
+        require(
+            revision_contract in release,
+            f"release preflight omits revision contract: {revision_contract}",
+        )
     workflow_text = read(".github/workflows/ci.yml") + release
     for moving_or_retiring in ["macos-14", "ubuntu-latest", "windows-latest"]:
         require(
@@ -310,17 +358,45 @@ def check_pins_and_packaging() -> int:
         "release workflow publishes an unsupported Linux architecture",
     )
     require("coop-sandbox-init" in release, "Linux release artifact omits the sandbox helper")
+    require("coop-oci-init" in release, "Linux release artifact omits the gVisor OCI init")
+    require("coop-verify" in release, "release artifacts omit the offline attestation verifier")
+    gvisor_smoke = read("scripts/smoke-gvisor.sh")
+    for required in [
+        "release-20260817.0",
+        "048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c",
+        "gvisor-application-kernel",
+        "NETWORK_BLOCKED",
+        "crash reconciliation passed",
+        "COOP_ATTESTATION_MODE=sign",
+        "coop-verify",
+    ]:
+        require(required in gvisor_smoke, f"gVisor release gate missing contract: {required}")
     python_manifest = read("sdks/python/pyproject.toml")
     for required in [
+        'requires = ["hatchling==1.27.0"]',
         'coop-mcp = "coop_mcp:main"',
         '"coop_mcp.py" = "coop_mcp.py"',
     ]:
         require(required in python_manifest, f"Python MCP packaging contract missing: {required}")
+    root_license = read("LICENSE")
+    for relative in ["sdks/python/LICENSE", "sdks/typescript/LICENSE"]:
+        require(
+            read(relative) == root_license,
+            f"{relative} differs from the canonical repository license",
+        )
     bootstrap = read("scripts/bootstrap-production.sh")
     for required in [
         "COOP_PRODUCTION_VM_ACKNOWLEDGED",
         'test "$(uname -m)" = x86_64',
         "scripts/verify-production.py",
+        "COOP_VERIFY_MINIMUM_ISOLATION",
+        "reviewed_runsc_sha256",
+        "COOP_GVISOR_ROOTFS_SHA256",
+        "attestation-key.pem",
+        "attestation-public-key.pem",
+        "COOP_VERIFY_CONTAINER_IMAGE",
+        "/usr/local/bin/coop-verify public-key",
+        "gvisor-application-kernel",
         "target.write_text",
         "target.chmod(0o600)",
     ]:
@@ -328,19 +404,66 @@ def check_pins_and_packaging() -> int:
     container_smoke = read("scripts/smoke-container.sh")
     for required in [
         "scripts/verify-production.py",
+        "scripts/verify-python-adapter.py",
         "COOP_VERIFY_LANGUAGES=python,node,bash",
+        "COOP_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel",
+        "COOP_ATTESTATION_MODE=sign",
+        "COOP_ATTESTATION_KEY_FILE",
+        "COOP_ATTESTATION_KEY_SOURCE",
+        "COOP_VERIFY_PUBLIC_KEY_FILE",
+        "COOP_VERIFY_CONTAINER_IMAGE",
+        'host_uid=$(id -u)',
+        '--user "$host_uid:$host_gid"',
+        "/usr/local/bin/coop-verify generate-key",
+        "/usr/local/bin/coop-verify public-key",
     ]:
         require(required in container_smoke, f"container smoke contract missing: {required}")
+    require(
+        "openssl genpkey" not in container_smoke,
+        "container smoke must generate canonical keys with packaged coop-verify",
+    )
     production_verifier = read("scripts/verify-production.py")
     for required in [
         "verify_canary",
         "verify_receipt",
+        "parse_minimum_isolation",
+        "isolation_satisfies",
+        "COOP_VERIFY_MINIMUM_ISOLATION",
+        '"requirements": {"minimum_isolation": minimum_isolation}',
+        'for field in ["runtime_sha256", "rootfs_sha256", "config_sha256"]',
         'receipt.get("receipt_sha256")',
+        'api.request("GET", "/v1/whoami")',
+        'predicate.get("tenant") == tenant',
+        'artifact_document.get("tenant") == tenant',
+        '"--tenant",',
+        'output.get("tenant") == tenant',
         'document.get("networking") == "disabled"',
-        'policy.get("network_allowed") is False',
         'hashlib.sha256(canonical.encode("utf-8")).hexdigest() == recorded',
+        "OfflineVerifier",
+        "COOP_VERIFY_PUBLIC_KEY_FILE",
+        "COOP_VERIFY_BIN",
+        '"--subject-name"',
+        '"--public-key"',
+        "/usr/local/bin/coop-verify",
     ]:
         require(required in production_verifier, f"production verifier contract missing: {required}")
+    require(
+        'api.request("GET", "/v1/attestation/public-key")' not in production_verifier,
+        "production verifier must not trust the server public-key endpoint",
+    )
+    container_entrypoint = read("scripts/container-entrypoint.sh")
+    for required in [
+        "COOP_GVISOR_RUNSC_SOURCE",
+        "COOP_ATTESTATION_KEY_SOURCE",
+        "COOP_VERIFY_PUBLIC_KEY_SOURCE",
+        "install -o 0 -g 0",
+    ]:
+        require(required in container_entrypoint, f"container staging contract missing: {required}")
+    require(
+        "python3 -m unittest discover -s scripts/tests -v"
+        in read(".github/workflows/ci.yml"),
+        "CI does not run production verifier provider fixtures",
+    )
     for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"]:
         require(
             "bash scripts/smoke-container.sh" in read(workflow),
@@ -356,27 +479,113 @@ def check_pins_and_packaging() -> int:
     )
     require("path: sdk-dist/*" in release, "release workflow does not upload every SDK distribution")
     require("npm pack --pack-destination" in release, "release workflow omits the npm tarball")
-    normalized_release = " ".join(release.split())
-    checksum_pipeline = (
-        'manifest="${RUNNER_TEMP}/coop-SHA256SUMS-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" '
-        "find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\\0' \\ "
-        "| sort -z \\ "
-        "| xargs -0 sha256sum -- \\ "
-        '> "$manifest" mv -- "$manifest" SHA256SUMS'
-    )
+    release_helper_source = read("scripts/release-artifacts.py")
+    release_helper = runpy.run_path(str(ROOT / "scripts" / "release-artifacts.py"))
+    payload_names = release_helper["payload_names"](version)
+    release_names = release_helper["release_names"](version)
+    require(len(payload_names) == 6, "release payload contract must contain exactly six files")
+    require(len(release_names) == 8, "public release contract must contain exactly eight assets")
+    for asset in release_names:
+        workflow_asset = asset.replace(version, "${{ needs.preflight.outputs.version }}")
+        require(
+            f"dist/{workflow_asset}" in release,
+            f"release workflow does not explicitly stage {asset}",
+        )
+    for artifact_name in [
+        "coop-sdks",
+        "coop-x86_64-unknown-linux-musl",
+        "coop-aarch64-apple-darwin",
+        "coop-x86_64-pc-windows-msvc",
+    ]:
+        require(
+            f"name: {artifact_name}" in release,
+            f"publish job does not download exact workflow artifact {artifact_name}",
+        )
+    for forbidden in ["merge-multiple: true", "files: dist/*", "subject-path: dist/*"]:
+        require(forbidden not in release, f"release workflow still uses an unbounded wildcard: {forbidden}")
+    for helper_command in ["assemble", "prepare", "verify-sbom", "finalize", "verify-release"]:
+        require(
+            f"scripts/release-artifacts.py {helper_command}" in release,
+            f"release workflow omits artifact reconciliation phase: {helper_command}",
+        )
+    for sbom_contract in [
+        "path: sbom-input",
+        "syft-version: v1.51.1",
+        "SYFT_FILE_METADATA_SELECTION: all",
+        "SYFT_SOURCE_NAME: coop-release-${{ needs.preflight.outputs.version }}",
+        "sbom-path: dist/coop-${{ needs.preflight.outputs.version }}.spdx.json",
+        "--predicate-type https://spdx.dev/Document/v2.3",
+    ]:
+        require(sbom_contract in release, f"artifact-scoped SBOM contract missing: {sbom_contract}")
+    for provenance_contract in [
+        "--signer-workflow",
+        "--source-ref",
+        "--source-digest",
+        "--signer-digest",
+        "--deny-self-hosted-runners",
+        "--predicate-type https://slsa.dev/provenance/v1",
+    ]:
+        require(
+            provenance_contract in release,
+            f"release attestation verification constraint missing: {provenance_contract}",
+        )
+    for draft_contract in [
+        "overwrite_files: false",
+        "--json assets,isDraft,tagName",
+        "remote asset digest differs from local file",
+    ]:
+        require(
+            draft_contract in release + release_helper_source,
+            f"remote draft reconciliation contract missing: {draft_contract}",
+        )
     require(
-        checksum_pipeline in normalized_release,
-        "release workflow must deterministically checksum every asset and exclude its manifest",
+        "subject-checksums: ${{ runner.temp }}/coop-payload-subjects.sha256" in release
+        and "subject-checksums: ${{ runner.temp }}/coop-release-subjects.sha256" in release,
+        "release workflow must use exact checksum subject lists for SBOM and provenance",
     )
-    require("spdx-json" in release, "release workflow omits the SPDX SBOM")
-    require("actions/attest@" in release, "release workflow omits provenance")
+    require(release.count("actions/attest@") == 2, "release workflow must create SBOM and provenance attestations")
     require("draft: true" in release, "release assets must stage in a draft")
     require("--draft=false" in release, "release workflow never atomically publishes its draft")
+
+    install_docs = read("docs/deployment.md") + read("docs/sdks.md")
+    require(
+        "sha256sum --check --ignore-missing" not in install_docs,
+        "installation docs still allow an unbound checksum row",
+    )
+    for verification_contract in [
+        "set -euo pipefail",
+        "gh release verify-asset",
+        "--signer-workflow sambai-dev/coop/.github/workflows/release.yml",
+        '--source-ref "refs/tags/v${version}"',
+        "--predicate-type https://slsa.dev/provenance/v1",
+        "--deny-self-hosted-runners",
+    ]:
+        require(
+            verification_contract in install_docs,
+            f"installation docs omit fail-closed verification: {verification_contract}",
+        )
+    require(
+        install_docs.count("$LASTEXITCODE -ne 0") >= 5,
+        "PowerShell installation path does not stop after every native verification failure",
+    )
 
     compose = read("docker-compose.yml")
     require("127.0.0.1:7300:7300" in compose, "Compose must publish Coop on loopback only")
     require("COOP_API_KEYS: \"${COOP_API_KEYS:?" in compose, "Compose must require an API key")
-    require("privileged: true" in compose, "namespace Compose posture changed; re-review boundary docs")
+    for contract in [
+        'COOP_SANDBOX: "${COOP_SANDBOX:-gvisor}"',
+        "COOP_GVISOR_RUNSC_SOURCE: /run/coop-bootstrap/runsc",
+        "COOP_GVISOR_RUNSC: /run/coop-runtime/runsc",
+        "COOP_GVISOR_ROOTFS_SHA256",
+        "COOP_ATTESTATION_MODE: sign",
+        "COOP_ATTESTATION_KEY_SOURCE",
+        "COOP_ATTESTATION_KEY_FILE: /run/coop-secrets/attestation-key.pem",
+        "coop_attestation_key",
+        "/run/coop-runtime:rw,exec,nosuid,nodev,mode=0700,uid=0,gid=0",
+        "/run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0",
+        "privileged: true",
+    ]:
+        require(contract in compose, f"Compose production contract missing: {contract}")
     require(read(".env.example").split("COOP_API_KEYS=", 1)[1].splitlines()[0] == "", ".env example must not contain a key")
     return action_count
 

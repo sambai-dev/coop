@@ -1,6 +1,6 @@
 # Coop TypeScript SDK
 
-The typed v0.3 client runs in modern browsers and Node.js 18+. It uses the
+The typed client runs in modern browsers and Node.js 18+. It uses the
 platform `fetch`, supports `AbortSignal` and per-request deadlines, and has no
 runtime dependencies.
 
@@ -18,7 +18,7 @@ npm ci
 npm run build
 npm pack
 # Then, from your application:
-npm install /path/to/coop/sdks/typescript/coop-sdk-0.3.0.tgz
+npm install /path/to/coop/sdks/typescript/coop-sdk-0.4.0.tgz
 ```
 
 The npm package is not published yet. After it is published, install it with:
@@ -27,8 +27,8 @@ The npm package is not published yet. After it is published, install it with:
 npm install coop-sdk
 ```
 
-The exact v0.3.0 GitHub release package is
-`coop-sdk-0.3.0.tgz`; follow the
+The exact v0.4.0 GitHub release package is
+`coop-sdk-0.4.0.tgz`; follow the
 [checksum, attestation, and installation commands](../../docs/sdks.md) rather
 than using a moving release URL.
 
@@ -38,6 +38,7 @@ import { Coop } from "coop-sdk";
 const coop = new Coop("http://127.0.0.1:7300", "tenant-api-key");
 const job = await coop.submit("node", "console.log(6 * 7)", {
   limits: { wall_seconds: 10, mem_mb: 256 },
+  requirements: { minimum_isolation: "linux-shared-kernel" },
 });
 
 for await (const event of coop.streamEvents(job.job_id)) {
@@ -48,16 +49,82 @@ const result = await coop.result(job.job_id, 60_000);
 console.log(result.status, result.stdout);
 ```
 
+For a terminal job whose `detail.attestation.available` is true, preserve the
+exact DSSE envelope and signed result subject. In Node.js:
+
+```ts
+import { writeFile } from "node:fs/promises";
+
+const detail = await coop.get(job.job_id);
+if (detail.attestation.available) {
+  const envelope = await coop.downloadAttestation(job.job_id);
+  const subject = await coop.downloadResultArtifact(job.job_id);
+  await writeFile("job.dsse.json", envelope.content);
+  await writeFile("job-result.json", subject.content);
+}
+```
+
+The downloads remain authenticated to the tenant, set `redirect: "error"`,
+retain binary order, and validate `X-Content-Sha256`. The returned
+`contentType`, `contentLength`, and `sha256` describe those exact bytes; they do
+not mean the DSSE signature was verified. Pin the operator's Ed25519 public key
+through an authenticated out-of-band channel, then run:
+
+```bash
+coop-verify verify \
+  --envelope job.dsse.json \
+  --subject job-result.json \
+  --public-key trusted-coop-attestation.pub.pem \
+  --tenant "$EXPECTED_TENANT" \
+  --subject-name "coop://jobs/$JOB_ID/result" \
+  --media-type application/vnd.coop.execution-result.v1+json
+```
+
+The signed predicate and exact result both bind the authoritative tenant;
+`detail.attestation.tenant` exposes the same expected claim once available.
+Pass a workflow-expected tenant to the verifier rather than copying one from
+untrusted downloaded JSON. Migrated v0.3 receipts may omit tenant.
+
+`attestationPublicKey()` is typed discovery data, not a trust anchor. Exit zero
+authenticates the envelope profile and exact subject; callers must separately
+evaluate `outcome` and `event_chain_complete`.
+
+For an idempotent v0.4 submission, use `submitResult()`. It preserves the
+ordinary response body under `job` and also exposes the `Location` and
+`Idempotency-Replayed` response headers:
+
+```ts
+const accepted = await coop.submitResult("python", "print('once')", {
+  idempotencyKey: "workflow-run-018f6f8d", // 1-128 visible ASCII bytes
+  retryAmbiguous: true,
+  requirements: { minimum_isolation: "gvisor-application-kernel" },
+});
+console.log(accepted.job.job_id, accepted.location, accepted.idempotency_replayed);
+```
+
+`retryAmbiguous` makes at most one automatic retry and reuses the same key. Use
+it only with a server that enforces v0.4 idempotency semantics. An ambiguous
+failure carries the stable key on `CoopError.idempotencyKey` so a caller can
+persist it and reconcile the logical request later. `cancelResult()` returns
+the typed v0.4 cancellation state; `cancel()` remains the body-discarding
+compatibility wrapper.
+
+`capabilities()` exposes the provider's `isolation_class`, per-job
+`mem_mb_max`, and aggregate `concurrent_mem_mb_max`. Use
+`isolationSatisfies(actual, minimum)` for the server-compatible branched
+ordering: `wasm-capability` satisfies only that capability requirement and is
+not silently interchangeable with a shared-kernel or VM class.
+
 Every network method accepts an `AbortSignal` directly or through its options.
 `CoopError` exposes `status`, `code`, `requestId`, `retryable`, and
 `retryAfterMs`.
 
-Streaming obtains a short-lived, one-use v0.2 ticket before opening a
+Streaming obtains a short-lived, one-use ticket before opening a
 WebSocket. On runtimes without `WebSocket`, `streamEvents()` uses the cursor
 replay endpoint. A v0.1 query-key fallback remains available for compatibility
 but is disabled by default because URLs leak into logs and history. Enable it
 only for a trusted legacy server with `allowLegacyQueryKey: true`; structured
-v0.2 errors never trigger that fallback.
+Coop errors never trigger that fallback.
 
 `submit()` accepts the sparse `JobSpec` shape, while `get()` and `wait()`
 return `JobDetail`. The requested `StoredJobSpec` is complete.
