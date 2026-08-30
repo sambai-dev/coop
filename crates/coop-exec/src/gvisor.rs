@@ -1426,10 +1426,14 @@ fn write_fixed_file(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(mode)
+        .mode(mode & !0o111)
         .open(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    // The next caller may execute the file immediately. Close the writable
+    // descriptor before publishing the final mode so Linux never observes an
+    // executable that is still open for writing (ETXTBSY on overlay filesystems).
+    drop(file);
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
 }
 
