@@ -114,6 +114,16 @@ def check_versions() -> str:
         is not None,
         "Cargo.lock does not contain reviewed aws-lc-rs 1.18.0",
     )
+    cargo_config = read(".cargo/config.toml")
+    require(
+        re.search(
+            r'^AWS_LC_SYS_USE_SYSTEM\s*=\s*\{\s*value\s*=\s*"0"\s*,\s*force\s*=\s*true\s*\}$',
+            cargo_config,
+            re.MULTILINE,
+        )
+        is not None,
+        "Cargo builds must use the lockfile-pinned bundled AWS-LC source",
+    )
 
     python_version = toml_string("sdks/python/pyproject.toml", "project", "version")
     typescript_package = json.loads(read("sdks/typescript/package.json"))
@@ -268,6 +278,7 @@ def check_pins_and_packaging() -> int:
         'COOP_GIT_REVISION="${VCS_REF}" cargo build --locked --release',
         "-p coop-server -p coop-exec -p coop-attestation --bins",
         'COOP_GIT_REVISION="${VCS_REF}" cargo build',
+        "COPY .cargo ./.cargo",
         "coop-sandbox-init /usr/local/bin/coop-sandbox-init",
         "coop-oci-init /usr/local/bin/coop-oci-init",
         "coop-verify /usr/local/bin/coop-verify",
