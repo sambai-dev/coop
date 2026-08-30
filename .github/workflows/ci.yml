@@ -129,7 +129,7 @@ jobs:
             target="sdks/python/.verify-dist/${kind}-install"
             rm -rf "$target"
             python -m pip install --no-deps --target "$target" "$artifact"
-            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp; assert coop.__version__ == '0.4.0'; assert coop_mcp.__version__ == coop.__version__; assert Path(coop.__file__).with_name('py.typed').is_file()"
+            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp; assert coop.__version__ == '0.5.0'; assert coop_mcp.__version__ == coop.__version__; assert Path(coop.__file__).with_name('py.typed').is_file()"
             PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v
           done
       - name: Install TypeScript SDK dependencies

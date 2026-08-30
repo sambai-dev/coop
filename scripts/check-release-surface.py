@@ -45,7 +45,7 @@ def toml_string(relative: str, section: str, key: str) -> str:
 
 def check_versions() -> str:
     version = toml_string("Cargo.toml", "workspace.package", "version")
-    require(version == "0.4.0", f"unexpected workspace release version: {version}")
+    require(version == "0.5.0", f"unexpected workspace release version: {version}")
 
     toolchain = toml_string("rust-toolchain.toml", "toolchain", "channel")
     rust_version = toml_string("Cargo.toml", "workspace.package", "rust-version")
@@ -146,6 +146,16 @@ def check_versions() -> str:
         f'__version__ = "{version}"' in read("sdks/python/coop.py"),
         "Python module version differs from its package metadata",
     )
+    require(
+        f'__version__ = "{version}"' in read("sdks/python/coop_mcp.py"),
+        "Python MCP module version differs from its package metadata",
+    )
+    typescript_source = read("sdks/typescript/coop.ts")
+    typescript_client_header = f'"X-Coop-Client": "typescript/{version}"'
+    require(
+        typescript_source.count(typescript_client_header) == 2,
+        "TypeScript HTTP and artifact clients do not identify the package release version",
+    )
     python_lock = read("sdks/python/uv.lock")
     locked_python_project = re.search(
         r'\[\[package\]\]\s+name = "coop-sdk"\s+version = "([^"]+)"',
@@ -180,7 +190,12 @@ def check_versions() -> str:
         "Docker build toolchain differs from rust-toolchain.toml",
     )
     for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"]:
-        for configured in re.findall(r"^\s*toolchain:\s*([^\s#]+)", read(workflow), re.MULTILINE):
+        workflow_source = read(workflow)
+        require(
+            f"assert coop.__version__ == '{version}'" in workflow_source,
+            f"{workflow} Python distribution assertion differs from the workspace version",
+        )
+        for configured in re.findall(r"^\s*toolchain:\s*([^\s#]+)", workflow_source, re.MULTILINE):
             require(
                 configured == toolchain,
                 f"{workflow} installs Rust {configured}, expected {toolchain}",
@@ -189,7 +204,18 @@ def check_versions() -> str:
         f'VERSION: "{version}"' in read("docker-compose.yml"),
         "Compose build version differs from the workspace",
     )
-    require(f"## {version}" in read("CHANGELOG.md"), "CHANGELOG release heading is missing")
+    changelog = read("CHANGELOG.md")
+    release_headings = re.findall(r"^## (.+)$", changelog, re.MULTILINE)
+    require(bool(release_headings), "CHANGELOG contains no release headings")
+    require(
+        re.fullmatch(rf"{re.escape(version)} — \d{{4}}-\d{{2}}-\d{{2}}", release_headings[0])
+        is not None,
+        "CHANGELOG first release heading is not the finalized workspace version",
+    )
+    first_release = changelog.split(f"## {release_headings[0]}", 1)[1]
+    first_release = first_release.split("\n## ", 1)[0]
+    require("\n### " in first_release, "CHANGELOG current release has no sections")
+    require("\n- " in first_release, "CHANGELOG current release has no entries")
     release_workflow = read(".github/workflows/release.yml")
     require(
         'grep -Eqi "^## ${version}.*unreleased" CHANGELOG.md' in release_workflow,
@@ -215,6 +241,42 @@ def check_versions() -> str:
         f"| tagged `{series}` releases | Supported |" in read("SECURITY.md"),
         "SECURITY supported-version line differs from the workspace version",
     )
+    version_parts = version.split(".")
+    if int(version_parts[1]) > 0:
+        previous_series = f"{version_parts[0]}.{int(version_parts[1]) - 1}.x"
+        require(
+            f"| tagged `{previous_series}` releases | Unsupported; upgrade to {series} |"
+            in read("SECURITY.md"),
+            "SECURITY previous release line does not point to the supported series",
+        )
+    versioned_document_contracts = {
+        "docs/deployment.md": [
+            f"v{version} or newer",
+            f"version={version}",
+            f'$version = "{version}"',
+        ],
+        "docs/sdks.md": [
+            f"v{version} release",
+            f"version={version}",
+            f"coop_sdk-{version}.tar.gz",
+        ],
+        "sdks/python/README.md": [
+            f"v{version}",
+            f"coop_sdk-{version}-py3-none-any.whl",
+        ],
+        "sdks/typescript/README.md": [
+            f"v{version}",
+            f"coop-sdk-{version}.tgz",
+        ],
+        ".github/ISSUE_TEMPLATE/bug_report.yml": [f"v{version} or a commit SHA"],
+    }
+    for relative, expected_values in versioned_document_contracts.items():
+        document = read(relative)
+        for expected in expected_values:
+            require(
+                expected in document,
+                f"{relative} omits current release value: {expected}",
+            )
     return version
 
 

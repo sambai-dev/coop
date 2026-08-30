@@ -42,7 +42,7 @@ FROM runtime-base AS runtime
 # containment boundary.
 RUN test "$(dpkg --print-architecture)" = amd64
 
-ARG VERSION=0.4.0
+ARG VERSION=0.5.0
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="Coop" \
       org.opencontainers.image.description="Audit-first execution gateway for AI agents" \

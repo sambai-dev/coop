@@ -470,7 +470,7 @@ test("replay rejects a non-advancing initial cursor", async () => {
   assert.equal(transport.calls.length, 1);
 });
 
-test("whoami and capabilities expose the complete v0.4 discovery contract", async () => {
+test("whoami and capabilities expose the current discovery contract", async () => {
   const enforcement = {
     wall_seconds: true,
     cpu_seconds: true,
@@ -488,7 +488,7 @@ test("whoami and capabilities expose the complete v0.4 discovery contract", asyn
       expires_at_ms: null,
     }),
     response({
-      version: "0.4.0",
+      version: "0.5.0",
       languages: ["python"],
       execution: {
         backend: "gvisor",
