@@ -76,6 +76,44 @@ def check_versions() -> str:
             is not None,
             f"workspace dependency {dependency} does not require {version}",
         )
+    require(
+        re.search(
+            r'^jsonwebtoken\s*=\s*\{[^\n}]*version\s*=\s*"10\.4\.0"[^\n}]*features\s*=\s*\["aws_lc_rs"\]',
+            root_manifest,
+            re.MULTILINE,
+        )
+        is not None,
+        "JWT verification must use patched jsonwebtoken 10.4.0 with the explicit AWS-LC backend",
+    )
+    require(
+        re.search(r'\[\[package\]\]\s+name = "jsonwebtoken"\s+version = "10\.4\.0"', lockfile)
+        is not None,
+        "Cargo.lock does not contain patched jsonwebtoken 10.4.0",
+    )
+    server_manifest = read("crates/coop-server/Cargo.toml")
+    require(
+        re.search(
+            r'^aws-lc-rs\s*=\s*\{[^\n}]*version\s*=\s*"1\.18\.0"[^\n}]*default-features\s*=\s*false',
+            root_manifest,
+            re.MULTILINE,
+        )
+        is not None,
+        "workspace must pin the reviewed aws-lc-rs 1.18.0 dependency",
+    )
+    require(
+        re.search(
+            r'^aws-lc-rs\s*=\s*\{[^\n}]*workspace\s*=\s*true[^\n}]*features\s*=\s*\["prebuilt-nasm"\]',
+            server_manifest,
+            re.MULTILINE,
+        )
+        is not None,
+        "Windows x86_64 builds must enable the checked-in AWS-LC NASM objects",
+    )
+    require(
+        re.search(r'\[\[package\]\]\s+name = "aws-lc-rs"\s+version = "1\.18\.0"', lockfile)
+        is not None,
+        "Cargo.lock does not contain reviewed aws-lc-rs 1.18.0",
+    )
 
     python_version = toml_string("sdks/python/pyproject.toml", "project", "version")
     typescript_package = json.loads(read("sdks/typescript/package.json"))
