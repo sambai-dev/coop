@@ -431,6 +431,54 @@ pub struct SubmitPayload {
     _permit: crate::LifetimePermit,
 }
 
+#[derive(Clone, Default)]
+struct SubmitBodyReadState(Arc<std::sync::atomic::AtomicBool>);
+
+impl SubmitBodyReadState {
+    fn mark_complete(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn is_complete(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+fn http1_submit_has_framed_body(req: &Request) -> bool {
+    matches!(
+        req.version(),
+        Version::HTTP_09 | Version::HTTP_10 | Version::HTTP_11
+    ) && req.method() == axum::http::Method::POST
+        && req.uri().path() == "/v1/jobs"
+        && (req.headers().contains_key(header::TRANSFER_ENCODING)
+            || req
+                .headers()
+                .get_all(header::CONTENT_LENGTH)
+                .iter()
+                .any(|value| value.as_bytes() != b"0"))
+}
+
+/// HTTP/1 has one ordered request stream per connection. If auth, scope,
+/// rate limiting, or extraction rejects a submission before its advertised
+/// body reaches EOF, dropping the body can otherwise leave Hyper draining an
+/// attacker-paced body after the submit-body permit has been released (or
+/// before one was acquired). Close only that HTTP/1 connection; HTTP/2 stream
+/// cancellation remains session-local and must not receive hop-by-hop
+/// `Connection` headers.
+async fn close_early_http1_submit_body(mut req: Request, next: axum::middleware::Next) -> Response {
+    let state = http1_submit_has_framed_body(&req).then(SubmitBodyReadState::default);
+    if let Some(state) = state.as_ref() {
+        req.extensions_mut().insert(state.clone());
+    }
+    let mut response = next.run(req).await;
+    if state.as_ref().is_some_and(|state| !state.is_complete()) {
+        response
+            .headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    }
+    response
+}
+
 #[allow(clippy::result_large_err)]
 impl FromRequest<AppState> for SubmitPayload {
     type Rejection = Response;
@@ -461,6 +509,7 @@ async fn extract_submit_payload(
     deadline: Duration,
 ) -> Result<SubmitPayload, Response> {
     let request_version = req.version();
+    let body_read_state = req.extensions().get::<SubmitBodyReadState>().cloned();
     let permit = match admission.try_acquire(tenant) {
         Ok(permit) => permit,
         Err(crate::TryLifetimeError::Closed) => {
@@ -514,11 +563,29 @@ async fn extract_submit_payload(
     };
 
     match tokio::time::timeout(deadline, Json::<JobSpec>::from_request(req, &())).await {
-        Ok(Ok(Json(spec))) => Ok(SubmitPayload {
-            spec,
-            _permit: permit,
-        }),
-        Ok(Err(rejection)) => Err(json_rejection_response(rejection)),
+        Ok(Ok(Json(spec))) => {
+            if let Some(state) = body_read_state.as_ref() {
+                state.mark_complete();
+            }
+            Ok(SubmitPayload {
+                spec,
+                _permit: permit,
+            })
+        }
+        Ok(Err(rejection)) => {
+            // Axum buffers the complete body before deserializing JSON.
+            // Syntax/data failures therefore reached EOF, while content-type
+            // and byte-buffer failures may still leave attacker-paced bytes.
+            if matches!(
+                &rejection,
+                JsonRejection::JsonDataError(_) | JsonRejection::JsonSyntaxError(_)
+            ) {
+                if let Some(state) = body_read_state.as_ref() {
+                    state.mark_complete();
+                }
+            }
+            Err(json_rejection_response(rejection))
+        }
         Err(_) => {
             let mut response = api_error_with_retry(
                 StatusCode::REQUEST_TIMEOUT,
@@ -1074,7 +1141,8 @@ pub(crate) fn router(state: AppState) -> Router {
             crate::auth::middleware,
         ))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
-        .layer(axum::middleware::from_fn(crate::auth::no_store));
+        .layer(axum::middleware::from_fn(crate::auth::no_store))
+        .layer(axum::middleware::from_fn(close_early_http1_submit_body));
 
     Router::new()
         .route("/", get(dashboard))

@@ -1,5 +1,5 @@
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{header, Request, StatusCode, Version};
 use axum::Router;
 use coop_attestation::{
     verify_attestation, write_private_key_file_new, ArtifactDigest, SigningKey, VerificationPolicy,
@@ -10,8 +10,11 @@ use coop_store::Store;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tower::ServiceExt;
 
 const TERMINAL: [&str; 6] = [
@@ -90,7 +93,7 @@ async fn spawn_app_with_limits(workers: usize, tenant_concurrency: usize) -> Rou
     app
 }
 
-async fn spawn_scoped_app() -> (Router, HashMap<&'static str, String>) {
+async fn build_scoped_app() -> (Router, coop_server::AppState, HashMap<&'static str, String>) {
     let db = std::env::temp_dir().join(format!("coop-scoped-test-{}.db", uuid::Uuid::now_v7()));
     let root =
         std::env::temp_dir().join(format!("coop-scoped-credentials-{}", uuid::Uuid::now_v7()));
@@ -158,13 +161,18 @@ async fn spawn_scoped_app() -> (Router, HashMap<&'static str, String>) {
     cfg.credentials =
         coop_server::auth::CredentialStore::load(&credentials_path, &pepper_path, false).unwrap();
     let store = Arc::new(Store::open(&db).await.unwrap());
-    let (app, _state, queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
+    let (app, state, queue_rx) = coop_server::build_app(cfg, store, loopback_addr())
         .await
         .unwrap();
     tokio::spawn(async move {
         let _queue_rx = queue_rx;
         std::future::pending::<()>().await;
     });
+    (app, state, keys)
+}
+
+async fn spawn_scoped_app() -> (Router, HashMap<&'static str, String>) {
+    let (app, _state, keys) = build_scoped_app().await;
     (app, keys)
 }
 
@@ -182,6 +190,195 @@ async fn send(app: &Router, req: Request<Body>) -> (StatusCode, serde_json::Valu
         ))
     };
     (status, value)
+}
+
+async fn start_http1_server(
+    app: Router,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<io::Result<()>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind HTTP/1 regression listener");
+    let address = listener.local_addr().expect("HTTP/1 listener address");
+    let listener =
+        coop_server::transport::WriteTimeoutListener::new(listener, Duration::from_secs(1));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        coop_server::transport::serve(listener, app, async {
+            let _ = shutdown_rx.await;
+        })
+        .await
+    });
+    (address, shutdown_tx, server)
+}
+
+async fn read_http_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+    let mut response = Vec::new();
+    let mut chunk = [0_u8; 1_024];
+    loop {
+        let count = stream.read(&mut chunk).await?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "HTTP peer closed before a complete response head",
+            ));
+        }
+        response.extend_from_slice(&chunk[..count]);
+        if response.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(response);
+        }
+        if response.len() > 16 * 1_024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HTTP response head exceeded 16 KiB",
+            ));
+        }
+    }
+}
+
+async fn wait_for_peer_close(stream: &mut TcpStream) -> io::Result<()> {
+    let mut buffer = [0_u8; 1_024];
+    loop {
+        match stream.read(&mut buffer).await {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                return Ok(())
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn assert_partial_http1_submit_closes(
+    address: std::net::SocketAddr,
+    key: Option<&str>,
+    content_type: &str,
+    expected: StatusCode,
+) {
+    let authorization = key.map_or_else(String::new, |key| {
+        format!("Authorization: Bearer {key}\r\n")
+    });
+    let request = format!(
+        "POST /v1/jobs HTTP/1.1\r\nHost: coop.test\r\n{authorization}Content-Type: {content_type}\r\nContent-Length: 1048576\r\nConnection: keep-alive\r\n\r\n{{"
+    );
+    assert_incomplete_http1_request_closes(address, &request, expected).await;
+}
+
+async fn assert_incomplete_http1_request_closes(
+    address: std::net::SocketAddr,
+    request: &str,
+    expected: StatusCode,
+) {
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("connect HTTP/1 regression client");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write deliberately incomplete HTTP/1 request");
+
+    let response = tokio::time::timeout(Duration::from_secs(1), read_http_head(&mut stream))
+        .await
+        .expect("early rejection response deadline")
+        .expect("read early rejection response");
+    let response = String::from_utf8_lossy(&response).to_ascii_lowercase();
+    assert!(
+        response.starts_with(&format!("http/1.1 {}", expected.as_u16())),
+        "unexpected response: {response}"
+    );
+    assert!(
+        response.contains("\r\nconnection: close\r\n"),
+        "HTTP/1 early rejection did not announce connection close: {response}"
+    );
+    tokio::time::timeout(Duration::from_secs(1), wait_for_peer_close(&mut stream))
+        .await
+        .expect("incomplete HTTP/1 body was closed instead of drained")
+        .expect("observe HTTP/1 peer close");
+}
+
+async fn assert_complete_json_rejection_is_http1_reusable(
+    address: std::net::SocketAddr,
+    key: &str,
+    rejected_json: &str,
+    chunked: bool,
+) {
+    let first = if chunked {
+        format!(
+            "POST /v1/jobs HTTP/1.1\r\nHost: coop.test\r\nAuthorization: Bearer {key}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n{:x}\r\n{rejected_json}\r\n0\r\n\r\n",
+            rejected_json.len()
+        )
+    } else {
+        format!(
+            "POST /v1/jobs HTTP/1.1\r\nHost: coop.test\r\nAuthorization: Bearer {key}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{rejected_json}",
+            rejected_json.len()
+        )
+    };
+    let request =
+        format!("{first}GET /healthz HTTP/1.1\r\nHost: coop.test\r\nConnection: close\r\n\r\n");
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("connect reusable HTTP/1 regression client");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("pipeline malformed submission and health probe");
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response))
+        .await
+        .expect("reused HTTP/1 response deadline")
+        .expect("read reused HTTP/1 responses");
+    let response = String::from_utf8_lossy(&response).to_ascii_lowercase();
+    let first_head = response
+        .split_once("\r\n\r\n")
+        .map(|(head, _)| head)
+        .expect("first HTTP/1 response head");
+    assert!(first_head.starts_with("http/1.1 400"), "{response}");
+    assert!(
+        !first_head.contains("\r\nconnection: close"),
+        "fully consumed malformed JSON must retain keep-alive: {response}"
+    );
+    assert!(
+        response.contains("http/1.1 200"),
+        "the same HTTP/1 connection did not serve the pipelined health probe: {response}"
+    );
+}
+
+async fn assert_early_http2_submit_stays_session_local(
+    app: &Router,
+    key: Option<&str>,
+    content_type: &str,
+    expected: StatusCode,
+) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/v1/jobs")
+        .version(Version::HTTP_2)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, "1048576");
+    if let Some(key) = key {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {key}"));
+    }
+    let response = app
+        .clone()
+        .oneshot(builder.body(Body::from("{")).expect("HTTP/2 request"))
+        .await
+        .expect("HTTP/2 response");
+    assert_eq!(response.status(), expected);
+    assert!(
+        !response.headers().contains_key(header::CONNECTION),
+        "HTTP/2 rejection must reset only its stream"
+    );
 }
 
 fn request(method: &str, uri: &str, key: Option<&str>, body: Option<String>) -> Request<Body> {
@@ -487,6 +684,183 @@ async fn invalid_and_malformed_bearers_return_rfc6750_challenges() {
             "Bearer realm=\"coop\", error=\"invalid_request\""
         ))
     );
+}
+
+#[tokio::test]
+async fn early_submit_rejections_close_http1_bodies_without_closing_http2_sessions() {
+    let (app, state, keys) = build_scoped_app().await;
+    let key = |name| keys.get(name).unwrap().as_str();
+
+    // Framing is the exact HTTP/1 drain boundary. Zero/no body does not need
+    // a connection close, while any nonzero or transfer-coded body fails
+    // closed when an early layer returns before extraction.
+    for (framing, should_close) in [
+        (None, false),
+        (Some((header::CONTENT_LENGTH, "0")), false),
+        (Some((header::CONTENT_LENGTH, "00")), true),
+        (Some((header::TRANSFER_ENCODING, "chunked")), true),
+    ] {
+        let framing_label = format!("{framing:?}");
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/v1/jobs")
+            .version(Version::HTTP_11)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some((name, value)) = framing {
+            builder = builder.header(name, value);
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::from("{")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().contains_key(header::CONNECTION),
+            should_close,
+            "unexpected close policy for framing {framing_label}"
+        );
+    }
+
+    let (address, shutdown, server) = start_http1_server(app.clone()).await;
+
+    assert_partial_http1_submit_closes(address, None, "application/json", StatusCode::UNAUTHORIZED)
+        .await;
+    assert_incomplete_http1_request_closes(
+        address,
+        "POST /v1/jobs HTTP/1.1\r\nHost: coop.test\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n1\r\n{\r\n",
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert_partial_http1_submit_closes(
+        address,
+        Some(key("read")),
+        "application/json",
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+
+    let body_capacity = [
+        state.submit_body_admission.try_acquire("holder-a").unwrap(),
+        state.submit_body_admission.try_acquire("holder-a").unwrap(),
+        state.submit_body_admission.try_acquire("holder-b").unwrap(),
+        state.submit_body_admission.try_acquire("holder-b").unwrap(),
+    ];
+    assert_partial_http1_submit_closes(
+        address,
+        Some(key("submit")),
+        "application/json",
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    drop(body_capacity);
+
+    assert_partial_http1_submit_closes(
+        address,
+        Some(key("submit")),
+        "text/plain",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+    )
+    .await;
+    for rejected_json in [
+        r#"{"language":"python","code":}"#,
+        r#"{"language":1,"code":"print(1)"}"#,
+    ] {
+        for chunked in [false, true] {
+            assert_complete_json_rejection_is_http1_reusable(
+                address,
+                key("submit"),
+                rejected_json,
+                chunked,
+            )
+            .await;
+        }
+    }
+
+    assert_early_http2_submit_stays_session_local(
+        &app,
+        None,
+        "application/json",
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert_early_http2_submit_stays_session_local(
+        &app,
+        Some(key("read")),
+        "application/json",
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    let body_capacity = [
+        state.submit_body_admission.try_acquire("holder-a").unwrap(),
+        state.submit_body_admission.try_acquire("holder-a").unwrap(),
+        state.submit_body_admission.try_acquire("holder-b").unwrap(),
+        state.submit_body_admission.try_acquire("holder-b").unwrap(),
+    ];
+    assert_early_http2_submit_stays_session_local(
+        &app,
+        Some(key("submit")),
+        "application/json",
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    drop(body_capacity);
+    assert_early_http2_submit_stays_session_local(
+        &app,
+        Some(key("submit")),
+        "text/plain",
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+    )
+    .await;
+
+    let semantic_body = r#"{"language":"not-a-runtime","code":"print(1)"}"#;
+    let semantic_rejection = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/jobs")
+                .version(Version::HTTP_11)
+                .header(header::AUTHORIZATION, format!("Bearer {}", key("submit")))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::CONTENT_LENGTH, semantic_body.len())
+                .body(Body::from(semantic_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(semantic_rejection.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !semantic_rejection
+            .headers()
+            .contains_key(header::CONNECTION),
+        "a fully extracted semantic rejection retains HTTP/1 keep-alive"
+    );
+
+    for _ in 0..=state.cfg.rate_per_min {
+        let _ = state.rate.check("tenant-a");
+    }
+    assert_partial_http1_submit_closes(
+        address,
+        Some(key("submit")),
+        "application/json",
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+    .await;
+    assert_early_http2_submit_stays_session_local(
+        &app,
+        Some(key("submit")),
+        "application/json",
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+    .await;
+
+    shutdown.send(()).expect("stop HTTP/1 regression server");
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .expect("HTTP/1 regression server shutdown deadline")
+        .expect("HTTP/1 regression server task")
+        .expect("HTTP/1 regression server stopped cleanly");
 }
 
 #[tokio::test]

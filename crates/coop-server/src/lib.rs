@@ -212,6 +212,7 @@ pub async fn build_app(
     store: Arc<Store>,
     bound_addr: std::net::SocketAddr,
 ) -> Result<(axum::Router, AppState, mpsc::Receiver<scheduler::QueuedJob>), String> {
+    cfg.validate_metrics_token_separation()?;
     let expected_storage_limits = cfg.storage_limits();
     if store.storage_limits() != expected_storage_limits {
         return Err(

@@ -357,6 +357,10 @@ impl CredentialStore {
         self.len() == 0
     }
 
+    pub(crate) fn matches_active_credential(&self, presented: &str) -> bool {
+        self.authenticate(presented, now_ms()).is_some()
+    }
+
     fn authenticate(&self, presented: &str, at_ms: i64) -> Option<AuthContext> {
         let inner = self.0.as_ref()?;
         let key_id = credential_key_id(presented);

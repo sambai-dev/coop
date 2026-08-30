@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Component, Path};
 
 pub const DEV_DEFAULT_API_KEY: &str = "local:coop-dev-key";
+const PUBLIC_DEV_API_KEY: &str = "coop-dev-key";
 pub const DEFAULT_TENANT_QUEUE_CAPACITY: usize = 64;
 pub const DEFAULT_MAX_JOB_MEM_MB: u32 = 1024;
 pub const DEFAULT_MEMORY_BUDGET_MB: u32 = 4096;
@@ -169,6 +170,26 @@ fn listener_is_loopback(addr: &str) -> bool {
         return socket.ip().is_loopback();
     }
     false
+}
+
+fn legacy_api_key_is_weak(key: &str) -> bool {
+    key == PUBLIC_DEV_API_KEY || key.len() < 16
+}
+
+fn ensure_metrics_token_is_separate(
+    metrics_token: Option<&str>,
+    api_keys: &HashMap<String, String>,
+    credentials: &crate::auth::CredentialStore,
+) -> Result<(), String> {
+    if metrics_token.is_some_and(|token| {
+        api_keys.contains_key(token) || credentials.matches_active_credential(token)
+    }) {
+        return Err(
+            "COOP_METRICS_TOKEN must be different from every active tenant API credential"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Reject paths for which a permissions call could affect a broad or
@@ -633,7 +654,7 @@ impl Config {
                         "COOP_API_KEYS contains a blank key for tenant {tenant:?}"
                     ));
                 }
-                if production && (key == "coop-dev-key" || key.len() < 16) {
+                if production && legacy_api_key_is_weak(key) {
                     return Err(format!(
                         "production API key for tenant {tenant:?} is public or too short (minimum 16 characters)"
                     ));
@@ -668,14 +689,7 @@ impl Config {
                     .to_string(),
             );
         }
-        if metrics_token
-            .as_ref()
-            .is_some_and(|token| api_keys.contains_key(token))
-        {
-            return Err(
-                "COOP_METRICS_TOKEN must be different from every tenant API key".to_string(),
-            );
-        }
+        ensure_metrics_token_is_separate(metrics_token.as_deref(), &api_keys, &credentials)?;
 
         let attestation_key_file = getenv("COOP_ATTESTATION_KEY_FILE")
             .map(|value| value.trim().to_string())
@@ -861,9 +875,9 @@ impl Config {
         if listener_is_loopback(&self.addr) || self.unsafe_allow_public_dev {
             return Ok(());
         }
-        if self.api_keys.contains_key("coop-dev-key") {
+        if self.api_keys.keys().any(|key| legacy_api_key_is_weak(key)) {
             return Err(
-                "a non-loopback COOP_ADDR cannot use the public development API key; configure COOP_API_KEYS or set COOP_UNSAFE_ALLOW_PUBLIC_DEV=true to acknowledge the unsafe development exposure"
+                "a non-loopback COOP_ADDR cannot use the public development API key or a legacy API key shorter than 16 characters; configure a strong COOP_API_KEYS value or set COOP_UNSAFE_ALLOW_PUBLIC_DEV=true to acknowledge the unsafe development exposure"
                     .to_string(),
             );
         }
@@ -877,6 +891,14 @@ impl Config {
             );
         }
         Ok(())
+    }
+
+    pub(crate) fn validate_metrics_token_separation(&self) -> Result<(), String> {
+        ensure_metrics_token_is_separate(
+            self.metrics_token.as_deref(),
+            &self.api_keys,
+            &self.credentials,
+        )
     }
 
     pub fn validate_resolved_listener_security(
@@ -904,7 +926,9 @@ impl Config {
         if bound.ip().is_loopback() || self.unsafe_allow_public_dev {
             return Ok(());
         }
-        if self.api_keys.contains_key("coop-dev-key") || mode == coop_exec::SandboxMode::Off {
+        if self.api_keys.keys().any(|key| legacy_api_key_is_weak(key))
+            || mode == coop_exec::SandboxMode::Off
+        {
             return Err(format!(
                 "listener resolved to non-loopback address {bound} with an unsafe development credential or executor; configure production keys and namespace isolation, or explicitly set COOP_UNSAFE_ALLOW_PUBLIC_DEV=true"
             ));
@@ -945,6 +969,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hmac::{Hmac, Mac};
 
     fn source<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |key: &str| {
@@ -953,6 +978,54 @@ mod tests {
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| v.to_string())
         }
+    }
+
+    fn indexed_credential_fixture(
+        token: &str,
+        expires_at_ms: Option<i64>,
+        revoked_at_ms: Option<i64>,
+    ) -> (std::path::PathBuf, String, String) {
+        let root = std::env::temp_dir().join(format!(
+            "coop-config-indexed-collision-{}",
+            uuid::Uuid::now_v7()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pepper = [0x6d_u8; 32];
+        let mut hmac = Hmac::<sha2::Sha256>::new_from_slice(&pepper).unwrap();
+        hmac.update(token.as_bytes());
+        let digest = hmac.finalize().into_bytes();
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let credentials = root.join("credentials.json");
+        let pepper_file = root.join("pepper");
+        std::fs::write(&pepper_file, hex(&pepper)).unwrap();
+        std::fs::write(
+            &credentials,
+            serde_json::json!({
+                "version": 1,
+                "credentials": [{
+                    "key_id": "metrics-alias",
+                    "tenant_id": "tenant-a",
+                    "principal_id": "principal-a",
+                    "digest_hmac_sha256": hex(&digest),
+                    "scopes": ["metrics:read"],
+                    "created_at_ms": 1,
+                    "expires_at_ms": expires_at_ms,
+                    "revoked_at_ms": revoked_at_ms
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        (
+            root,
+            credentials.to_string_lossy().into_owned(),
+            pepper_file.to_string_lossy().into_owned(),
+        )
     }
 
     #[test]
@@ -1159,6 +1232,85 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("different"), "{error}");
+    }
+
+    #[test]
+    fn metrics_token_cannot_alias_an_active_indexed_credential() {
+        let token = format!("coop_metrics-alias_{}", "a".repeat(43));
+
+        for (expires_at_ms, revoked_at_ms) in [(Some(i64::MAX), None), (None, Some(i64::MAX))] {
+            let (root, credentials, pepper) =
+                indexed_credential_fixture(&token, expires_at_ms, revoked_at_ms);
+            let error = Config::from_sources(
+                &source(&[
+                    ("COOP_CREDENTIALS_FILE", credentials.as_str()),
+                    ("COOP_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
+                    ("COOP_METRICS_TOKEN", token.as_str()),
+                ]),
+                false,
+            )
+            .expect_err("an active tenant credential cannot double as the metrics token");
+            assert!(error.contains("active tenant API credential"), "{error}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        let (root, credentials, pepper) = indexed_credential_fixture(&token, Some(i64::MAX), None);
+        let unrelated_same_key_id = format!("coop_metrics-alias_{}", "b".repeat(43));
+        Config::from_sources(
+            &source(&[
+                ("COOP_CREDENTIALS_FILE", credentials.as_str()),
+                ("COOP_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
+                ("COOP_METRICS_TOKEN", unrelated_same_key_id.as_str()),
+            ]),
+            false,
+        )
+        .expect("a key-id match without an HMAC match is not a credential collision");
+        std::fs::remove_dir_all(root).unwrap();
+
+        for (expires_at_ms, revoked_at_ms) in [(Some(2), None), (None, Some(2))] {
+            let (root, credentials, pepper) =
+                indexed_credential_fixture(&token, expires_at_ms, revoked_at_ms);
+            Config::from_sources(
+                &source(&[
+                    ("COOP_CREDENTIALS_FILE", credentials.as_str()),
+                    ("COOP_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
+                    ("COOP_METRICS_TOKEN", token.as_str()),
+                ]),
+                false,
+            )
+            .expect("an expired or revoked credential is not an active tenant alias");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn build_app_revalidates_metrics_token_separation_after_config_mutation() {
+        let token = format!("coop_metrics-alias_{}", "a".repeat(43));
+        let (root, credentials, pepper) = indexed_credential_fixture(&token, Some(i64::MAX), None);
+        let jobs = root.join("jobs").to_string_lossy().into_owned();
+        let mut cfg = Config::from_sources(
+            &source(&[
+                ("COOP_CREDENTIALS_FILE", credentials.as_str()),
+                ("COOP_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
+                ("COOP_SANDBOX", "off"),
+                ("COOP_JOBS_ROOT", jobs.as_str()),
+                ("COOP_STORAGE_FREE_RESERVE_MB", "0"),
+            ]),
+            false,
+        )
+        .unwrap();
+        cfg.metrics_token = Some(token);
+        let db = root.join("coop.db");
+        let store = std::sync::Arc::new(
+            coop_store::Store::open_with_limits(&db, cfg.storage_limits())
+                .await
+                .unwrap(),
+        );
+        let error = match crate::build_app(cfg, store, "127.0.0.1:0".parse().unwrap()).await {
+            Err(error) => error,
+            Ok(_) => panic!("public build_app bypassed metrics-token separation"),
+        };
+        assert!(error.contains("active tenant API credential"), "{error}");
     }
 
     #[test]
@@ -1406,6 +1558,93 @@ mod tests {
             false,
         )
         .expect("conspicuous acknowledgement is explicit");
+    }
+
+    #[test]
+    fn public_isolated_development_listener_requires_strong_legacy_keys() {
+        for weak in ["123456789012345", PUBLIC_DEV_API_KEY] {
+            let error = Config::from_sources(
+                &source(&[
+                    ("COOP_ADDR", "0.0.0.0:7300"),
+                    ("COOP_API_KEYS", weak),
+                    ("COOP_SANDBOX", "namespaces"),
+                ]),
+                false,
+            )
+            .expect_err("a public isolated listener must reject weak legacy credentials");
+            assert!(
+                error.contains("shorter than 16") || error.contains("public development API key"),
+                "{weak}: {error}"
+            );
+        }
+
+        Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "0.0.0.0:7300"),
+                ("COOP_API_KEYS", "1234567890123456"),
+                ("COOP_SANDBOX", "namespaces"),
+            ]),
+            false,
+        )
+        .expect("a 16-byte public development key meets the existing strength floor");
+        Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "short-loopback"),
+                ("COOP_SANDBOX", "namespaces"),
+            ]),
+            false,
+        )
+        .expect("weak development credentials remain available on literal loopback");
+        Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "0.0.0.0:7300"),
+                ("COOP_API_KEYS", "short-public"),
+                ("COOP_SANDBOX", "namespaces"),
+                ("COOP_UNSAFE_ALLOW_PUBLIC_DEV", "true"),
+            ]),
+            false,
+        )
+        .expect("the conspicuous public-development override remains available");
+
+        let production_error = Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "0.0.0.0:7300"),
+                ("COOP_API_KEYS", "tenant:short"),
+                ("COOP_SANDBOX", "namespaces"),
+                ("COOP_UNSAFE_ALLOW_PUBLIC_DEV", "true"),
+            ]),
+            true,
+        )
+        .expect_err("the development override must not weaken production key policy");
+        assert!(production_error.contains("too short"), "{production_error}");
+
+        let weak_loopback = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "short-loopback"),
+                ("COOP_SANDBOX", "namespaces"),
+            ]),
+            false,
+        )
+        .unwrap();
+        let public: std::net::SocketAddr = "203.0.113.10:7300".parse().unwrap();
+        let error = weak_loopback
+            .validate_bound_listener_security(public, coop_exec::SandboxMode::Namespaces)
+            .expect_err("actual non-loopback binding must revalidate an embedder's config");
+        assert!(error.contains("unsafe development credential"), "{error}");
+
+        let hostname_error = Config::from_sources(
+            &source(&[
+                ("COOP_ADDR", "localhost:7300"),
+                ("COOP_API_KEYS", "short-hostname"),
+                ("COOP_SANDBOX", "namespaces"),
+            ]),
+            false,
+        )
+        .expect_err("unresolved hostnames retain the existing fail-closed policy");
+        assert!(
+            hostname_error.contains("shorter than 16"),
+            "{hostname_error}"
+        );
     }
 
     #[test]
