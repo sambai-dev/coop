@@ -198,6 +198,8 @@ export interface JobDetail extends JobView {
 
 export interface JobAttestationStatus {
   available: boolean;
+  /** Authoritative tenant carried by both portable evidence files. */
+  tenant: string | null;
   key_id: string | null;
   receipt_sha256: string | null;
   result_media_type: string | null;

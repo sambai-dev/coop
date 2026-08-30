@@ -174,6 +174,7 @@ may be `false`; clients that require a signature must wait boundedly.
 {
   "attestation": {
     "available": true,
+    "tenant": "TENANT_ID",
     "key_id": "sha256:…",
     "receipt_sha256": "…",
     "result_media_type": "application/vnd.coop.execution-result.v1+json",
@@ -187,19 +188,28 @@ may be `false`; clients that require a signature must wait boundedly.
 }
 ```
 
-The two authenticated download routes return the **exact stored bytes**, with
+`attestation.tenant` is the tenant claim bound into the persisted evidence; it
+is null while evidence is unavailable. The two authenticated download routes
+return the **exact stored bytes**, with
 their media type, `Content-Length`, and `X-Content-Sha256`. The result artifact
-is canonical JSON containing `_type`, `schema_version: 1`, lifecycle/outcome,
-receipt digest, folded stdout/stderr, truncation, and violations. It is capped
+is canonical JSON containing `_type`, `schema_version: 1`, authoritative
+`tenant`, lifecycle/outcome, receipt digest, folded stdout/stderr, truncation,
+and violations. The signed predicate carries the same tenant. Existing v0.3
+receipts remain embedded unchanged and may omit tenant; backfill obtains it
+from the durable job row instead. The result artifact is capped
 at 16 MiB; the DSSE envelope is capped at 2 MiB. These records share the same
 tenant authorization and large-response lifetime limits as job detail.
+On upgrade, pre-fix persisted files that do not carry the same tenant/job/
+receipt/digest links are removed from availability and requeued; job detail
+never synthesizes a tenant claim for those stale bytes.
 
 `GET /v1/attestation/public-key` returns the current canonical SPKI PEM and
 key ID when signing is enabled. Its `trust_notice` is part of the contract:
 the unauthenticated DSSE `keyid` hint and a key fetched from the signer are not
 independent trust anchors. Pin or distribute the public key out of band, retain
 old keys across rotation, and verify the envelope plus exact result with
-`coop-verify`. Verification proves possession of that key and profile integrity;
+`coop-verify --tenant EXPECTED_TENANT`. Verification proves possession of that
+key and profile integrity;
 it does not prove trusted hardware, deterministic execution, or semantic truth.
 `COOP_ATTESTATION_MODE=off` is an explicit production policy that produces no
 signatures.

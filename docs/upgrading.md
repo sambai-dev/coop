@@ -69,6 +69,8 @@ Treat v0.4 as a security- and deployment-sensitive upgrade:
    v0.3 binary/image/rootfs/config rollback set;
 2. test v0.4 against a copy—the schema-v3-to-v4 migration adds admitted-memory
    and accounting integrity plus attestation/outbox tables and is forward-only;
+   migrated terminal receipts keep their exact v0.3 bytes and checksum, while
+   first-time v0.4 attestations bind the authoritative `jobs.tenant` separately;
 3. install Rust 1.98-built `coop`, `coop-verify`, `coop-sandbox-init`, and
    `coop-oci-init` from the same release;
 4. rebuild the private rootfs and manifest, provision the exact reviewed
@@ -94,3 +96,16 @@ Do not run a v0.3 binary against a migrated schema-v4 database. Restore the
 pre-upgrade backup for rollback. Signing is durable but eventual, so consumers
 requiring portable evidence must wait until `attestation.available` is true
 and must pin the public key outside the signer API.
+Restart reconstruction charges the exact pending attestation reserve. A store
+that becomes logically full after that correction remains open so signing or
+retention can converge, but tenant/global growth fails until capacity is
+released.
+The revision-1 upgrade also inspects any pre-fix persisted attestation files:
+exact tenant-bound rows are preserved, while unbound or malformed rows are
+removed from availability and requeued for signing from authoritative job
+state. Under explicit signing-off policy they remain unavailable and are
+waived until a later signing-enabled restart reseeds them.
+Legacy `COOP_API_KEYS` tenant IDs must now meet the same identity contract as
+indexed credentials and OIDC mappings: 1–128 safe printable ASCII characters.
+Validate legacy tenant names before restart so every accepted job can be
+encoded into the tenant-bound portable attestation profile.

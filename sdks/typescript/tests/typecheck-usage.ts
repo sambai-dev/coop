@@ -47,6 +47,7 @@ async function consume(): Promise<void> {
   const capabilities: Capabilities = await client.capabilities();
   const attestationCapabilities: AttestationCapabilities = capabilities.attestations;
   const attestationStatus: JobAttestationStatus = detail.attestation;
+  const attestationTenant: string | null = attestationStatus.tenant;
   const publicKey: AttestationPublicKey = await client.attestationPublicKey();
   const envelope: ArtifactDownload = await client.downloadAttestation(
     submitted.job_id,
@@ -83,6 +84,7 @@ async function consume(): Promise<void> {
     cancelled,
     attestationCapabilities,
     attestationStatus,
+    attestationTenant,
     publicKey,
     envelope,
     resultArtifact,

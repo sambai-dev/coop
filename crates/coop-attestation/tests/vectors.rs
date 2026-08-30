@@ -29,15 +29,20 @@ fn frozen_v1_vector_reproduces_and_verifies() {
     )
     .unwrap();
     let receipt: Value = serde_json::from_str(RECEIPT).unwrap();
-    let statement =
-        build_statement("0191f8cf-57ef-7c14-a736-9b4b933eb84a", &subject, receipt).unwrap();
+    let statement = build_statement(
+        "tenant-vector",
+        "0191f8cf-57ef-7c14-a736-9b4b933eb84a",
+        &subject,
+        receipt,
+    )
+    .unwrap();
     let statement_bytes = encode_statement(&statement).unwrap();
-    assert_eq!(statement_bytes, strip_fixture_newline(STATEMENT.as_bytes()));
-
     let envelope = sign_statement(&statement, &[&signing_key])
         .unwrap()
         .to_json_bytes()
         .unwrap();
+    assert_eq!(statement_bytes, strip_fixture_newline(STATEMENT.as_bytes()));
+
     assert_eq!(envelope, strip_fixture_newline(ENVELOPE.as_bytes()));
 
     let verified = verify_attestation(
@@ -48,6 +53,7 @@ fn frozen_v1_vector_reproduces_and_verifies() {
     )
     .unwrap();
     assert_eq!(verified.statement_bytes(), statement_bytes);
+    assert_eq!(verified.statement().predicate().tenant(), "tenant-vector");
 }
 
 fn strip_fixture_newline(bytes: &[u8]) -> &[u8] {

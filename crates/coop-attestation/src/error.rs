@@ -116,6 +116,10 @@ pub enum AttestationError {
     #[error("authenticated result artifact {field} does not match the verifier policy")]
     SubjectPolicyMismatch { field: &'static str },
 
+    /// The authenticated execution tenant did not match caller policy.
+    #[error("authenticated execution tenant does not match the verifier policy")]
+    TenantPolicyMismatch,
+
     /// OS randomness was unavailable during key generation.
     #[error("operating-system randomness is unavailable")]
     RandomnessUnavailable,

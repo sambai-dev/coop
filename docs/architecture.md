@@ -66,7 +66,13 @@ then converges to an exact deterministic result artifact and signed envelope.
 This deliberately does not claim an impossible atomic signature across
 SQLite and a signer. Restart reseeds retained terminal jobs that have no
 attestation, while receipt-byte conditional persistence prevents signing one
-record and attaching it to another.
+record and attaching it to another. The signer sources tenant from the durable
+job row and binds it into both portable files; migrated v0.3 receipt bytes are
+not rewritten. Pending outbox work retains an exact 20 MiB logical reserve,
+including after restart reconstruction, until signing or an explicit waiver
+releases it. The revision-1 migration preserves exact tenant-bound
+attestations and quarantines/requeues older unbound files before API
+availability can expose them.
 
 “Replay” means retrieving the stored event history. It does not mean executing the code again or reproducing nondeterministic effects.
 

@@ -354,6 +354,7 @@ dependencies = [
  "coop-store",
  "coop-types",
  "dashmap",
+ "ed25519-dalek",
  "futures-util",
  "hmac",
  "hyper",
@@ -363,6 +364,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "subtle",
  "tokio",
  "tower",
@@ -378,6 +380,7 @@ dependencies = [
 name = "coop-store"
 version = "0.4.0"
 dependencies = [
+ "base64",
  "futures-util",
  "libc",
  "serde_json",

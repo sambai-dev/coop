@@ -92,6 +92,7 @@ does not permit a different schema under the same predicate URI.
 {
   "schemaVersion": 1,
   "executionId": "JOB_ID",
+  "tenant": "TENANT_ID",
   "result": {
     "name": "urn:coop:result:JOB_ID",
     "mediaType": "application/vnd.coop.execution-result.v1+json",
@@ -113,12 +114,21 @@ does not permit a different schema under the same predicate URI.
 }
 ```
 
-`executionId`, `result`, and `receipt` are required. `receipt` is the existing
+`executionId`, `tenant`, `result`, and `receipt` are required. `tenant` is the
+1–128 character authoritative owner identity read from the durable job row,
+not from a download request or receipt extension. `receipt` is the existing
 Coop v1 terminal receipt. Its `job_id` must equal `executionId`; its outcome,
-receipt SHA-256, and v1 event-chain core are structurally validated. The
-predicate uses lowerCamelCase following in-toto predicate guidance. The
-embedded receipt retains Coop's existing snake_case field names and may carry
-additional fields.
+receipt SHA-256, and v1 event-chain core are structurally validated. A receipt
+may omit tenant so v0.3 terminal rows remain byte-for-byte backfillable. If a
+receipt extension named `tenant` is present, it must equal the predicate
+tenant. The predicate uses lowerCamelCase following in-toto predicate
+guidance. The embedded receipt retains Coop's existing snake_case field names
+and may carry additional fields.
+
+Predicate v1 was finalized with required tenant binding before the first
+release of portable Coop attestations. No supported v0.3 release emitted this
+profile, so this closes the contract without creating an intentionally
+unbound legacy attestation variant.
 
 ### Coop receipt hash
 
@@ -196,9 +206,10 @@ The implementation never prints, logs, or embeds private key material.
 - configured trusted public keys: 16 maximum.
 - PEM key file: 16 KiB maximum.
 - embedded receipt JSON depth: 64 maximum.
+- authenticated tenant: 128 characters maximum.
 - embedded receipt complexity: 65,536 nodes and a 768 KiB conservative
   pre-normalization byte estimate.
-- offline CLI result-artifact file: 8 MiB maximum (the library supports
+- offline CLI result-artifact file: 16 MiB maximum (the library supports
   incremental precomputation for larger artifacts).
 
 The verifier therefore performs at most 512 Ed25519 key/signature attempts and

@@ -105,6 +105,7 @@ pub struct JobDetail {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct JobAttestationStatus {
     pub available: bool,
+    pub tenant: Option<String>,
     pub key_id: Option<String>,
     pub receipt_sha256: Option<String>,
     pub result_media_type: Option<String>,
@@ -1811,6 +1812,7 @@ fn job_detail(
         attestation: match attestation {
             Some(attestation) => JobAttestationStatus {
                 available: true,
+                tenant: Some(row.tenant.clone()),
                 key_id: Some(attestation.key_id.clone()),
                 receipt_sha256: Some(attestation.receipt_sha256.clone()),
                 result_media_type: Some(attestation.result_media_type.clone()),
@@ -1823,6 +1825,7 @@ fn job_detail(
             },
             None => JobAttestationStatus {
                 available: false,
+                tenant: None,
                 key_id: None,
                 receipt_sha256: None,
                 result_media_type: None,

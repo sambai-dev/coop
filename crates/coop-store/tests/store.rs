@@ -1,8 +1,10 @@
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use coop_store::{
     canonical_json, capacity_error_kind, compute_receipt_sha256, is_idempotency_conflict,
     CapacityErrorKind, CreateJobOutcome, IdempotencyLookup, IdempotencyRequest, JobCursor,
-    ListJobsQuery, PersistAttestationOutcome, StorageLimits, Store, JOB_COMPLETION_RESERVE_BYTES,
-    MAX_EVENT_BATCH_SIZE, MAX_RETENTION_EVENTS_PER_BATCH,
+    ListJobsQuery, PersistAttestationOutcome, StorageLimits, Store, ATTESTATION_RESERVE_BYTES,
+    JOB_COMPLETION_RESERVE_BYTES, MAX_EVENT_BATCH_SIZE, MAX_RETENTION_EVENTS_PER_BATCH,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -45,6 +47,116 @@ async fn total_charged_bytes(db: &Path) -> i64 {
             .unwrap();
     connection.close().await.unwrap();
     charged
+}
+
+async fn rewrite_accounting_guards_to_r1(
+    connection: &mut SqliteConnection,
+    owned_write_sentinel: i64,
+) {
+    sqlx::query("PRAGMA writable_schema = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE sqlite_schema
+         SET sql = replace(
+             replace(sql, 'coop-accounting-guard-r2', 'coop-accounting-guard-r1'),
+             'accounting_validation_revision != 3', ?1
+         )
+         WHERE type = 'trigger'
+           AND instr(sql, 'coop-accounting-guard-r2') > 0",
+    )
+    .bind(format!(
+        "accounting_validation_revision != {owned_write_sentinel}"
+    ))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query("PRAGMA writable_schema = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+}
+
+fn bound_attestation_bytes(
+    job_id: &str,
+    tenant: &str,
+    receipt_sha256: &str,
+    result_media_type: &str,
+    status: &str,
+) -> (Vec<u8>, Vec<u8>) {
+    let result = serde_json::to_vec(&json!({
+        "schema_version": 1,
+        "job_id": job_id,
+        "tenant": tenant,
+        "receipt_sha256": receipt_sha256,
+        "status": status,
+    }))
+    .unwrap();
+    let result_sha256 = format!("{:x}", Sha256::digest(&result));
+    let subject_name = format!("coop://jobs/{job_id}/result");
+    let statement = serde_json::to_vec(&json!({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{
+            "name": subject_name.clone(),
+            "digest": {"sha256": result_sha256.clone()},
+            "mediaType": result_media_type,
+        }],
+        "predicateType": "https://github.com/sambai-dev/coop/blob/main/crates/coop-attestation/FORMAT.md#predicate-v1",
+        "predicate": {
+            "schemaVersion": 1,
+            "executionId": job_id,
+            "tenant": tenant,
+            "result": {
+                "name": subject_name,
+                "mediaType": result_media_type,
+                "sizeBytes": result.len(),
+                "sha256": result_sha256,
+            },
+            "receipt": {
+                "job_id": job_id,
+                "receipt_sha256": receipt_sha256,
+            },
+        },
+    }))
+    .unwrap();
+    let envelope = serde_json::to_vec(&json!({
+        "payloadType": "application/vnd.in-toto+json",
+        "payload": BASE64_STANDARD.encode(statement),
+        "signatures": [{"keyid": "sha256:test", "sig": "AA=="}],
+    }))
+    .unwrap();
+    (result, envelope)
+}
+
+fn unbound_attestation_bytes(
+    job_id: &str,
+    tenant: &str,
+    receipt_sha256: &str,
+    result_media_type: &str,
+    status: &str,
+) -> (Vec<u8>, Vec<u8>) {
+    let (bound_result, bound_envelope) =
+        bound_attestation_bytes(job_id, tenant, receipt_sha256, result_media_type, status);
+    let mut result: serde_json::Value = serde_json::from_slice(&bound_result).unwrap();
+    result.as_object_mut().unwrap().remove("tenant");
+    let result = serde_json::to_vec(&result).unwrap();
+    let result_sha256 = format!("{:x}", Sha256::digest(&result));
+
+    let mut envelope: serde_json::Value = serde_json::from_slice(&bound_envelope).unwrap();
+    let payload = BASE64_STANDARD
+        .decode(envelope["payload"].as_str().unwrap())
+        .unwrap();
+    let mut statement: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    statement["predicate"]
+        .as_object_mut()
+        .unwrap()
+        .remove("tenant");
+    statement["subject"][0]["digest"]["sha256"] = json!(result_sha256.clone());
+    statement["predicate"]["result"]["sha256"] = json!(result_sha256);
+    statement["predicate"]["result"]["sizeBytes"] = json!(result.len());
+    envelope["payload"] = json!(BASE64_STANDARD.encode(serde_json::to_vec(&statement).unwrap()));
+    (result, serde_json::to_vec(&envelope).unwrap())
 }
 
 #[cfg(target_os = "macos")]
@@ -2041,6 +2153,7 @@ fn idempotency_accounting_rebuilds_on_restart_and_releases_on_expiry() {
         .execute(&mut connection)
         .await
         .unwrap();
+        rewrite_accounting_guards_to_r1(&mut connection, 2).await;
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT charged_bytes FROM storage_usage_total WHERE singleton = 1",
@@ -2158,6 +2271,410 @@ fn logical_storage_quota_is_atomic_tenant_scoped_and_reopen_safe() {
         drop(store);
         let reopened = Store::open_with_limits(&db, limits).await.unwrap();
         reopened.validate_integrity().await.unwrap();
+    });
+}
+
+#[test]
+fn restart_backfill_rebuilds_exact_reserve_and_preserves_quota_full_state() {
+    sqlx::test_block_on(async {
+        let db = test_db("attestation-reseed-quota");
+        let limits = StorageLimits::new(75 * 1024 * 1024, 50 * 1024 * 1024, 0);
+        let store = Store::open_with_limits(&db, limits).await.unwrap();
+        store
+            .create_job_with_event("legacy", "tenant-a", "python", "{}")
+            .await
+            .unwrap();
+        store
+            .finalize_with_event("legacy", "succeeded", Some(0), 1, None)
+            .await
+            .unwrap();
+        assert!(store.waive_pending_attestation("legacy").await.unwrap());
+        store
+            .create_job_with_event("queued", "tenant-b", "python", "{}")
+            .await
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open_with_limits(&db, limits).await.unwrap();
+        assert_eq!(
+            reopened.pending_attestation_job_ids(10).await.unwrap(),
+            vec!["legacy"]
+        );
+        let mut connection = raw_connection(&db).await;
+        let reserve: i64 = sqlx::query_scalar(
+            "SELECT reserved_bytes FROM job_storage_usage WHERE job_id = 'legacy'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(reserve as u64, ATTESTATION_RESERVE_BYTES);
+        let aggregates_match: i64 = sqlx::query_scalar(
+            "SELECT (SELECT charged_bytes FROM storage_usage_total WHERE singleton = 1)
+                    = (SELECT SUM(retained_bytes + reserved_bytes) FROM job_storage_usage)",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(aggregates_match, 1);
+        connection.close().await.unwrap();
+
+        let tenant_full = reopened
+            .create_job_with_event("tenant-full", "tenant-a", "python", "{}")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            capacity_error_kind(&tenant_full),
+            Some(CapacityErrorKind::Tenant)
+        );
+        let global_full = reopened
+            .create_job_with_event("global-full", "tenant-c", "python", "{}")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            capacity_error_kind(&global_full),
+            Some(CapacityErrorKind::Global)
+        );
+
+        assert!(reopened.waive_pending_attestation("legacy").await.unwrap());
+        reopened
+            .create_job_with_event("after-release", "tenant-c", "python", "{}")
+            .await
+            .unwrap();
+        reopened.validate_integrity().await.unwrap();
+    });
+}
+
+#[test]
+fn accounting_revision_upgrade_repairs_idempotency_bytes_and_pending_reserve() {
+    sqlx::test_block_on(async {
+        let db = test_db("attestation-reserve-revision-upgrade");
+        let tenant = "tenant-a";
+        let job_id = "historical";
+        let spec = "{}";
+        let request = IdempotencyRequest {
+            key: "historical-key".to_string(),
+            request_sha256: canonical_spec_sha256(spec),
+        };
+        let store = Store::open(&db).await.unwrap();
+        store
+            .create_job_with_event_idempotent(job_id, tenant, "python", spec, 256, Some(&request))
+            .await
+            .unwrap();
+        store
+            .finalize_with_event(job_id, "succeeded", Some(0), 1, None)
+            .await
+            .unwrap();
+        assert!(store.waive_pending_attestation(job_id).await.unwrap());
+        drop(store);
+
+        let mut connection = raw_connection(&db).await;
+        let retained_before_outbox: i64 =
+            sqlx::query_scalar("SELECT retained_bytes FROM job_storage_usage WHERE job_id = ?1")
+                .bind(job_id)
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        let mapping_bytes: i64 = sqlx::query_scalar(
+            "SELECT 64
+                  + length(CAST(tenant AS BLOB))
+                  + length(CAST(idempotency_key AS BLOB))
+                  + length(CAST(request_sha256 AS BLOB))
+                  + length(CAST(job_id AS BLOB))
+             FROM idempotency_keys WHERE job_id = ?1",
+        )
+        .bind(job_id)
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        let row_revision: i64 = sqlx::query_scalar(
+            "SELECT row_validation_revision FROM store_integrity WHERE singleton = 1",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO attestation_outbox(
+                 job_id, pending_since_ms, attempt_count, next_attempt_ms
+             ) VALUES (?1, 1, 0, 1)",
+        )
+        .bind(job_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE job_storage_usage
+             SET retained_bytes = retained_bytes
+                 + 64 + length(CAST(job_id AS BLOB)) - ?2,
+                 reserved_bytes = 0
+             WHERE job_id = ?1",
+        )
+        .bind(job_id)
+        .bind(mapping_bytes)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        // Recreate the clean revision emitted by the prior implementation's
+        // buggy rebuild. It omitted both durable idempotency-row bytes and the
+        // pending terminal reserve. Revision 2 must repair both in one trusted
+        // revision-1 upgrade; genuinely dirty revision 0 still fails closed.
+        sqlx::query(
+            "UPDATE store_integrity
+             SET row_validation_revision = ?1,
+                 accounting_validation_revision = 1
+             WHERE singleton = 1",
+        )
+        .bind(row_revision)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        // The previous clean revision also used the r1 trigger definitions
+        // and transaction-local accounting sentinel 2. Reproduce that exact
+        // on-disk generation so the compatibility path cannot be accidental.
+        rewrite_accounting_guards_to_r1(&mut connection, 2).await;
+        connection.close().await.unwrap();
+
+        let repaired = Store::open(&db).await.unwrap();
+        let mut connection = raw_connection(&db).await;
+        let row = sqlx::query(
+            "SELECT usage.retained_bytes, usage.reserved_bytes,
+                    total.charged_bytes AS total_bytes,
+                    tenant_usage.charged_bytes AS tenant_bytes,
+                    integrity.accounting_validation_revision,
+                    integrity.full_scan_count
+             FROM job_storage_usage AS usage
+             CROSS JOIN storage_usage_total AS total
+             INNER JOIN tenant_storage_usage AS tenant_usage
+                ON tenant_usage.tenant = usage.tenant
+             CROSS JOIN store_integrity AS integrity
+             WHERE usage.job_id = ?1 AND total.singleton = 1
+               AND integrity.singleton = 1",
+        )
+        .bind(job_id)
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.get::<i64, _>("reserved_bytes") as u64,
+            ATTESTATION_RESERVE_BYTES
+        );
+        let expected_retained = retained_before_outbox + 64 + job_id.len() as i64;
+        assert_eq!(row.get::<i64, _>("retained_bytes"), expected_retained);
+        let expected_charged = expected_retained + ATTESTATION_RESERVE_BYTES as i64;
+        assert_eq!(row.get::<i64, _>("total_bytes"), expected_charged);
+        assert_eq!(row.get::<i64, _>("tenant_bytes"), expected_charged);
+        assert_eq!(row.get::<i64, _>("accounting_validation_revision"), 2);
+        let full_scan_count = row.get::<i64, _>("full_scan_count");
+        connection.close().await.unwrap();
+        assert_eq!(
+            repaired.lookup_idempotency(tenant, &request).await.unwrap(),
+            IdempotencyLookup::Replay {
+                job_id: job_id.to_string()
+            }
+        );
+        assert_eq!(
+            repaired.pending_attestation_job_ids(10).await.unwrap(),
+            vec![job_id]
+        );
+        drop(repaired);
+
+        let reopened = Store::open(&db).await.unwrap();
+        let mut connection = raw_connection(&db).await;
+        let reopened_full_scan_count: i64 =
+            sqlx::query_scalar("SELECT full_scan_count FROM store_integrity WHERE singleton = 1")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        assert_eq!(reopened_full_scan_count, full_scan_count);
+        connection.close().await.unwrap();
+        reopened.validate_integrity().await.unwrap();
+    });
+}
+
+#[test]
+fn mismatched_revision_two_and_revision_one_guards_never_take_the_fast_path() {
+    sqlx::test_block_on(async {
+        let db = test_db("accounting-generation-mismatch");
+        let store = Store::open(&db).await.unwrap();
+        store
+            .create_job_with_event("mismatch", "tenant-a", "python", "{}")
+            .await
+            .unwrap();
+        drop(store);
+
+        let mut connection = raw_connection(&db).await;
+        rewrite_accounting_guards_to_r1(&mut connection, 2).await;
+        connection.close().await.unwrap();
+
+        // Reopen SQLite so it loads the rewritten exact r1/sentinel-2 trigger
+        // generation, then mutate the ledger. With marker 2 those dirty
+        // triggers deliberately do not change the revision; only coherent
+        // generation/revision gating can keep this state off the fast path.
+        let mut connection = raw_connection(&db).await;
+        sqlx::query(
+            "UPDATE job_storage_usage
+             SET retained_bytes = retained_bytes + 1 WHERE job_id = 'mismatch'",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        let revision: i64 = sqlx::query_scalar(
+            "SELECT accounting_validation_revision FROM store_integrity WHERE singleton = 1",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(revision, 2);
+        connection.close().await.unwrap();
+
+        let error = Store::open(&db).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("logical storage accounting disagrees with retained rows"),
+            "mismatched trigger generation was not fully validated: {error}"
+        );
+    });
+}
+
+#[test]
+fn trusted_predecessors_quarantine_unbound_attestation_once() {
+    sqlx::test_block_on(async {
+        for (label, accounting_revision, owned_write_sentinel) in [
+            ("unbound-attestation-revision-one", 1_i64, 2_i64),
+            ("unbound-attestation-storage-only-r2", 2_i64, 3_i64),
+        ] {
+            let db = test_db(label);
+            let store = Store::open(&db).await.unwrap();
+            store
+                .create_job_with_event("legacy-evidence", "tenant-a", "python", "{}")
+                .await
+                .unwrap();
+            store
+                .finalize_with_event("legacy-evidence", "succeeded", Some(0), 1, None)
+                .await
+                .unwrap();
+            let receipt_json = store
+                .get_job("legacy-evidence")
+                .await
+                .unwrap()
+                .unwrap()
+                .receipt_json
+                .unwrap();
+            let receipt: serde_json::Value = serde_json::from_str(&receipt_json).unwrap();
+            let receipt_sha256 = receipt["receipt_sha256"].as_str().unwrap();
+            drop(store);
+
+            let result_media_type = "application/vnd.coop.execution-result.v1+json";
+            let (result, envelope) = unbound_attestation_bytes(
+                "legacy-evidence",
+                "tenant-a",
+                receipt_sha256,
+                result_media_type,
+                "succeeded",
+            );
+            let result_sha256 = format!("{:x}", Sha256::digest(&result));
+            let envelope_sha256 = format!("{:x}", Sha256::digest(&envelope));
+            let mut connection = raw_connection(&db).await;
+            let row_revision: i64 = sqlx::query_scalar(
+                "SELECT row_validation_revision FROM store_integrity WHERE singleton = 1",
+            )
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO job_attestations(
+                 job_id, receipt_sha256, result_media_type, result_artifact,
+                 result_sha256, envelope_json, envelope_sha256, key_id, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'sha256:legacy', 1)",
+            )
+            .bind("legacy-evidence")
+            .bind(receipt_sha256)
+            .bind(result_media_type)
+            .bind(&result)
+            .bind(&result_sha256)
+            .bind(&envelope)
+            .bind(&envelope_sha256)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+            sqlx::query("DELETE FROM attestation_outbox WHERE job_id = 'legacy-evidence'")
+                .execute(&mut connection)
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE job_storage_usage
+             SET retained_bytes = retained_bytes
+                 - (64 + length(CAST(job_id AS BLOB)))
+                 + (SELECT 64
+                      + length(CAST(attestation.job_id AS BLOB))
+                      + length(CAST(attestation.receipt_sha256 AS BLOB))
+                      + length(CAST(attestation.result_media_type AS BLOB))
+                      + length(attestation.result_artifact)
+                      + length(CAST(attestation.result_sha256 AS BLOB))
+                      + length(attestation.envelope_json)
+                      + length(CAST(attestation.envelope_sha256 AS BLOB))
+                      + length(CAST(attestation.key_id AS BLOB))
+                    FROM job_attestations AS attestation
+                    WHERE attestation.job_id = job_storage_usage.job_id),
+                 reserved_bytes = 0
+             WHERE job_id = 'legacy-evidence'",
+            )
+            .execute(&mut connection)
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE store_integrity
+             SET row_validation_revision = ?1,
+                 accounting_validation_revision = ?2
+             WHERE singleton = 1",
+            )
+            .bind(row_revision)
+            .bind(accounting_revision)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+            rewrite_accounting_guards_to_r1(&mut connection, owned_write_sentinel).await;
+            connection.close().await.unwrap();
+
+            let reopened = Store::open(&db).await.unwrap();
+            assert!(reopened
+                .get_attestation("legacy-evidence")
+                .await
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                reopened.pending_attestation_job_ids(10).await.unwrap(),
+                vec!["legacy-evidence"]
+            );
+            let mut connection = raw_connection(&db).await;
+            let reserve: i64 = sqlx::query_scalar(
+                "SELECT reserved_bytes FROM job_storage_usage WHERE job_id = 'legacy-evidence'",
+            )
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+            assert_eq!(reserve as u64, ATTESTATION_RESERVE_BYTES);
+            let full_scan_count: i64 = sqlx::query_scalar(
+                "SELECT full_scan_count FROM store_integrity WHERE singleton = 1",
+            )
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+            connection.close().await.unwrap();
+
+            drop(reopened);
+            let reopened = Store::open(&db).await.unwrap();
+            let mut connection = raw_connection(&db).await;
+            let reopened_full_scan_count: i64 = sqlx::query_scalar(
+                "SELECT full_scan_count FROM store_integrity WHERE singleton = 1",
+            )
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+            assert_eq!(reopened_full_scan_count, full_scan_count);
+            connection.close().await.unwrap();
+            reopened.validate_integrity().await.unwrap();
+        }
     });
 }
 
@@ -2766,6 +3283,33 @@ fn schema_v3_migrates_to_v4_and_current_markers_fail_closed_on_partial_attestati
             migrated.pending_attestation_job_ids(10).await.unwrap(),
             vec!["legacy-terminal"]
         );
+        let mut connection = raw_connection(&db).await;
+        let ledger = sqlx::query(
+            "SELECT usage.retained_bytes, usage.reserved_bytes,
+                    total.charged_bytes AS global_bytes,
+                    tenant.charged_bytes AS tenant_bytes
+             FROM job_storage_usage AS usage
+             CROSS JOIN storage_usage_total AS total
+             INNER JOIN tenant_storage_usage AS tenant ON tenant.tenant = usage.tenant
+             WHERE usage.job_id = 'legacy-terminal' AND total.singleton = 1",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        let retained = ledger.get::<i64, _>("retained_bytes");
+        assert_eq!(
+            ledger.get::<i64, _>("reserved_bytes") as u64,
+            ATTESTATION_RESERVE_BYTES
+        );
+        assert_eq!(
+            ledger.get::<i64, _>("global_bytes"),
+            retained + ATTESTATION_RESERVE_BYTES as i64
+        );
+        assert_eq!(
+            ledger.get::<i64, _>("tenant_bytes"),
+            retained + ATTESTATION_RESERVE_BYTES as i64
+        );
+        connection.close().await.unwrap();
         drop(migrated);
 
         let mut connection = raw_connection(&db).await;
@@ -2816,19 +3360,59 @@ fn terminal_outbox_and_exact_attestation_persistence_are_idempotent_immutable_an
             .unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&receipt_json).unwrap();
         let receipt_sha256 = receipt["receipt_sha256"].as_str().unwrap();
-        let result = br#"{"job_id":"attested","status":"succeeded"}"#;
-        let result_sha256 = format!("{:x}", Sha256::digest(result));
-        let envelope = br#"{"payload":"c3RhdGVtZW50","payloadType":"application/vnd.in-toto+json","signatures":[]}"#;
-        let envelope_sha256 = format!("{:x}", Sha256::digest(envelope));
+        let result_media_type = "application/vnd.coop.execution-result.v1+json";
+        let (unbound_result, unbound_envelope) = unbound_attestation_bytes(
+            "attested",
+            "tenant-a",
+            receipt_sha256,
+            result_media_type,
+            "succeeded",
+        );
+        let unbound_result_sha256 = format!("{:x}", Sha256::digest(&unbound_result));
+        let unbound_envelope_sha256 = format!("{:x}", Sha256::digest(&unbound_envelope));
+        let unbound_error = store
+            .persist_attestation(
+                "attested",
+                &receipt_json,
+                receipt_sha256,
+                result_media_type,
+                &unbound_result,
+                &unbound_result_sha256,
+                &unbound_envelope,
+                &unbound_envelope_sha256,
+                "sha256:test-key",
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            unbound_error
+                .to_string()
+                .contains("authoritative job tenant"),
+            "{unbound_error}"
+        );
+        assert_eq!(
+            store.pending_attestation_job_ids(10).await.unwrap(),
+            vec!["attested"]
+        );
+
+        let (result, envelope) = bound_attestation_bytes(
+            "attested",
+            "tenant-a",
+            receipt_sha256,
+            result_media_type,
+            "succeeded",
+        );
+        let result_sha256 = format!("{:x}", Sha256::digest(&result));
+        let envelope_sha256 = format!("{:x}", Sha256::digest(&envelope));
         let outcome = store
             .persist_attestation(
                 "attested",
                 &receipt_json,
                 receipt_sha256,
-                "application/vnd.coop.execution-result.v1+json",
-                result,
+                result_media_type,
+                &result,
                 &result_sha256,
-                envelope,
+                &envelope,
                 &envelope_sha256,
                 "sha256:test-key",
             )
@@ -2850,10 +3434,10 @@ fn terminal_outbox_and_exact_attestation_persistence_are_idempotent_immutable_an
                 "attested",
                 &receipt_json,
                 receipt_sha256,
-                "application/vnd.coop.execution-result.v1+json",
-                result,
+                result_media_type,
+                &result,
                 &result_sha256,
-                envelope,
+                &envelope,
                 &envelope_sha256,
                 "sha256:test-key",
             )
@@ -2870,13 +3454,35 @@ fn terminal_outbox_and_exact_attestation_persistence_are_idempotent_immutable_an
                 "application/vnd.coop.execution-result.v1+json",
                 different,
                 &different_sha,
-                envelope,
+                &envelope,
                 &envelope_sha256,
                 "sha256:test-key",
             )
             .await
             .unwrap_err();
         assert!(error.to_string().contains("immutable"), "{error}");
+
+        drop(store);
+        let mut connection = raw_connection(&db).await;
+        sqlx::query(
+            "UPDATE store_integrity
+             SET accounting_validation_revision = 1
+             WHERE singleton = 1",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        rewrite_accounting_guards_to_r1(&mut connection, 2).await;
+        connection.close().await.unwrap();
+        let store = Store::open(&db).await.unwrap();
+        let preserved = store.get_attestation("attested").await.unwrap().unwrap();
+        assert_eq!(preserved.result_artifact, result);
+        assert_eq!(preserved.envelope_json, envelope);
+        assert!(store
+            .pending_attestation_job_ids(10)
+            .await
+            .unwrap()
+            .is_empty());
 
         let (jobs, _) = store.prune_older_than(0).await.unwrap();
         assert_eq!(jobs, 1);
@@ -2906,19 +3512,25 @@ fn raw_attestation_byte_tampering_dirties_validation_and_fails_reopen() {
             .unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&receipt_json).unwrap();
         let receipt_sha256 = receipt["receipt_sha256"].as_str().unwrap();
-        let result = br#"{"ok":true}"#;
-        let result_sha256 = format!("{:x}", Sha256::digest(result));
-        let envelope = br#"{"payload":"e30=","payloadType":"x","signatures":[]}"#;
-        let envelope_sha256 = format!("{:x}", Sha256::digest(envelope));
+        let result_media_type = "application/json";
+        let (result, envelope) = bound_attestation_bytes(
+            "job",
+            "tenant-a",
+            receipt_sha256,
+            result_media_type,
+            "succeeded",
+        );
+        let result_sha256 = format!("{:x}", Sha256::digest(&result));
+        let envelope_sha256 = format!("{:x}", Sha256::digest(&envelope));
         store
             .persist_attestation(
                 "job",
                 &receipt_json,
                 receipt_sha256,
-                "application/json",
-                result,
+                result_media_type,
+                &result,
                 &result_sha256,
-                envelope,
+                &envelope,
                 &envelope_sha256,
                 "sha256:test",
             )

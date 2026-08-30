@@ -87,7 +87,7 @@
     },
     "predicate": {
       "type": "object",
-      "required": ["schemaVersion", "executionId", "result", "receipt"],
+      "required": ["schemaVersion", "executionId", "tenant", "result", "receipt"],
       "properties": {
         "schemaVersion": {
           "const": 1
@@ -96,6 +96,12 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
           "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
         },
         "result": {

@@ -140,6 +140,7 @@ class FakeCoop:
             raise self.result_error
         return {
             "job_id": job_id,
+            "tenant": "tenant-a",
             "status": "succeeded",
             "exit_code": 0,
             "stdout": "42",
@@ -153,6 +154,7 @@ class FakeCoop:
             return {"job_id": job_id, "status": "running"}
         return {
             "job_id": job_id,
+            "tenant": "tenant-a",
             "status": "succeeded",
             "effective_spec": {
                 "language": "python",
@@ -169,6 +171,7 @@ class FakeCoop:
             "receipt_sha256": "a" * 64,
             "attestation": {
                 "available": True,
+                "tenant": "tenant-a",
                 "key_id": "ed25519:test",
                 "receipt_sha256": "a" * 64,
                 "result_media_type": "application/vnd.coop.execution-result.v1+json",
@@ -444,6 +447,7 @@ class McpTests(unittest.TestCase):
         self.assertEqual(run["execution"]["taskSupport"], "optional")
         self.assertIn("outputSchema", run)
         attestation_schema = run["outputSchema"]["properties"]["attestation"]
+        self.assertIn("tenant", attestation_schema["properties"])
         self.assertIn("envelope_sha256", attestation_schema["properties"])
         self.assertNotIn("content", attestation_schema["properties"])
 
@@ -486,12 +490,14 @@ class McpTests(unittest.TestCase):
         )
         self.assertFalse(result["isError"])
         self.assertEqual(result["structuredContent"]["job_id"], "job-1")
+        self.assertEqual(result["structuredContent"]["tenant"], "tenant-a")
         self.assertEqual(result["structuredContent"]["stdout"], "42")
         self.assertTrue(result["structuredContent"]["complete"])
         self.assertEqual(result["structuredContent"]["receipt_sha256"], "a" * 64)
         self.assertTrue(result["structuredContent"]["receipt"]["bootstrap_ready"])
         attestation = result["structuredContent"]["attestation"]
         self.assertTrue(attestation["available"])
+        self.assertEqual(attestation["tenant"], "tenant-a")
         self.assertEqual(attestation["key_id"], "ed25519:test")
         self.assertEqual(attestation["envelope_sha256"], "c" * 64)
         self.assertNotIn("content", attestation)

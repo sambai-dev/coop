@@ -41,4 +41,6 @@ jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]
+ed25519-dalek = { workspace = true }
 jsonwebtoken = { workspace = true, features = ["use_pem"] }
+sqlx = { workspace = true }

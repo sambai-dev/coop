@@ -391,9 +391,10 @@ class JobDetail(JobView):
 
 
 class JobAttestationStatus(TypedDict):
-    """Availability and immutable digests for a job's signed evidence."""
+    """Availability, bound tenant, and immutable signed-evidence digests."""
 
     available: bool
+    tenant: Optional[str]
     key_id: Optional[str]
     receipt_sha256: Optional[str]
     result_media_type: Optional[str]

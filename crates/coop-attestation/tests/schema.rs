@@ -11,6 +11,7 @@ fn statement() -> Value {
     )
     .unwrap();
     let statement = build_statement(
+        "tenant-schema",
         "schema-test",
         &subject,
         json!({
@@ -45,6 +46,13 @@ fn schema_rejects_wrong_known_fields_and_permits_monotonic_extensions() {
     let mut wrong_type = statement();
     wrong_type["predicate"]["schemaVersion"] = Value::from(2);
     assert!(!validator.is_valid(&wrong_type));
+
+    let mut missing_tenant = statement();
+    missing_tenant["predicate"]
+        .as_object_mut()
+        .unwrap()
+        .remove("tenant");
+    assert!(!validator.is_valid(&missing_tenant));
 
     let mut wrong_digest = statement();
     wrong_digest["subject"][0]["digest"]["sha256"] = Value::String("ABC".into());

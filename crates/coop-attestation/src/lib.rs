@@ -3,7 +3,7 @@
 //! The crate defines a deliberately narrow profile:
 //!
 //! - one in-toto [`StatementV1`] subject, identified by SHA-256;
-//! - one versioned [`CoopExecutionPredicateV1`] containing a Coop receipt;
+//! - one tenant-bound [`CoopExecutionPredicateV1`] containing a Coop receipt;
 //! - JSON DSSE with v1 pre-authentication encoding (PAE);
 //! - strict Ed25519 signing and verification against configured public keys;
 //! - signature verification before statement JSON parsing.

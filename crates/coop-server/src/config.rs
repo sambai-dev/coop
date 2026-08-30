@@ -649,6 +649,7 @@ impl Config {
                 if tenant.is_empty() {
                     return Err("COOP_API_KEYS contains a blank tenant".to_string());
                 }
+                crate::auth::validate_identity("legacy COOP_API_KEYS tenant", tenant)?;
                 if key.is_empty() {
                     return Err(format!(
                         "COOP_API_KEYS contains a blank key for tenant {tenant:?}"
@@ -1328,6 +1329,51 @@ mod tests {
                 "{raw}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_tenants_share_the_indexed_identity_contract() {
+        let too_long = "t".repeat(129);
+        for tenant in [
+            "tenant with space",
+            "tenant-é",
+            "tenant\ncontrol",
+            "tenant\"quote",
+            "tenant\\slash",
+            too_long.as_str(),
+        ] {
+            let raw = format!("{tenant}:correct-horse-battery-staple");
+            let error = Config::from_sources(
+                &source(&[
+                    ("COOP_API_KEYS", raw.as_str()),
+                    ("COOP_ATTESTATION_MODE", "off"),
+                ]),
+                true,
+            )
+            .expect_err(tenant);
+            assert!(
+                error.contains("1-128 safe printable ASCII"),
+                "{tenant:?}: {error}"
+            );
+        }
+
+        let maximum = "t".repeat(128);
+        let raw = format!("{maximum}:correct-horse-battery-staple");
+        let config = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", raw.as_str()),
+                ("COOP_ATTESTATION_MODE", "off"),
+            ]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            config
+                .api_keys
+                .get("correct-horse-battery-staple")
+                .map(String::as_str),
+            Some(maximum.as_str())
+        );
     }
 
     #[test]

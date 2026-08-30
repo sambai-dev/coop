@@ -106,6 +106,7 @@ LIMITS_SCHEMA = _object_schema(
 ATTESTATION_STATUS_SCHEMA = _object_schema(
     {
         "available": {"type": "boolean"},
+        "tenant": {"type": ["string", "null"]},
         "key_id": {"type": ["string", "null"]},
         "receipt_sha256": {"type": ["string", "null"]},
         "result_media_type": {"type": ["string", "null"]},
@@ -118,6 +119,7 @@ ATTESTATION_STATUS_SCHEMA = _object_schema(
     },
     (
         "available",
+        "tenant",
         "key_id",
         "receipt_sha256",
         "result_media_type",
@@ -134,6 +136,7 @@ RUN_OUTPUT_SCHEMA: JsonObject = {
     "type": "object",
     "properties": {
         "job_id": {"type": "string"},
+        "tenant": {"type": ["string", "null"]},
         "status": {"type": ["string", "null"]},
         "complete": {"type": "boolean"},
         "exit_code": {"type": ["integer", "null"]},
@@ -191,7 +194,7 @@ TOOLS: List[JsonObject] = [
         "description": (
             "Run one short Python, Node.js, or Bash job under Coop policy and return "
             "its bounded stdout, stderr, terminal status, violations, job ID, and "
-            "evidence receipt plus signed-attestation availability metadata. Use this "
+            "evidence receipt plus tenant-bound signed-attestation availability metadata. Use this "
             "instead of a local shell for generated or "
             "untrusted snippets. It is stateless: files and installed packages do not "
             "carry into the next call."
@@ -1349,6 +1352,7 @@ class CoopMcpServer:
     def _attach_evidence(self, result: JsonObject, job_id: str) -> None:
         detail = _json_object(self.client.get(job_id))
         for field in (
+            "tenant",
             "effective_spec",
             "execution_policy",
             "receipt",

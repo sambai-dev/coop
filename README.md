@@ -79,7 +79,7 @@ the run ended. Evidence survives failure, timeout, OOM, and cancellation.
 - stdlib-only Python and dependency-free TypeScript clients
 - a dependency-free, concurrent `coop-mcp` stdio server supporting MCP 2026 Tasks and legacy hosts
 
-The event chain remains server-verifiable operational evidence. A signed envelope additionally proves that the configured Coop key asserted the exact receipt and result digest. It does **not** prove deterministic re-execution, trusted hardware, remote attestation, or WORM storage; distribute or pin the public key out of band rather than trusting its API `key_id` hint.
+The event chain remains server-verifiable operational evidence. A signed envelope additionally proves that the configured Coop key asserted the authoritative tenant, exact receipt, and result digest. It does **not** prove deterministic re-execution, trusted hardware, remote attestation, or WORM storage; distribute or pin the public key out of band rather than trusting its API `key_id` hint.
 
 ## Try it locally (trusted code)
 
@@ -215,12 +215,15 @@ curl --fail-with-body -H "Authorization: Bearer $COOP_CLIENT_KEY" \
 coop-verify verify \
   --envelope job.dsse.json \
   --subject job-result.json \
-  --public-key coop-attestation.pub.pem
+  --public-key coop-attestation.pub.pem \
+  --tenant TENANT_ID
 ```
 
 `/v1/attestation/public-key` exposes the current public key for discovery, but
 its own trust notice is important: fetching a key from the same server is not
-independent key distribution.
+independent key distribution. The predicate and exact result both bind the
+authoritative tenant; pass the tenant expected by your workflow to
+`coop-verify` rather than trusting a value copied from downloaded JSON.
 
 PowerShell local-development equivalent:
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
@@ -153,6 +154,7 @@ class IsolationVerificationTests(unittest.TestCase):
 
     def test_attested_result_downloads_remain_exact_and_digest_bound(self) -> None:
         job_id = "job-1"
+        tenant = "tenant-a"
         receipt_sha256 = "a" * 64
         result = {
             "status": "succeeded",
@@ -166,15 +168,25 @@ class IsolationVerificationTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "job_id": job_id,
+                "tenant": tenant,
                 "receipt_sha256": receipt_sha256,
                 **result,
+            },
+            separators=(",", ":"),
+        ).encode()
+        statement = json.dumps(
+            {
+                "predicate": {
+                    "executionId": job_id,
+                    "tenant": tenant,
+                }
             },
             separators=(",", ":"),
         ).encode()
         envelope = json.dumps(
             {
                 "payloadType": "application/vnd.in-toto+json",
-                "payload": "e30=",
+                "payload": base64.b64encode(statement).decode(),
                 "signatures": [{"keyid": "sha256:key", "sig": "AA=="}],
             },
             separators=(",", ":"),
@@ -182,9 +194,11 @@ class IsolationVerificationTests(unittest.TestCase):
         artifact_digest = hashlib.sha256(artifact).hexdigest()
         envelope_digest = hashlib.sha256(envelope).hexdigest()
         detail = {
+            "tenant": tenant,
             "receipt_sha256": receipt_sha256,
             "attestation": {
                 "available": True,
+                "tenant": tenant,
                 "key_id": "sha256:key",
                 "receipt_sha256": receipt_sha256,
                 "result_sha256": artifact_digest,
@@ -223,6 +237,7 @@ class IsolationVerificationTests(unittest.TestCase):
                 self.calls.append((exact_envelope, exact_artifact))
                 assert policy == {
                     "execution_id": job_id,
+                    "tenant": tenant,
                     "subject_name": f"coop://jobs/{job_id}/result",
                     "media_type": "application/vnd.coop.execution-result.v1+json",
                     "outcome": "succeeded",
@@ -234,6 +249,7 @@ class IsolationVerificationTests(unittest.TestCase):
         status = verify.verify_attested_result(
             FakeApi(),
             job_id,
+            tenant,
             detail,
             result,
             {"key_id": "sha256:key"},
@@ -249,7 +265,21 @@ class IsolationVerificationTests(unittest.TestCase):
             verify.verify_attested_result(
                 FakeApi(),
                 job_id,
+                tenant,
                 broken,
+                result,
+                {"key_id": "sha256:key"},
+                offline,
+            )
+
+        wrong_tenant = json.loads(json.dumps(detail))
+        wrong_tenant["attestation"]["tenant"] = "tenant-b"
+        with self.assertRaisesRegex(verify.VerificationError, "metadata tenant differs"):
+            verify.verify_attested_result(
+                FakeApi(),
+                job_id,
+                tenant,
+                wrong_tenant,
                 result,
                 {"key_id": "sha256:key"},
                 offline,
@@ -283,12 +313,17 @@ class IsolationVerificationTests(unittest.TestCase):
                 self.assertEqual(subject_path.read_bytes(), subject)
                 self.assertEqual(pinned_path, public_key.resolve())
                 self.assertEqual(
+                    command[command.index("--tenant") + 1],
+                    "tenant-exact",
+                )
+                self.assertEqual(
                     command[command.index("--subject-name") + 1],
                     "coop://jobs/job-exact/result",
                 )
                 output = {
                     "verified": True,
                     "execution_id": "job-exact",
+                    "tenant": "tenant-exact",
                     "subject_name": "coop://jobs/job-exact/result",
                     "subject_media_type": "application/vnd.coop.execution-result.v1+json",
                     "subject_sha256": hashlib.sha256(subject).hexdigest(),
@@ -306,6 +341,7 @@ class IsolationVerificationTests(unittest.TestCase):
                     envelope,
                     subject,
                     execution_id="job-exact",
+                    tenant="tenant-exact",
                     subject_name="coop://jobs/job-exact/result",
                     media_type="application/vnd.coop.execution-result.v1+json",
                     outcome="succeeded",
@@ -339,6 +375,7 @@ class IsolationVerificationTests(unittest.TestCase):
                     b"{}",
                     b"{}",
                     execution_id="job-1",
+                    tenant="tenant-a",
                     subject_name="coop://jobs/job-1/result",
                     media_type="application/vnd.coop.execution-result.v1+json",
                     outcome="succeeded",
@@ -373,9 +410,14 @@ class IsolationVerificationTests(unittest.TestCase):
                     command[image_index + 1 : image_index + 3],
                     ["/usr/local/bin/coop-verify", "verify"],
                 )
+                self.assertEqual(
+                    command[command.index("--tenant") + 1],
+                    "tenant-container",
+                )
                 output = {
                     "verified": True,
                     "execution_id": "job-container",
+                    "tenant": "tenant-container",
                     "subject_name": "coop://jobs/job-container/result",
                     "subject_media_type": "application/vnd.coop.execution-result.v1+json",
                     "subject_sha256": hashlib.sha256(subject).hexdigest(),
@@ -395,10 +437,50 @@ class IsolationVerificationTests(unittest.TestCase):
                     b"exact envelope",
                     subject,
                     execution_id="job-container",
+                    tenant="tenant-container",
                     subject_name="coop://jobs/job-container/result",
                     media_type="application/vnd.coop.execution-result.v1+json",
                     outcome="succeeded",
                     expected_key_id=key_id,
+                )
+
+    def test_offline_verifier_rejects_wrong_authenticated_tenant_output(self) -> None:
+        subject = b"exact subject"
+        with tempfile.TemporaryDirectory() as raw_temp:
+            public_key = Path(raw_temp) / "operator-pinned.pem"
+            public_key.write_text("test public key", encoding="utf-8")
+            packaged_binary = str((Path(raw_temp) / "coop-verify.exe").resolve())
+            runner = verify.OfflineVerifier(
+                str(public_key.resolve()), binary=packaged_binary
+            )
+            output = {
+                "verified": True,
+                "execution_id": "job-tenant",
+                "tenant": "tenant-b",
+                "subject_name": "coop://jobs/job-tenant/result",
+                "subject_media_type": "application/vnd.coop.execution-result.v1+json",
+                "subject_sha256": hashlib.sha256(subject).hexdigest(),
+                "subject_size_bytes": len(subject),
+                "outcome": "succeeded",
+                "event_chain_complete": True,
+                "verified_key_ids": ["sha256:key"],
+            }
+            completed = subprocess.CompletedProcess(
+                [packaged_binary], 0, json.dumps(output).encode(), b""
+            )
+            with (
+                mock.patch.object(verify.subprocess, "run", return_value=completed),
+                self.assertRaisesRegex(verify.VerificationError, "tenant differs"),
+            ):
+                runner.verify(
+                    b"exact envelope",
+                    subject,
+                    execution_id="job-tenant",
+                    tenant="tenant-a",
+                    subject_name="coop://jobs/job-tenant/result",
+                    media_type="application/vnd.coop.execution-result.v1+json",
+                    outcome="succeeded",
+                    expected_key_id="sha256:key",
                 )
 
     def test_container_verifier_rejects_mutable_image_tags(self) -> None:

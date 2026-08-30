@@ -32,6 +32,7 @@ pub const MAX_SIGNATURES: usize = 32;
 pub const MAX_TRUSTED_KEYS: usize = 16;
 
 const MAX_EXECUTION_ID_CHARS: usize = 256;
+const MAX_TENANT_CHARS: usize = 128;
 const MAX_SUBJECT_NAME_CHARS: usize = 1024;
 const MAX_MEDIA_TYPE_BYTES: usize = 255;
 const MAX_KEY_ID_HINT_BYTES: usize = 256;
@@ -221,6 +222,7 @@ impl CoopResultDescriptorV1 {
 pub struct CoopExecutionPredicateV1 {
     schema_version: u32,
     execution_id: String,
+    tenant: String,
     result: CoopResultDescriptorV1,
     receipt: Value,
 }
@@ -234,6 +236,11 @@ impl CoopExecutionPredicateV1 {
     /// Stable Coop execution/job identifier supplied by the control plane.
     pub fn execution_id(&self) -> &str {
         &self.execution_id
+    }
+
+    /// Authenticated tenant that authoritatively owned the execution.
+    pub fn tenant(&self) -> &str {
+        &self.tenant
     }
 
     /// Authenticated result descriptor.
@@ -253,6 +260,7 @@ impl fmt::Debug for CoopExecutionPredicateV1 {
             .debug_struct("CoopExecutionPredicateV1")
             .field("schema_version", &self.schema_version)
             .field("execution_id", &self.execution_id)
+            .field("tenant", &self.tenant)
             .field("result", &self.result)
             .field("receipt", &"[REDACTED]")
             .finish()
@@ -400,6 +408,7 @@ struct WireCoopResultDescriptorV1 {
 struct WireCoopExecutionPredicateV1 {
     schema_version: u32,
     execution_id: String,
+    tenant: String,
     result: WireCoopResultDescriptorV1,
     receipt: Value,
 }
@@ -487,6 +496,7 @@ impl From<WireStatementV1> for StatementV1 {
             predicate: CoopExecutionPredicateV1 {
                 schema_version: wire.predicate.schema_version,
                 execution_id: wire.predicate.execution_id,
+                tenant: wire.predicate.tenant,
                 result: CoopResultDescriptorV1 {
                     name: wire.predicate.result.name,
                     media_type: wire.predicate.result.media_type,
@@ -520,6 +530,7 @@ impl From<WireDsseEnvelope> for DsseEnvelope {
 #[derive(Debug, Clone)]
 pub struct VerificationPolicy {
     minimum_signatures: NonZeroUsize,
+    expected_tenant: Option<String>,
     expected_subject_name: Option<String>,
     expected_media_type: Option<String>,
 }
@@ -528,6 +539,7 @@ impl Default for VerificationPolicy {
     fn default() -> Self {
         Self {
             minimum_signatures: NonZeroUsize::MIN,
+            expected_tenant: None,
             expected_subject_name: None,
             expected_media_type: None,
         }
@@ -538,6 +550,12 @@ impl VerificationPolicy {
     /// Require signatures from at least this many distinct trusted public keys.
     pub fn with_minimum_signatures(mut self, minimum: NonZeroUsize) -> Self {
         self.minimum_signatures = minimum;
+        self
+    }
+
+    /// Require the authenticated execution tenant to equal this value.
+    pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.expected_tenant = Some(tenant.into());
         self
     }
 
@@ -610,13 +628,16 @@ impl fmt::Debug for VerifiedAttestation {
     }
 }
 
-/// Build a strict in-toto Statement/v1 around one result artifact and Coop receipt.
+/// Build a tenant-bound in-toto Statement/v1 around one result artifact and Coop receipt.
 pub fn build_statement(
+    tenant: impl Into<String>,
     execution_id: impl Into<String>,
     subject: &SubjectArtifact,
     receipt: Value,
 ) -> Result<StatementV1, AttestationError> {
+    let tenant = tenant.into();
     let execution_id = execution_id.into();
+    validate_text(&tenant, MAX_TENANT_CHARS, "predicate.tenant")?;
     validate_text(
         &execution_id,
         MAX_EXECUTION_ID_CHARS,
@@ -642,6 +663,7 @@ pub fn build_statement(
         predicate: CoopExecutionPredicateV1 {
             schema_version: COOP_EXECUTION_SCHEMA_VERSION,
             execution_id,
+            tenant,
             result: CoopResultDescriptorV1 {
                 name: subject.name.clone(),
                 media_type: subject.media_type.clone(),
@@ -658,12 +680,13 @@ pub fn build_statement(
     Ok(statement)
 }
 
-/// Strictly parse a stored receipt JSON object and build the Coop statement.
+/// Strictly parse a stored receipt JSON object and build the tenant-bound Coop statement.
 ///
 /// This is the preferred server-integration entry point when the existing
 /// receipt is available as canonical JSON text. It rejects duplicate keys
 /// before constructing the typed predicate.
 pub fn build_statement_from_receipt_json(
+    tenant: impl Into<String>,
     execution_id: impl Into<String>,
     subject: &SubjectArtifact,
     receipt_json: &[u8],
@@ -674,7 +697,7 @@ pub fn build_statement_from_receipt_json(
         });
     }
     let receipt: Value = strict_json::from_slice(receipt_json, "Coop receipt")?;
-    build_statement(execution_id, subject, receipt)
+    build_statement(tenant, execution_id, subject, receipt)
 }
 
 /// Encode a validated statement as compact deterministic JSON.
@@ -741,12 +764,13 @@ pub fn sign_statement(
 
 /// Build, encode, and sign a Coop execution attestation.
 pub fn create_attestation(
+    tenant: impl Into<String>,
     execution_id: impl Into<String>,
     subject: &SubjectArtifact,
     receipt: Value,
     signing_keys: &[&SigningKey],
 ) -> Result<DsseEnvelope, AttestationError> {
-    let statement = build_statement(execution_id, subject, receipt)?;
+    let statement = build_statement(tenant, execution_id, subject, receipt)?;
     sign_statement(&statement, signing_keys)
 }
 
@@ -918,6 +942,11 @@ fn validate_statement(
         MAX_EXECUTION_ID_CHARS,
         "predicate.execution_id",
     )?;
+    validate_text(
+        &statement.predicate.tenant,
+        MAX_TENANT_CHARS,
+        "predicate.tenant",
+    )?;
     if !statement.predicate.receipt.is_object() {
         return Err(AttestationError::InvalidProfileField {
             field: "predicate.receipt",
@@ -926,6 +955,7 @@ fn validate_statement(
     validate_receipt_core(
         &statement.predicate.receipt,
         &statement.predicate.execution_id,
+        &statement.predicate.tenant,
     )?;
 
     let subject = &statement.subject[0];
@@ -961,6 +991,13 @@ fn validate_statement(
         if expected.size_bytes != result.size_bytes {
             return Err(AttestationError::SubjectSizeMismatch);
         }
+    }
+    if policy
+        .expected_tenant
+        .as_ref()
+        .is_some_and(|expected| expected != &statement.predicate.tenant)
+    {
+        return Err(AttestationError::TenantPolicyMismatch);
     }
     if policy
         .expected_subject_name
@@ -1024,7 +1061,11 @@ fn validate_sha256(value: &str, field: &'static str) -> Result<(), AttestationEr
     Ok(())
 }
 
-fn validate_receipt_core(receipt: &Value, execution_id: &str) -> Result<(), AttestationError> {
+fn validate_receipt_core(
+    receipt: &Value,
+    execution_id: &str,
+    tenant: &str,
+) -> Result<(), AttestationError> {
     validate_json_limits(receipt)?;
     let Some(receipt) = receipt.as_object() else {
         return Err(AttestationError::InvalidProfileField {
@@ -1039,6 +1080,14 @@ fn validate_receipt_core(receipt: &Value, execution_id: &str) -> Result<(), Atte
     if receipt.get("job_id").and_then(Value::as_str) != Some(execution_id) {
         return Err(AttestationError::InvalidProfileField {
             field: "predicate.receipt.job_id",
+        });
+    }
+    if receipt
+        .get("tenant")
+        .is_some_and(|value| value.as_str() != Some(tenant))
+    {
+        return Err(AttestationError::InvalidProfileField {
+            field: "predicate.receipt.tenant",
         });
     }
     if !matches!(

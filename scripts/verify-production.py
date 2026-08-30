@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -114,6 +115,7 @@ class OfflineVerifier:
         subject: bytes,
         *,
         execution_id: str,
+        tenant: str,
         subject_name: str,
         media_type: str,
         outcome: str,
@@ -179,6 +181,8 @@ class OfflineVerifier:
                 ]
             command.extend(
                 [
+                    "--tenant",
+                    tenant,
                     "--subject-name",
                     subject_name,
                     "--media-type",
@@ -217,6 +221,10 @@ class OfflineVerifier:
             require(
                 output.get("execution_id") == execution_id,
                 "coop-verify execution ID differs from the job",
+            )
+            require(
+                output.get("tenant") == tenant,
+                "coop-verify tenant differs from policy",
             )
             require(
                 output.get("subject_name") == subject_name,
@@ -524,6 +532,7 @@ def verify_receipt(detail: Mapping[str, Any], minimum_isolation: str) -> None:
 def verify_attested_result(
     api: Api,
     job_id: str,
+    tenant: str,
     detail: Dict[str, Any],
     result: Mapping[str, Any],
     attestation_capabilities: Mapping[str, Any],
@@ -541,6 +550,11 @@ def verify_attested_result(
         detail = api.request("GET", f"/v1/jobs/{encoded_job_id}")
 
     status = cast(Dict[str, Any], detail["attestation"])
+    require(detail.get("tenant") == tenant, f"{job_id}: job detail tenant differs")
+    require(
+        status.get("tenant") == tenant,
+        f"{job_id}: attestation metadata tenant differs",
+    )
     key_id = status.get("key_id")
     require(
         isinstance(key_id, str) and key_id == attestation_capabilities.get("key_id"),
@@ -616,6 +630,23 @@ def verify_attested_result(
         envelope_document.get("payloadType") == "application/vnd.in-toto+json",
         f"{job_id}: unexpected DSSE payload type",
     )
+    payload = envelope_document.get("payload")
+    require(isinstance(payload, str), f"{job_id}: DSSE payload is missing")
+    try:
+        statement_document = json.loads(base64.b64decode(payload, validate=True).decode("utf-8"))
+    except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise VerificationError(f"{job_id}: DSSE statement is not valid base64 UTF-8 JSON: {exc}") from None
+    require(isinstance(statement_document, dict), f"{job_id}: DSSE statement is not an object")
+    predicate = statement_document.get("predicate")
+    require(isinstance(predicate, dict), f"{job_id}: DSSE predicate is missing")
+    require(
+        predicate.get("executionId") == job_id,
+        f"{job_id}: attestation predicate job differs",
+    )
+    require(
+        predicate.get("tenant") == tenant,
+        f"{job_id}: attestation predicate tenant differs",
+    )
     signatures = envelope_document.get("signatures")
     require(
         isinstance(signatures, list)
@@ -626,6 +657,7 @@ def verify_attested_result(
     require(isinstance(artifact_document, dict), f"{job_id}: result artifact is not an object")
     require(artifact_document.get("schema_version") == 1, f"{job_id}: result artifact version differs")
     require(artifact_document.get("job_id") == job_id, f"{job_id}: result artifact job differs")
+    require(artifact_document.get("tenant") == tenant, f"{job_id}: result artifact tenant differs")
     require(
         artifact_document.get("receipt_sha256") == detail.get("receipt_sha256"),
         f"{job_id}: result artifact receipt differs",
@@ -639,6 +671,7 @@ def verify_attested_result(
         envelope,
         artifact,
         execution_id=job_id,
+        tenant=tenant,
         subject_name=f"coop://jobs/{job_id}/result",
         media_type=RESULT_ARTIFACT_MEDIA_TYPE,
         outcome=cast(str, result.get("status")),
@@ -652,6 +685,7 @@ def verify_canary(
     api: Api,
     language: str,
     minimum_isolation: str,
+    tenant: str,
     attestation_capabilities: Mapping[str, Any],
     offline_verifier: OfflineVerifier,
 ) -> str:
@@ -719,6 +753,7 @@ def verify_canary(
     verify_attested_result(
         api,
         job_id,
+        tenant,
         detail,
         result,
         attestation_capabilities,
@@ -750,6 +785,9 @@ def main() -> None:
         minimum_isolation = parse_minimum_isolation(
             os.environ.get("COOP_VERIFY_MINIMUM_ISOLATION", DEFAULT_MINIMUM_ISOLATION)
         )
+        identity = api.request("GET", "/v1/whoami")
+        tenant = identity.get("tenant")
+        require(isinstance(tenant, str) and bool(tenant), "authenticated tenant is missing")
         status = api.request("GET", "/v1/status")
         execution = status.get("execution")
         require(isinstance(execution, dict), "status execution posture is missing")
@@ -812,6 +850,7 @@ def main() -> None:
                 api,
                 language,
                 minimum_isolation,
+                tenant,
                 attestation_capabilities,
                 offline_verifier,
             )
@@ -825,6 +864,7 @@ def main() -> None:
                     "backend": execution.get("backend"),
                     "isolation_class": observed_class,
                     "minimum_isolation": minimum_isolation,
+                    "tenant": tenant,
                     "attestation_key_id": attestation_capabilities.get("key_id"),
                     "languages": languages,
                     "canary_job_ids": jobs,

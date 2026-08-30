@@ -44,6 +44,7 @@ submitted_with_metadata: SubmitResult = client.submit_result(
 page: JobPage = client.list(status="running", language="python")
 detail: JobDetail = client.get(submitted["job_id"])
 attestation_status: JobAttestationStatus = detail["attestation"]
+attestation_tenant: Optional[str] = attestation_status["tenant"]
 attestation_capabilities: AttestationCapabilities = client.capabilities()[
     "attestations"
 ]
@@ -86,6 +87,7 @@ _ = (
     submitted_with_metadata,
     isolation_ok,
     attestation_status,
+    attestation_tenant,
     attestation_capabilities,
     public_key,
     envelope,

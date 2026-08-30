@@ -34,6 +34,7 @@ let subject = SubjectArtifact::from_bytes(
     result,
 )?;
 let envelope = create_attestation(
+    "tenant-id",
     "job-id",
     &subject,
     json!({
@@ -58,7 +59,8 @@ let wire_bytes = envelope.to_json_bytes()?;
 
 Verification accepts a precomputed [`ArtifactDigest`](https://docs.rs/coop-attestation/latest/coop_attestation/struct.ArtifactDigest.html)
 so a server can hash large result files incrementally. The offline CLI instead
-requires a non-symlink regular file and caps it at 8 MiB to avoid FIFO/device
+requires a non-symlink regular file and caps it at 16 MiB to match the server's
+exact result-artifact ceiling while avoiding FIFO/device
 hangs and unbounded reads from attacker-controlled workspaces. The library
 returns the exact verified statement bytes alongside the typed view.
 
@@ -72,26 +74,31 @@ coop-verify public-key \
 coop-verify verify \
   --envelope job.dsse.json \
   --subject job-result.json \
-  --public-key coop-attestation.pub.pem
+  --public-key coop-attestation.pub.pem \
+  --tenant tenant-id
 ```
 
 Repeat `--public-key` for rotation or threshold policies and set
 `--threshold N` to require `N` distinct trusted signers. Verification output
-contains identifiers, digests, outcome, and chain-completeness only; it does
+contains the authenticated tenant, identifiers, digests, outcome, and
+chain-completeness only; it does
 not print the embedded receipt.
 Exit zero means the attestation is authentic and profile-valid, not that the
-job succeeded. Automation must compare `execution_id` and inspect the returned
-`outcome` and `event_chain_complete` fields against its own policy.
+job succeeded. Automation should supply `--tenant` from its own expected
+identity context, compare `execution_id`, and inspect the returned `outcome`
+and `event_chain_complete` fields against its own policy.
 
 ## Server integration
 
 Coop schema v4 now implements this boundary with a durable signing outbox:
 
 1. terminal receipt and outbox work commit together;
-2. the trusted control plane builds a deterministic exact result artifact;
+2. the trusted control plane binds `jobs.tenant` into both the predicate and
+   deterministic exact result artifact;
 3. it signs only after receipt finalization and self-verifies before storage;
 4. persistence is conditional on the same receipt bytes and is idempotent;
-5. restart backfills retained terminal rows without an immutable envelope;
+5. restart backfills retained terminal rows without changing legacy v0.3
+   receipt bytes or their digest;
 6. tenant-scoped endpoints return exact artifact/envelope bytes and digests;
 7. production requires a key unless `COOP_ATTESTATION_MODE=off` is explicit.
 

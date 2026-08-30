@@ -66,8 +66,9 @@ exported. Recovery receipts intentionally omit evidence that could not be
 reconstructed after a restart, so those execution-specific members remain
 optional; requested limits may also be partial on migrated records.
 
-`JobDetail.attestation` reports only signed-evidence availability, immutable
-digests, sizes, media type, key ID, and tenant-scoped relative download URLs.
+`JobDetail.attestation` reports signed-evidence availability, the tenant bound
+into that evidence, immutable digests, sizes, media type, key ID, and
+tenant-scoped relative download URLs.
 `download_attestation` / `downloadAttestation` and
 `download_result_artifact` / `downloadResultArtifact` return exact bytes with
 content type and length. They reject a missing, malformed, or mismatched
@@ -83,9 +84,15 @@ coop-verify verify \
   --envelope job.dsse.json \
   --subject job-result.json \
   --public-key trusted-coop-attestation.pub.pem \
+  --tenant "$EXPECTED_TENANT" \
   --subject-name "coop://jobs/$JOB_ID/result" \
   --media-type application/vnd.coop.execution-result.v1+json
 ```
+
+Use a tenant expected by the surrounding workflow (normally checked against
+the authenticated `JobDetail.tenant` or `whoami` response), rather than copying
+an untrusted tenant out of the downloaded JSON. The exact result and signed
+predicate both carry that tenant; migrated v0.3 receipts may still omit it.
 
 The typed `attestation_public_key()` / `attestationPublicKey()` endpoint is
 useful for discovery and rotation diagnostics, but its own `trust_notice` is

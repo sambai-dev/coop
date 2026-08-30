@@ -75,9 +75,15 @@ coop-verify verify \
   --envelope job.dsse.json \
   --subject job-result.json \
   --public-key trusted-coop-attestation.pub.pem \
+  --tenant "$EXPECTED_TENANT" \
   --subject-name "coop://jobs/$JOB_ID/result" \
   --media-type application/vnd.coop.execution-result.v1+json
 ```
+
+The signed predicate and exact result both bind the authoritative tenant;
+`detail.attestation.tenant` exposes the same expected claim once available.
+Pass a workflow-expected tenant to the verifier rather than copying one from
+untrusted downloaded JSON. Migrated v0.3 receipts may omit tenant.
 
 `attestationPublicKey()` is typed discovery data, not a trust anchor. Exit zero
 authenticates the envelope profile and exact subject; callers must separately

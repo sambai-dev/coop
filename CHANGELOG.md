@@ -21,8 +21,8 @@ All notable changes are documented here. Coop follows semantic versioning while 
 
 ### Portable signed evidence
 
-- Add the `coop-attestation` profile and `coop-verify` CLI: in-toto Statement/v1, exact DSSE PAE, Ed25519 signing, threshold verification, strict key files, frozen vectors, and a published JSON Schema.
-- Advance SQLite to schema v4 with a durable signing outbox, exact deterministic result artifacts, immutable DSSE envelopes, quota-aware storage, tenant-scoped downloads, restart backfill, and conditional receipt binding.
+- Add the tenant-bound `coop-attestation` profile and `coop-verify` CLI: in-toto Statement/v1, exact DSSE PAE, Ed25519 signing, tenant policy, threshold verification, strict key files, frozen vectors, and a published JSON Schema.
+- Advance SQLite to schema v4 with a durable signing outbox, exact deterministic tenant-bound result artifacts, immutable DSSE envelopes, quota-aware storage, exact restart reserves, tenant-scoped downloads, legacy-receipt backfill, pre-fix evidence quarantine/requeue, and conditional receipt binding.
 - Expose signer capabilities, current public-key discovery with an explicit trust warning, per-job attestation metadata, and exact artifact/envelope digest headers. Signatures prove key possession and integrity, not trusted hardware or deterministic execution.
 - Make the production gate invoke the packaged `coop-verify` over the exact downloaded envelope/result bytes with an explicit operator-side public-key pin; the server key endpoint remains discovery-only.
 

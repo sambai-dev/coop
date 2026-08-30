@@ -1,1 +1,1 @@
-{"exit_code":0,"status":"succeeded","stdout":"42\n"}
+{"exit_code":0,"status":"succeeded","stdout":"42\n","tenant":"tenant-vector"}

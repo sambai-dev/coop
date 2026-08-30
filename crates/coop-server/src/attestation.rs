@@ -140,9 +140,13 @@ impl AttestationService {
         if coop_store::compute_receipt_sha256(&receipt) != receipt_sha256 {
             return Err("terminal receipt integrity digest does not match".to_string());
         }
-        let statement =
-            build_statement_from_receipt_json(job_id, &subject, source.receipt_json.as_bytes())
-                .map_err(|error| format!("build in-toto execution statement: {error}"))?;
+        let statement = build_statement_from_receipt_json(
+            &source.tenant,
+            job_id,
+            &subject,
+            source.receipt_json.as_bytes(),
+        )
+        .map_err(|error| format!("build in-toto execution statement: {error}"))?;
         let signing_key = self
             .signing_key
             .as_deref()
@@ -158,6 +162,7 @@ impl AttestationService {
             &result_digest,
             &[verifying_key],
             &VerificationPolicy::default()
+                .with_tenant(&source.tenant)
                 .with_subject_name(&subject_name)
                 .with_media_type(RESULT_ARTIFACT_MEDIA_TYPE),
         )
@@ -203,6 +208,7 @@ struct ResultArtifactV1<'a> {
     artifact_type: &'static str,
     schema_version: u32,
     job_id: &'a str,
+    tenant: &'a str,
     status: &'a str,
     exit_code: Option<i32>,
     created_at_ms: i64,
@@ -250,6 +256,7 @@ fn result_artifact_bytes(
         artifact_type: RESULT_ARTIFACT_TYPE,
         schema_version: 1,
         job_id: &source.job_id,
+        tenant: &source.tenant,
         status: &source.status,
         exit_code: source.exit_code,
         created_at_ms: source.created_at_ms,
@@ -358,6 +365,8 @@ mod tests {
         assert!(std::str::from_utf8(&first)
             .unwrap()
             .starts_with("{\"_type\""));
+        let artifact: Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(artifact["tenant"], "tenant-a");
     }
 
     #[tokio::test]
@@ -422,14 +431,17 @@ mod tests {
                 &digest,
                 &[verifying_key],
                 &VerificationPolicy::default()
+                    .with_tenant("tenant-a")
                     .with_subject_name(format!("coop://jobs/{job_id}/result"))
                     .with_media_type(RESULT_ARTIFACT_MEDIA_TYPE),
             )
             .unwrap();
             assert_eq!(verified.statement().predicate().execution_id(), job_id);
+            assert_eq!(verified.statement().predicate().tenant(), "tenant-a");
             assert_eq!(verified.subject_sha256(), stored.metadata.result_sha256);
             let artifact: Value = serde_json::from_slice(&stored.result_artifact).unwrap();
             assert_eq!(artifact["job_id"], job_id);
+            assert_eq!(artifact["tenant"], "tenant-a");
             assert_eq!(artifact["receipt_sha256"], stored.metadata.receipt_sha256);
         }
         let replay = service.process_pending_once(&store).await.unwrap();

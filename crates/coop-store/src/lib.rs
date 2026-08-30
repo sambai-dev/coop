@@ -1,3 +1,5 @@
+use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE};
+use base64::Engine as _;
 use futures_util::TryStreamExt;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -62,9 +64,20 @@ const ROW_VALIDATION_REVISION: i64 = 3;
 // the sentinel until the transaction commits (which Coop never does).
 const OWNED_ROW_WRITE_REVISION: i64 = ROW_VALIDATION_REVISION + 1;
 const STORAGE_GUARD_REVISION_MARKER: &str = "coop-storage-guard-r3";
-const PREVIOUS_ACCOUNTING_VALIDATION_REVISION: i64 = 1;
+// Revision 2 proves the exact terminal-pending attestation reserve. Revision 1
+// omitted durable idempotency-row bytes and accepted the historical zero-reserve
+// restart rebuild. It is repaired once under intact guards during upgrade.
 const ACCOUNTING_VALIDATION_REVISION: i64 = 2;
+const REPAIRABLE_ACCOUNTING_VALIDATION_REVISION: i64 = 1;
 const OWNED_ACCOUNTING_WRITE_REVISION: i64 = ACCOUNTING_VALIDATION_REVISION + 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccountingGuardGeneration {
+    CurrentRevisionTwo,
+    RepairableRevisionOne,
+    StorageOnlyRevisionTwo,
+    Invalid,
+}
 pub const JOB_COMPLETION_RESERVE_BYTES: u64 = 32 * 1024 * 1024;
 /// Portion of a job's admission-time completion reserve retained after its
 /// receipt commits and until its durable attestation outbox item is either
@@ -81,6 +94,10 @@ const TENANT_QUOTA_MARKER: &str = "coop-capacity:tenant-logical-bytes";
 const GLOBAL_QUOTA_MARKER: &str = "coop-capacity:global-logical-bytes";
 const FREE_SPACE_MARKER: &str = "coop-capacity:filesystem-reserve";
 const IDEMPOTENCY_CONFLICT_MARKER: &str = "coop-idempotency:fingerprint-conflict";
+const DSSE_PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
+const IN_TOTO_STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
+const COOP_EXECUTION_PREDICATE_TYPE: &str =
+    "https://github.com/sambai-dev/coop/blob/main/crates/coop-attestation/FORMAT.md#predicate-v1";
 
 pub fn capacity_error_kind(error: &sqlx::Error) -> Option<CapacityErrorKind> {
     let text = error.to_string();
@@ -982,10 +999,28 @@ impl Store {
                 "jobs/events/attestations were modified outside an owned write".to_string(),
             ));
         }
+        let accounting_validation_revision = Self::accounting_validation_revision(conn).await?;
+        let accounting_guard_generation = accounting_guard_generation(conn).await?;
+        let repair_accounting_generation = matches!(
+            (accounting_validation_revision, accounting_guard_generation),
+            (
+                Some(REPAIRABLE_ACCOUNTING_VALIDATION_REVISION),
+                AccountingGuardGeneration::RepairableRevisionOne
+            ) | (
+                Some(ACCOUNTING_VALIDATION_REVISION),
+                AccountingGuardGeneration::StorageOnlyRevisionTwo
+            )
+        );
+        let unbound_attestations_requeued = if repair_accounting_generation {
+            Self::requeue_unbound_revision_one_attestations(conn).await?
+        } else {
+            false
+        };
         let attestation_outbox_seeded = Self::seed_missing_attestation_outbox(conn).await?;
         let requires_full_validation = !schema_markers_current
             || !row_validation_current
             || !storage_guards_were_current
+            || unbound_attestations_requeued
             || attestation_outbox_seeded;
         if requires_full_validation {
             Self::validate_current_rows(conn).await?;
@@ -994,7 +1029,7 @@ impl Store {
         // Existing v2 tables predate the storage-class CHECKs. Idempotent
         // guards preserve compatibility while enforcing the same invariants
         // for all future inserts and updates.
-        Self::create_indexes(conn).await?;
+        Self::create_indexes(conn, repair_accounting_generation).await?;
         if requires_full_validation {
             Self::record_row_validation(conn).await?;
         }
@@ -1012,7 +1047,7 @@ impl Store {
     async fn create_current_schema(conn: &mut SqliteConnection) -> StoreResult<()> {
         create_jobs_table(conn, "jobs").await?;
         create_events_table(conn, "events", "jobs").await?;
-        Self::create_indexes(conn).await
+        Self::create_indexes(conn, false).await
     }
 
     async fn ensure_integrity_state(conn: &mut SqliteConnection) -> StoreResult<()> {
@@ -1113,11 +1148,6 @@ impl Store {
         Ok(revision)
     }
 
-    async fn accounting_validation_current(conn: &mut SqliteConnection) -> StoreResult<bool> {
-        Ok(Self::accounting_validation_revision(conn).await?
-            == Some(ACCOUNTING_VALIDATION_REVISION))
-    }
-
     async fn record_row_validation(conn: &mut SqliteConnection) -> StoreResult<()> {
         sqlx::query(
             "INSERT INTO store_integrity(
@@ -1185,21 +1215,23 @@ impl Store {
         Ok(())
     }
 
-    async fn create_indexes(conn: &mut SqliteConnection) -> StoreResult<()> {
+    async fn create_indexes(
+        conn: &mut SqliteConnection,
+        repair_accounting_generation: bool,
+    ) -> StoreResult<()> {
         Self::ensure_integrity_state(conn).await?;
         Self::ensure_retention_tombstones(conn).await?;
         Self::ensure_attestation_tables(conn).await?;
         ensure_admitted_memory_column(conn, false).await?;
-        let accounting_revision = Self::accounting_validation_revision(conn).await?;
-        let rebuild_for_accounting_revision =
-            accounting_revision == Some(PREVIOUS_ACCOUNTING_VALIDATION_REVISION);
-        let accounting_guards_were_current = accounting_guards_current(conn).await?;
+        let accounting_guard_generation = accounting_guard_generation(conn).await?;
+        let accounting_guards_were_current =
+            accounting_guard_generation == AccountingGuardGeneration::CurrentRevisionTwo;
         drop_accounting_guard_triggers(conn).await?;
         Self::ensure_idempotency_keys(conn).await?;
         Self::ensure_storage_accounting(
             conn,
             accounting_guards_were_current,
-            rebuild_for_accounting_revision,
+            repair_accounting_generation,
         )
         .await?;
         // These non-covering v2-development indexes can force SQLite to walk
@@ -1409,10 +1441,60 @@ impl Store {
         Ok(inserted.rows_affected() != 0)
     }
 
+    /// Remove pre-fix attestation rows whose exact files do not bind the
+    /// authoritative job tenant. The following outbox seed recreates signing
+    /// work. This runs only while upgrading the clean revision-1 accounting
+    /// generation, so ordinary opens do not rescan large immutable blobs.
+    async fn requeue_unbound_revision_one_attestations(
+        conn: &mut SqliteConnection,
+    ) -> StoreResult<bool> {
+        let mut stale_job_ids = Vec::new();
+        let mut rows = sqlx::query(
+            "SELECT job.job_id, job.tenant,
+                    attestation.receipt_sha256,
+                    attestation.result_media_type,
+                    attestation.result_artifact,
+                    attestation.result_sha256,
+                    attestation.envelope_json
+             FROM job_attestations AS attestation
+             INNER JOIN jobs AS job ON job.job_id = attestation.job_id
+             ORDER BY job.job_id ASC",
+        )
+        .fetch(&mut *conn);
+        while let Some(row) = rows.try_next().await? {
+            let job_id: String = row.try_get("job_id")?;
+            let tenant: String = row.try_get("tenant")?;
+            let receipt_sha256: String = row.try_get("receipt_sha256")?;
+            let result_media_type: String = row.try_get("result_media_type")?;
+            let result_artifact: Vec<u8> = row.try_get("result_artifact")?;
+            let result_sha256: String = row.try_get("result_sha256")?;
+            let envelope_json: Vec<u8> = row.try_get("envelope_json")?;
+            if !portable_attestation_binding_matches(
+                &job_id,
+                &tenant,
+                &receipt_sha256,
+                &result_media_type,
+                &result_artifact,
+                &result_sha256,
+                &envelope_json,
+            ) {
+                stale_job_ids.push(job_id);
+            }
+        }
+        drop(rows);
+        for job_id in &stale_job_ids {
+            sqlx::query("DELETE FROM job_attestations WHERE job_id = ?1")
+                .bind(job_id)
+                .execute(&mut *conn)
+                .await?;
+        }
+        Ok(!stale_job_ids.is_empty())
+    }
+
     async fn ensure_storage_accounting(
         conn: &mut SqliteConnection,
         guards_were_current: bool,
-        rebuild_for_accounting_revision: bool,
+        repair_accounting_generation: bool,
     ) -> StoreResult<()> {
         let existed = table_exists(conn, "job_storage_usage").await?;
         sqlx::query(
@@ -1485,9 +1567,10 @@ impl Store {
         )
         .await?;
 
-        let authoritative_rows_changed = !Self::row_validation_current(conn).await?;
-        let rebuilt = !existed || authoritative_rows_changed || rebuild_for_accounting_revision;
-        if rebuilt {
+        let row_validation_current = Self::row_validation_current(conn).await?;
+        let accounting_validation_revision = Self::accounting_validation_revision(conn).await?;
+        let authoritative_rows_changed = !row_validation_current || repair_accounting_generation;
+        if !existed || authoritative_rows_changed {
             sqlx::query("DELETE FROM job_storage_usage")
                 .execute(&mut *conn)
                 .await?;
@@ -1545,11 +1628,19 @@ impl Store {
                               WHERE mapping.tenant = job.tenant
                                 AND mapping.job_id = job.job_id
                             ), 0),
-                        CASE WHEN job.status IN ('queued','running') THEN ?1 ELSE 0 END,
+                        CASE
+                            WHEN job.status IN ('queued','running') THEN ?1
+                            WHEN EXISTS (
+                                SELECT 1 FROM attestation_outbox AS pending
+                                WHERE pending.job_id = job.job_id
+                            ) THEN ?2
+                            ELSE 0
+                        END,
                         job.admitted_mem_mb
                  FROM jobs AS job",
             )
             .bind(JOB_COMPLETION_RESERVE_BYTES as i64)
+            .bind(ATTESTATION_RESERVE_BYTES as i64)
             .execute(&mut *conn)
             .await?;
             sqlx::query("DELETE FROM storage_usage_total")
@@ -1579,7 +1670,10 @@ impl Store {
         .execute(&mut *conn)
         .await?;
 
-        let accounting_validation_current = Self::accounting_validation_current(conn).await?;
+        let accounting_validation_current = accounting_validation_revision
+            == Some(ACCOUNTING_VALIDATION_REVISION)
+            && guards_were_current;
+        let rebuilt = !existed || authoritative_rows_changed;
         let requires_full_validation = rebuilt || !guards_were_current;
         if !accounting_validation_current && guards_were_current && !rebuilt {
             return Err(sqlx::Error::Protocol(
@@ -1721,7 +1815,7 @@ impl Store {
                             SELECT 1 FROM attestation_outbox AS pending
                             WHERE pending.job_id = job.job_id
                         )
-                        AND usage.reserved_bytes > 20971520)
+                        AND usage.reserved_bytes != ?1)
              )
              OR EXISTS(
                  SELECT 1 FROM job_storage_usage AS usage
@@ -1729,6 +1823,7 @@ impl Store {
                  WHERE job.job_id IS NULL
              ) AS invalid",
         )
+        .bind(ATTESTATION_RESERVE_BYTES as i64)
         .fetch_one(&mut *conn)
         .await?
         .try_get("invalid")?;
@@ -2391,7 +2486,7 @@ impl Store {
         sqlx::query("DROP TABLE jobs_legacy_v1")
             .execute(&mut *conn)
             .await?;
-        Self::create_indexes(conn).await
+        Self::create_indexes(conn, false).await
     }
 
     pub async fn schema_version(&self) -> StoreResult<i64> {
@@ -2440,7 +2535,7 @@ impl Store {
         let _ = Self::row_validation_current(&mut tx).await?;
         Self::validate_current_rows(&mut tx).await?;
         validate_foreign_keys(&mut tx).await?;
-        Self::create_indexes(&mut tx).await?;
+        Self::create_indexes(&mut tx, false).await?;
         Self::record_row_validation(&mut tx).await?;
         tx.commit().await
     }
@@ -3245,8 +3340,9 @@ impl Store {
     }
 
     /// Persist exact result and DSSE bytes iff the terminal receipt is still
-    /// byte-for-byte identical to the one that was signed. An existing exact
-    /// row is an idempotent replay; any differing row fails closed.
+    /// byte-for-byte identical to the one that was signed and both portable
+    /// files structurally bind the authoritative job tenant. An existing
+    /// exact row is an idempotent replay; any differing row fails closed.
     #[allow(clippy::too_many_arguments)]
     pub async fn persist_attestation(
         &self,
@@ -3299,6 +3395,30 @@ impl Store {
 
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         Self::begin_row_writes(&mut tx).await?;
+        let current = sqlx::query(
+            "SELECT tenant, status, receipt_json FROM jobs
+             WHERE job_id = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM retention_tombstones
+                   WHERE retention_tombstones.job_id = jobs.job_id
+               )",
+        )
+        .bind(job_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(current) = current else {
+            tx.rollback().await?;
+            return Ok(PersistAttestationOutcome::StaleReceipt);
+        };
+        let tenant: String = current.try_get("tenant")?;
+        let status: String = current.try_get("status")?;
+        let current_receipt: Option<String> = current.try_get("receipt_json")?;
+        if !is_terminal_status(&status) || current_receipt.as_deref() != Some(expected_receipt_json)
+        {
+            tx.rollback().await?;
+            return Ok(PersistAttestationOutcome::StaleReceipt);
+        }
+
         if let Some(existing) = sqlx::query(
             "SELECT receipt_sha256, result_media_type, result_artifact,
                     result_sha256, envelope_json, envelope_sha256, key_id
@@ -3321,6 +3441,20 @@ impl Store {
                     "immutable job attestation already exists with different bytes".to_string(),
                 ));
             }
+            if !portable_attestation_binding_matches(
+                job_id,
+                &tenant,
+                receipt_sha256,
+                result_media_type,
+                result_artifact,
+                result_sha256,
+                envelope_json,
+            ) {
+                tx.rollback().await?;
+                return Err(sqlx::Error::Protocol(
+                    "stored job attestation is not bound to its authoritative tenant".to_string(),
+                ));
+            }
             sqlx::query("DELETE FROM attestation_outbox WHERE job_id = ?1")
                 .bind(job_id)
                 .execute(&mut *tx)
@@ -3331,27 +3465,19 @@ impl Store {
             return Ok(PersistAttestationOutcome::Existing);
         }
 
-        let current = sqlx::query(
-            "SELECT status, receipt_json FROM jobs
-             WHERE job_id = ?1
-               AND NOT EXISTS (
-                   SELECT 1 FROM retention_tombstones
-                   WHERE retention_tombstones.job_id = jobs.job_id
-               )",
-        )
-        .bind(job_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some(current) = current else {
+        if !portable_attestation_binding_matches(
+            job_id,
+            &tenant,
+            receipt_sha256,
+            result_media_type,
+            result_artifact,
+            result_sha256,
+            envelope_json,
+        ) {
             tx.rollback().await?;
-            return Ok(PersistAttestationOutcome::StaleReceipt);
-        };
-        let status: String = current.try_get("status")?;
-        let current_receipt: Option<String> = current.try_get("receipt_json")?;
-        if !is_terminal_status(&status) || current_receipt.as_deref() != Some(expected_receipt_json)
-        {
-            tx.rollback().await?;
-            return Ok(PersistAttestationOutcome::StaleReceipt);
+            return Err(sqlx::Error::InvalidArgument(
+                "attestation bytes do not bind the authoritative job tenant".to_string(),
+            ));
         }
 
         sqlx::query(
@@ -4687,7 +4813,7 @@ fn accounting_trigger_statements() -> [&'static str; 26] {
     [
         "CREATE TRIGGER coop_usage_aggregate_insert
          AFTER INSERT ON job_storage_usage
-         WHEN 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1' BEGIN
+         WHEN 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2' BEGIN
              UPDATE storage_usage_total
              SET charged_bytes = charged_bytes + NEW.retained_bytes + NEW.reserved_bytes
              WHERE singleton = 1;
@@ -4698,7 +4824,7 @@ fn accounting_trigger_statements() -> [&'static str; 26] {
          END",
         "CREATE TRIGGER coop_usage_aggregate_update
          AFTER UPDATE OF retained_bytes, reserved_bytes ON job_storage_usage
-         WHEN 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1' BEGIN
+         WHEN 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2' BEGIN
              UPDATE storage_usage_total
              SET charged_bytes = charged_bytes
                  + (NEW.retained_bytes + NEW.reserved_bytes)
@@ -4712,7 +4838,7 @@ fn accounting_trigger_statements() -> [&'static str; 26] {
          END",
         "CREATE TRIGGER coop_usage_aggregate_delete
          AFTER DELETE ON job_storage_usage
-         WHEN 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1' BEGIN
+         WHEN 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2' BEGIN
              UPDATE storage_usage_total
              SET charged_bytes = charged_bytes - OLD.retained_bytes - OLD.reserved_bytes
              WHERE singleton = 1;
@@ -4731,7 +4857,7 @@ fn accounting_trigger_statements() -> [&'static str; 26] {
            OR typeof(NEW.requested_mem_mb) != 'integer'
            OR NEW.requested_mem_mb NOT BETWEEN 16 AND 4096
          BEGIN
-             SELECT RAISE(ABORT, 'invalid job_storage_usage [coop-accounting-guard-r1]');
+             SELECT RAISE(ABORT, 'invalid job_storage_usage [coop-accounting-guard-r2]');
          END",
         "CREATE TRIGGER coop_job_storage_guard_update
          BEFORE UPDATE ON job_storage_usage
@@ -4740,76 +4866,76 @@ fn accounting_trigger_statements() -> [&'static str; 26] {
            OR typeof(NEW.retained_bytes) != 'integer' OR NEW.retained_bytes < 0
            OR typeof(NEW.reserved_bytes) != 'integer' OR NEW.reserved_bytes < 0
          BEGIN
-             SELECT RAISE(ABORT, 'immutable or invalid job_storage_usage [coop-accounting-guard-r1]');
+             SELECT RAISE(ABORT, 'immutable or invalid job_storage_usage [coop-accounting-guard-r2]');
          END",
         "CREATE TRIGGER coop_job_storage_dirty_insert AFTER INSERT ON job_storage_usage BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_job_storage_dirty_update AFTER UPDATE ON job_storage_usage BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_job_storage_dirty_delete AFTER DELETE ON job_storage_usage BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_total_storage_guard_insert BEFORE INSERT ON storage_usage_total
          WHEN typeof(NEW.singleton) != 'integer' OR NEW.singleton != 1
            OR typeof(NEW.charged_bytes) != 'integer' OR NEW.charged_bytes < 0
          BEGIN
-             SELECT RAISE(ABORT, 'invalid storage_usage_total [coop-accounting-guard-r1]');
+             SELECT RAISE(ABORT, 'invalid storage_usage_total [coop-accounting-guard-r2]');
          END",
         "CREATE TRIGGER coop_total_storage_guard_update BEFORE UPDATE ON storage_usage_total
          WHEN NEW.singleton != OLD.singleton
            OR typeof(NEW.charged_bytes) != 'integer' OR NEW.charged_bytes < 0
          BEGIN
-             SELECT RAISE(ABORT, 'immutable or invalid storage_usage_total [coop-accounting-guard-r1]');
+             SELECT RAISE(ABORT, 'immutable or invalid storage_usage_total [coop-accounting-guard-r2]');
          END",
         "CREATE TRIGGER coop_total_storage_dirty_insert AFTER INSERT ON storage_usage_total BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_total_storage_dirty_update AFTER UPDATE ON storage_usage_total BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_total_storage_dirty_delete AFTER DELETE ON storage_usage_total BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_tenant_storage_guard_insert BEFORE INSERT ON tenant_storage_usage
          WHEN typeof(NEW.tenant) != 'text' OR length(trim(NEW.tenant)) = 0
            OR typeof(NEW.charged_bytes) != 'integer' OR NEW.charged_bytes < 0
          BEGIN
-             SELECT RAISE(ABORT, 'invalid tenant_storage_usage [coop-accounting-guard-r1]');
+             SELECT RAISE(ABORT, 'invalid tenant_storage_usage [coop-accounting-guard-r2]');
          END",
         "CREATE TRIGGER coop_tenant_storage_guard_update BEFORE UPDATE ON tenant_storage_usage
          WHEN NEW.tenant != OLD.tenant
            OR typeof(NEW.charged_bytes) != 'integer' OR NEW.charged_bytes < 0
          BEGIN
-             SELECT RAISE(ABORT, 'immutable or invalid tenant_storage_usage [coop-accounting-guard-r1]');
+             SELECT RAISE(ABORT, 'immutable or invalid tenant_storage_usage [coop-accounting-guard-r2]');
          END",
         "CREATE TRIGGER coop_tenant_storage_dirty_insert AFTER INSERT ON tenant_storage_usage BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_tenant_storage_dirty_update AFTER UPDATE ON tenant_storage_usage BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_tenant_storage_dirty_delete AFTER DELETE ON tenant_storage_usage BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_idempotency_storage_guard_insert BEFORE INSERT ON idempotency_keys
          WHEN typeof(NEW.tenant) != 'text' OR length(trim(NEW.tenant)) = 0
@@ -4820,52 +4946,60 @@ fn accounting_trigger_statements() -> [&'static str; 26] {
            OR typeof(NEW.job_id) != 'text' OR length(trim(NEW.job_id)) = 0
            OR typeof(NEW.created_at_ms) != 'integer' OR NEW.created_at_ms < 0
          BEGIN
-             SELECT RAISE(ABORT, 'invalid idempotency_keys [coop-accounting-guard-r1]');
+             SELECT RAISE(ABORT, 'invalid idempotency_keys [coop-accounting-guard-r2]');
          END",
         "CREATE TRIGGER coop_idempotency_storage_guard_update BEFORE UPDATE ON idempotency_keys
          WHEN NEW.tenant != OLD.tenant OR NEW.idempotency_key != OLD.idempotency_key
            OR NEW.request_sha256 != OLD.request_sha256 OR NEW.job_id != OLD.job_id
            OR NEW.created_at_ms != OLD.created_at_ms
          BEGIN
-             SELECT RAISE(ABORT, 'idempotency mapping is immutable [coop-accounting-guard-r1]');
+             SELECT RAISE(ABORT, 'idempotency mapping is immutable [coop-accounting-guard-r2]');
          END",
         "CREATE TRIGGER coop_idempotency_dirty_insert AFTER INSERT ON idempotency_keys BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_idempotency_dirty_update AFTER UPDATE ON idempotency_keys BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_idempotency_dirty_delete AFTER DELETE ON idempotency_keys BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_tombstone_dirty_insert AFTER INSERT ON retention_tombstones BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_tombstone_dirty_update AFTER UPDATE ON retention_tombstones BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
         "CREATE TRIGGER coop_tombstone_dirty_delete AFTER DELETE ON retention_tombstones BEGIN
              UPDATE store_integrity SET accounting_validation_revision = 0
              WHERE singleton = 1 AND accounting_validation_revision != 3
-               AND 'coop-accounting-guard-r1' = 'coop-accounting-guard-r1';
+               AND 'coop-accounting-guard-r2' = 'coop-accounting-guard-r2';
          END",
     ]
 }
 
-async fn accounting_guards_current(conn: &mut SqliteConnection) -> StoreResult<bool> {
+async fn accounting_guard_generation(
+    conn: &mut SqliteConnection,
+) -> StoreResult<AccountingGuardGeneration> {
     let rows = sqlx::query("SELECT name, sql FROM sqlite_schema WHERE type = 'trigger'")
         .fetch_all(&mut *conn)
         .await?;
+    // The exact r1 set is a trusted predecessor, not an arbitrary stale
+    // definition. Accept it only as a complete set so revision-1 ledgers can
+    // be rebuilt once before these triggers are recreated as r2 below.
+    let mut all_current = true;
+    let mut all_repairable_revision_one = true;
+    let mut all_storage_only_revision_two = true;
     for expected in accounting_trigger_statements() {
         let expected_name = expected
             .split_whitespace()
@@ -4875,14 +5009,32 @@ async fn accounting_guards_current(conn: &mut SqliteConnection) -> StoreResult<b
             .iter()
             .find(|row| row.get::<String, _>("name") == expected_name)
         else {
-            return Ok(false);
+            return Ok(AccountingGuardGeneration::Invalid);
         };
         let actual: String = row.try_get("sql")?;
-        if normalize_trigger_sql(&actual) != normalize_trigger_sql(expected) {
-            return Ok(false);
-        }
+        let normalized_actual = normalize_trigger_sql(&actual);
+        all_current &= normalized_actual == normalize_trigger_sql(expected);
+        let revision_one = expected
+            .replace("coop-accounting-guard-r2", "coop-accounting-guard-r1")
+            .replace(
+                "accounting_validation_revision != 3",
+                "accounting_validation_revision != 2",
+            );
+        all_repairable_revision_one &= normalized_actual == normalize_trigger_sql(&revision_one);
+        let storage_only_revision_two =
+            expected.replace("coop-accounting-guard-r2", "coop-accounting-guard-r1");
+        all_storage_only_revision_two &=
+            normalized_actual == normalize_trigger_sql(&storage_only_revision_two);
     }
-    Ok(true)
+    Ok(if all_current {
+        AccountingGuardGeneration::CurrentRevisionTwo
+    } else if all_repairable_revision_one {
+        AccountingGuardGeneration::RepairableRevisionOne
+    } else if all_storage_only_revision_two {
+        AccountingGuardGeneration::StorageOnlyRevisionTwo
+    } else {
+        AccountingGuardGeneration::Invalid
+    })
 }
 
 async fn drop_accounting_guard_triggers(conn: &mut SqliteConnection) -> StoreResult<()> {
@@ -5668,6 +5820,118 @@ fn is_lower_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Check the portable identity/digest links needed before treating stored
+/// bytes as a tenant-bound attestation. This is not signature verification;
+/// the signing service performs that before persistence. The store uses this
+/// structural check to reject direct unbound writes and quarantine evidence
+/// emitted by the pre-fix revision so it can be re-signed.
+fn portable_attestation_binding_matches(
+    job_id: &str,
+    tenant: &str,
+    receipt_sha256: &str,
+    result_media_type: &str,
+    result_artifact: &[u8],
+    result_sha256: &str,
+    envelope_json: &[u8],
+) -> bool {
+    let Ok(artifact) = serde_json::from_slice::<Value>(result_artifact) else {
+        return false;
+    };
+    let Some(artifact) = artifact.as_object() else {
+        return false;
+    };
+    if artifact.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || artifact.get("job_id").and_then(Value::as_str) != Some(job_id)
+        || artifact.get("tenant").and_then(Value::as_str) != Some(tenant)
+        || artifact.get("receipt_sha256").and_then(Value::as_str) != Some(receipt_sha256)
+    {
+        return false;
+    }
+
+    let Ok(envelope) = serde_json::from_slice::<Value>(envelope_json) else {
+        return false;
+    };
+    let Some(envelope) = envelope.as_object() else {
+        return false;
+    };
+    if envelope.get("payloadType").and_then(Value::as_str) != Some(DSSE_PAYLOAD_TYPE)
+        || !envelope
+            .get("signatures")
+            .and_then(Value::as_array)
+            .is_some_and(|signatures| !signatures.is_empty())
+    {
+        return false;
+    }
+    let Some(payload) = envelope.get("payload").and_then(Value::as_str) else {
+        return false;
+    };
+    let Ok(statement_bytes) = BASE64_STANDARD
+        .decode(payload)
+        .or_else(|_| URL_SAFE.decode(payload))
+    else {
+        return false;
+    };
+    let Ok(statement) = serde_json::from_slice::<Value>(&statement_bytes) else {
+        return false;
+    };
+    let Some(statement) = statement.as_object() else {
+        return false;
+    };
+    if statement.get("_type").and_then(Value::as_str) != Some(IN_TOTO_STATEMENT_TYPE)
+        || statement.get("predicateType").and_then(Value::as_str)
+            != Some(COOP_EXECUTION_PREDICATE_TYPE)
+    {
+        return false;
+    }
+    let Some(subject) = statement
+        .get("subject")
+        .and_then(Value::as_array)
+        .filter(|subjects| subjects.len() == 1)
+        .and_then(|subjects| subjects[0].as_object())
+    else {
+        return false;
+    };
+    if subject
+        .get("digest")
+        .and_then(Value::as_object)
+        .and_then(|digest| digest.get("sha256"))
+        .and_then(Value::as_str)
+        != Some(result_sha256)
+        || subject.get("mediaType").and_then(Value::as_str) != Some(result_media_type)
+    {
+        return false;
+    }
+    let Some(predicate) = statement.get("predicate").and_then(Value::as_object) else {
+        return false;
+    };
+    if predicate.get("schemaVersion").and_then(Value::as_u64) != Some(1)
+        || predicate.get("executionId").and_then(Value::as_str) != Some(job_id)
+        || predicate.get("tenant").and_then(Value::as_str) != Some(tenant)
+    {
+        return false;
+    }
+    let Some(result) = predicate.get("result").and_then(Value::as_object) else {
+        return false;
+    };
+    if result.get("sha256").and_then(Value::as_str) != Some(result_sha256)
+        || result.get("mediaType").and_then(Value::as_str) != Some(result_media_type)
+        || result.get("sizeBytes").and_then(Value::as_u64) != Some(result_artifact.len() as u64)
+        || result.get("name") != subject.get("name")
+    {
+        return false;
+    }
+    predicate
+        .get("receipt")
+        .and_then(Value::as_object)
+        .is_some_and(|receipt| {
+            receipt.get("job_id").and_then(Value::as_str) == Some(job_id)
+                && receipt.get("receipt_sha256").and_then(Value::as_str) == Some(receipt_sha256)
+                && receipt
+                    .get("tenant")
+                    .is_none_or(|value| value.as_str() == Some(tenant))
+        })
 }
 
 fn digest_hex(digest: impl IntoIterator<Item = u8>) -> String {

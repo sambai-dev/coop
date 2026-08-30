@@ -1,14 +1,20 @@
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode, Version};
 use axum::Router;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use coop_attestation::{
-    verify_attestation, write_private_key_file_new, ArtifactDigest, SigningKey, VerificationPolicy,
+    dsse_v1_pae, key_id, verify_attestation, write_private_key_file_new, ArtifactDigest,
+    SigningKey, VerificationPolicy, DSSE_PAYLOAD_TYPE,
 };
 use coop_server::config::Config;
 use coop_server::scheduler;
 use coop_store::Store;
+use ed25519_dalek::Signer as _;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::{Connection, SqliteConnection};
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
@@ -74,6 +80,95 @@ fn test_config(db: &std::path::Path) -> Config {
 
 fn loopback_addr() -> std::net::SocketAddr {
     "127.0.0.1:0".parse().unwrap()
+}
+
+async fn raw_connection(db: &std::path::Path) -> SqliteConnection {
+    SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(db)
+            .create_if_missing(true),
+    )
+    .await
+    .unwrap()
+}
+
+async fn rewrite_accounting_guards_to_r1(
+    connection: &mut SqliteConnection,
+    owned_write_sentinel: i64,
+) {
+    sqlx::query("PRAGMA writable_schema = ON")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE sqlite_schema
+         SET sql = replace(
+             replace(sql, 'coop-accounting-guard-r2', 'coop-accounting-guard-r1'),
+             'accounting_validation_revision != 3', ?1
+         )
+         WHERE type = 'trigger'
+           AND instr(sql, 'coop-accounting-guard-r2') > 0",
+    )
+    .bind(format!(
+        "accounting_validation_revision != {owned_write_sentinel}"
+    ))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query("PRAGMA writable_schema = OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+}
+
+fn legacy_unbound_signed_bytes(
+    job_id: &str,
+    receipt_sha256: &str,
+    receipt: &serde_json::Value,
+    result_media_type: &str,
+    signing_key: &SigningKey,
+) -> (Vec<u8>, Vec<u8>) {
+    let artifact = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "job_id": job_id,
+        "receipt_sha256": receipt_sha256,
+        "status": "succeeded",
+    }))
+    .unwrap();
+    let artifact_sha256 = format!("{:x}", Sha256::digest(&artifact));
+    let subject_name = format!("coop://jobs/{job_id}/result");
+    let statement = serde_json::to_vec(&serde_json::json!({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{
+            "name": subject_name.clone(),
+            "digest": {"sha256": artifact_sha256.clone()},
+            "mediaType": result_media_type,
+        }],
+        "predicateType": "https://github.com/sambai-dev/coop/blob/main/crates/coop-attestation/FORMAT.md#predicate-v1",
+        "predicate": {
+            "schemaVersion": 1,
+            "executionId": job_id,
+            "result": {
+                "name": subject_name,
+                "mediaType": result_media_type,
+                "sizeBytes": artifact.len(),
+                "sha256": artifact_sha256,
+            },
+            "receipt": receipt,
+        },
+    }))
+    .unwrap();
+    let pae = dsse_v1_pae(DSSE_PAYLOAD_TYPE, &statement).unwrap();
+    let envelope = serde_json::to_vec(&serde_json::json!({
+        "payloadType": DSSE_PAYLOAD_TYPE,
+        "payload": BASE64_STANDARD.encode(statement),
+        "signatures": [{
+            "keyid": "sha256:legacy",
+            "sig": BASE64_STANDARD.encode(signing_key.sign(&pae).to_bytes()),
+        }],
+    }))
+    .unwrap();
+    (artifact, envelope)
 }
 
 async fn spawn_app() -> Router {
@@ -505,6 +600,7 @@ async fn signed_attestation_surfaces_return_exact_verifiable_tenant_scoped_bytes
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     let detail = signed_detail.expect("attestation worker did not persist the signed job");
+    assert_eq!(detail["attestation"]["tenant"], "t1");
     assert_eq!(
         detail["attestation"]["envelope_url"],
         "/v1/jobs/signed-job/attestation"
@@ -592,6 +688,7 @@ async fn signed_attestation_surfaces_return_exact_verifiable_tenant_scoped_bytes
         &digest,
         &[verifying_key],
         &VerificationPolicy::default()
+            .with_tenant("t1")
             .with_subject_name("coop://jobs/signed-job/result")
             .with_media_type(coop_server::attestation::RESULT_ARTIFACT_MEDIA_TYPE),
     )
@@ -600,9 +697,199 @@ async fn signed_attestation_surfaces_return_exact_verifiable_tenant_scoped_bytes
         verified.statement().predicate().execution_id(),
         "signed-job"
     );
+    assert_eq!(verified.statement().predicate().tenant(), "t1");
     let artifact: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(artifact["tenant"], "t1");
     assert_eq!(artifact["stdout"], "hello");
     assert_eq!(artifact["receipt_sha256"], detail["receipt_sha256"]);
+}
+
+#[tokio::test]
+async fn restart_quarantines_unbound_evidence_before_api_advertisement_and_resigns() {
+    let root = std::env::temp_dir().join(format!(
+        "coop-api-unbound-attestation-upgrade-{}",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let db = root.join("coop.db");
+    let key_path = root.join("attestation-key.pem");
+    let signing_key = SigningKey::from_bytes(&[53_u8; 32]);
+    let verifying_key = signing_key.verifying_key();
+    write_private_key_file_new(&key_path, &signing_key).unwrap();
+
+    let seed = Store::open(&db).await.unwrap();
+    seed.create_job_with_event(
+        "legacy-signed",
+        "t1",
+        "python",
+        r#"{"language":"python","code":"print(1)"}"#,
+    )
+    .await
+    .unwrap();
+    seed.finalize_with_event("legacy-signed", "succeeded", Some(0), 1, None)
+        .await
+        .unwrap();
+    let receipt_json = seed
+        .get_job("legacy-signed")
+        .await
+        .unwrap()
+        .unwrap()
+        .receipt_json
+        .unwrap();
+    let receipt: serde_json::Value = serde_json::from_str(&receipt_json).unwrap();
+    let receipt_sha256 = receipt["receipt_sha256"].as_str().unwrap();
+    let result_media_type = coop_server::attestation::RESULT_ARTIFACT_MEDIA_TYPE;
+    let (legacy_result, legacy_envelope) = legacy_unbound_signed_bytes(
+        "legacy-signed",
+        receipt_sha256,
+        &receipt,
+        result_media_type,
+        &signing_key,
+    );
+    assert!(verify_attestation(
+        &legacy_envelope,
+        &ArtifactDigest::from_bytes(&legacy_result),
+        &[verifying_key],
+        &VerificationPolicy::default().with_tenant("t1"),
+    )
+    .is_err());
+    drop(seed);
+
+    let legacy_result_sha256 = format!("{:x}", Sha256::digest(&legacy_result));
+    let legacy_envelope_sha256 = format!("{:x}", Sha256::digest(&legacy_envelope));
+    let mut connection = raw_connection(&db).await;
+    let row_revision: i64 = sqlx::query_scalar(
+        "SELECT row_validation_revision FROM store_integrity WHERE singleton = 1",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO job_attestations(
+             job_id, receipt_sha256, result_media_type, result_artifact,
+             result_sha256, envelope_json, envelope_sha256, key_id, created_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
+    )
+    .bind("legacy-signed")
+    .bind(receipt_sha256)
+    .bind(result_media_type)
+    .bind(&legacy_result)
+    .bind(&legacy_result_sha256)
+    .bind(&legacy_envelope)
+    .bind(&legacy_envelope_sha256)
+    .bind(key_id(&verifying_key))
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE store_integrity
+         SET row_validation_revision = ?1,
+             accounting_validation_revision = 1
+         WHERE singleton = 1",
+    )
+    .bind(row_revision)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    rewrite_accounting_guards_to_r1(&mut connection, 2).await;
+    connection.close().await.unwrap();
+
+    let store = Arc::new(Store::open(&db).await.unwrap());
+    assert!(store
+        .get_attestation("legacy-signed")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store.pending_attestation_job_ids(10).await.unwrap(),
+        vec!["legacy-signed"]
+    );
+
+    let (off_app, off_state, _off_queue_rx) =
+        coop_server::build_app(test_config(&db), Arc::clone(&store), loopback_addr())
+            .await
+            .unwrap();
+    let (off_status, off_detail) = send(
+        &off_app,
+        request("GET", "/v1/jobs/legacy-signed", Some("test-key"), None),
+    )
+    .await;
+    assert_eq!(off_status, StatusCode::OK, "{off_detail}");
+    assert_eq!(off_detail["attestation"]["available"], false);
+    assert_eq!(off_detail["attestation"]["tenant"], serde_json::Value::Null);
+    off_state.begin_shutdown();
+    drop(off_app);
+    drop(off_state);
+    drop(store);
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    let store = Arc::new(Store::open(&db).await.unwrap());
+    assert_eq!(
+        store.pending_attestation_job_ids(10).await.unwrap(),
+        vec!["legacy-signed"]
+    );
+
+    let mut cfg = test_config(&db);
+    cfg.attestation_mode = coop_server::config::AttestationMode::Sign;
+    cfg.attestation_key_file = Some(key_path.to_string_lossy().into_owned());
+    let (app, _state, _queue_rx) = coop_server::build_app(cfg, Arc::clone(&store), loopback_addr())
+        .await
+        .unwrap();
+    let mut detail = serde_json::Value::Null;
+    for _ in 0..200 {
+        let response = send(
+            &app,
+            request("GET", "/v1/jobs/legacy-signed", Some("test-key"), None),
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+        detail = response.1;
+        if detail["attestation"]["available"] == true {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(detail["attestation"]["available"], true, "{detail}");
+    assert_eq!(detail["attestation"]["tenant"], "t1");
+
+    let envelope_response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/jobs/legacy-signed/attestation",
+            Some("test-key"),
+            None,
+        ))
+        .await
+        .unwrap();
+    let envelope = axum::body::to_bytes(envelope_response.into_body(), 3 << 20)
+        .await
+        .unwrap();
+    let result_response = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            "/v1/jobs/legacy-signed/result-artifact",
+            Some("test-key"),
+            None,
+        ))
+        .await
+        .unwrap();
+    let result = axum::body::to_bytes(result_response.into_body(), 17 << 20)
+        .await
+        .unwrap();
+    assert_ne!(&envelope[..], legacy_envelope.as_slice());
+    assert_ne!(&result[..], legacy_result.as_slice());
+    let verified = verify_attestation(
+        &envelope,
+        &ArtifactDigest::from_bytes(&result),
+        &[verifying_key],
+        &VerificationPolicy::default().with_tenant("t1"),
+    )
+    .unwrap();
+    assert_eq!(verified.statement().predicate().tenant(), "t1");
+    let result: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(result["tenant"], "t1");
 }
 
 fn python_name() -> &'static str {

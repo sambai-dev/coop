@@ -726,9 +726,7 @@ class CoopTests(unittest.TestCase):
 
         opener = QueueOpener(
             binary_response(envelope, "application/vnd.dsse.envelope.v1+json"),
-            binary_response(
-                artifact, "application/vnd.coop.execution-result.v1+json"
-            ),
+            binary_response(artifact, "application/vnd.coop.execution-result.v1+json"),
         )
         client = Coop("https://example.test", "tenant-secret", opener=opener)
 
@@ -835,7 +833,9 @@ class CoopTests(unittest.TestCase):
             },
             url="https://attacker.example/evidence",
         )
-        client = Coop("https://example.test", "tenant-secret", opener=QueueOpener(response))
+        client = Coop(
+            "https://example.test", "tenant-secret", opener=QueueOpener(response)
+        )
 
         with self.assertRaises(CoopError) as raised:
             client.download_result_artifact("job")

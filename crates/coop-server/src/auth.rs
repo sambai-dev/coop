@@ -1352,7 +1352,7 @@ fn validate_key_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_identity(field: &str, value: &str) -> Result<(), String> {
+pub(crate) fn validate_identity(field: &str, value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > 128
         || !value

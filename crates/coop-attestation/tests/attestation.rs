@@ -1,8 +1,10 @@
 use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE};
 use base64::Engine as _;
 use coop_attestation::{
-    build_statement, build_statement_from_receipt_json, create_attestation, dsse_v1_pae,
-    encode_statement, key_id, verify_attestation, ArtifactDigest, AttestationError, SigningKey,
+    build_statement as build_tenant_statement,
+    build_statement_from_receipt_json as build_tenant_statement_from_receipt_json,
+    create_attestation as create_tenant_attestation, dsse_v1_pae, encode_statement, key_id,
+    verify_attestation, ArtifactDigest, AttestationError, DsseEnvelope, SigningKey, StatementV1,
     SubjectArtifact, VerificationPolicy, VerifyingKey, COOP_EXECUTION_PREDICATE_TYPE,
     DSSE_PAYLOAD_TYPE, IN_TOTO_STATEMENT_TYPE, MAX_ENVELOPE_BYTES, MAX_SIGNATURES,
     MAX_STATEMENT_BYTES, MAX_TRUSTED_KEYS,
@@ -12,6 +14,7 @@ use serde_json::{json, Value};
 use std::num::NonZeroUsize;
 
 const EXECUTION_ID: &str = "0191f8cf-57ef-7c14-a736-9b4b933eb84a";
+const TENANT: &str = "tenant-vector";
 const SUBJECT_NAME: &str = "urn:coop:result:0191f8cf-57ef-7c14-a736-9b4b933eb84a";
 const SUBJECT_MEDIA_TYPE: &str = "application/vnd.coop.execution-result.v1+json";
 const RESULT_BYTES: &[u8] = b"{\"exit_code\":0,\"status\":\"succeeded\",\"stdout\":\"42\\n\"}\n";
@@ -57,6 +60,31 @@ fn subject() -> SubjectArtifact {
 
 fn expected_artifact() -> ArtifactDigest {
     ArtifactDigest::from_bytes(RESULT_BYTES)
+}
+
+fn build_statement(
+    execution_id: &str,
+    subject: &SubjectArtifact,
+    receipt: Value,
+) -> Result<StatementV1, AttestationError> {
+    build_tenant_statement(TENANT, execution_id, subject, receipt)
+}
+
+fn build_statement_from_receipt_json(
+    execution_id: &str,
+    subject: &SubjectArtifact,
+    receipt_json: &[u8],
+) -> Result<StatementV1, AttestationError> {
+    build_tenant_statement_from_receipt_json(TENANT, execution_id, subject, receipt_json)
+}
+
+fn create_attestation(
+    execution_id: &str,
+    subject: &SubjectArtifact,
+    receipt: Value,
+    signers: &[&SigningKey],
+) -> Result<DsseEnvelope, AttestationError> {
+    create_tenant_attestation(TENANT, execution_id, subject, receipt, signers)
 }
 
 fn statement_value() -> Value {
@@ -148,6 +176,7 @@ fn round_trip_authenticates_exact_statement_and_subject() {
         verified.statement().predicate().execution_id(),
         EXECUTION_ID
     );
+    assert_eq!(verified.statement().predicate().tenant(), TENANT);
     assert_eq!(verified.subject().name(), SUBJECT_NAME);
     assert_eq!(verified.subject_sha256(), expected_artifact().sha256());
     assert_eq!(verified.verified_key_ids(), &[key_id(&key.verifying_key())]);
@@ -580,6 +609,32 @@ fn authenticated_statement_schema_and_cross_fields_are_enforced() {
         |error| matches!(error, AttestationError::InvalidJson { .. }),
     );
 
+    let mut missing_tenant = statement_value();
+    missing_tenant["predicate"]
+        .as_object_mut()
+        .unwrap()
+        .remove("tenant");
+    assert_schema_error(
+        sign_statement_value(&missing_tenant, &key),
+        &key.verifying_key(),
+        |error| matches!(error, AttestationError::InvalidJson { .. }),
+    );
+
+    let mut invalid_tenant = statement_value();
+    invalid_tenant["predicate"]["tenant"] = Value::String("tenant\nother".into());
+    assert_schema_error(
+        sign_statement_value(&invalid_tenant, &key),
+        &key.verifying_key(),
+        |error| {
+            matches!(
+                error,
+                AttestationError::InvalidProfileField {
+                    field: "predicate.tenant"
+                }
+            )
+        },
+    );
+
     let mut cross_field = statement_value();
     cross_field["predicate"]["result"]["sha256"] = Value::String("a".repeat(64));
     assert_schema_error(
@@ -684,10 +739,30 @@ fn profile_constructor_rejects_ambiguous_identifiers_and_media_types() {
     }
     assert!(SubjectArtifact::from_bytes("contains\ncontrol", "application/json", b"{}").is_err());
     assert!(build_statement("", &subject(), receipt()).is_err());
+    assert!(build_tenant_statement("", EXECUTION_ID, &subject(), receipt()).is_err());
 }
 
 #[test]
 fn predicate_binds_the_current_coop_receipt_core() {
+    // Existing v0.3 receipts do not contain tenant. The predicate obtains it
+    // independently from the authoritative job row and remains backfillable.
+    assert_eq!(
+        build_statement(EXECUTION_ID, &subject(), receipt())
+            .unwrap()
+            .predicate()
+            .tenant(),
+        TENANT
+    );
+
+    let mut wrong_tenant = receipt();
+    wrong_tenant["tenant"] = Value::String("tenant-other".into());
+    assert!(matches!(
+        build_statement(EXECUTION_ID, &subject(), wrong_tenant),
+        Err(AttestationError::InvalidProfileField {
+            field: "predicate.receipt.tenant"
+        })
+    ));
+
     let mut wrong_job = receipt();
     wrong_job["job_id"] = Value::String("different-job".into());
     assert!(matches!(
@@ -829,6 +904,15 @@ fn server_receipt_json_entry_point_rejects_duplicates_before_signing() {
 fn artifact_digest_size_and_policy_are_independently_checked() {
     let key = signing_key(13);
     let envelope = signed_envelope_json(&[&key]);
+    assert!(matches!(
+        verify_attestation(
+            &envelope,
+            &expected_artifact(),
+            &[key.verifying_key()],
+            &VerificationPolicy::default().with_tenant("tenant-other")
+        ),
+        Err(AttestationError::TenantPolicyMismatch)
+    ));
     let wrong_bytes = ArtifactDigest::from_bytes(b"different result");
     assert!(matches!(
         verify_attestation(

@@ -13,4 +13,6 @@ The key is public test material and must never be used outside tests.
 fixture files are repository-friendly and have a final LF; `statement.json`
 and `envelope.json` represent wire bytes with that one fixture LF removed.
 The test regenerates both byte sequences and verifies the envelope against the
-public key and exact subject digest.
+public key and exact subject digest. The receipt deliberately models a v0.3
+row without a tenant member; the v1 statement and result still bind the
+authoritative `tenant-vector` identity supplied by the migrated job row.

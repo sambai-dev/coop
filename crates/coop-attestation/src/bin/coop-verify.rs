@@ -14,7 +14,9 @@ use std::process::ExitCode;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-const MAX_SUBJECT_FILE_BYTES: usize = 8 * 1024 * 1024;
+// Keep this in lockstep with coop_store::MAX_RESULT_ARTIFACT_BYTES so every
+// exact artifact the server can persist remains verifiable by the release CLI.
+const MAX_SUBJECT_FILE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -58,6 +60,9 @@ enum Command {
         /// Distinct trusted-key signatures required.
         #[arg(long, default_value = "1")]
         threshold: NonZeroUsize,
+        /// Optional policy assertion for the authenticated execution tenant.
+        #[arg(long)]
+        tenant: Option<String>,
         /// Optional policy assertion for the authenticated subject name.
         #[arg(long)]
         subject_name: Option<String>,
@@ -76,6 +81,7 @@ struct KeyOperationOutput<'a> {
 struct VerifyOutput<'a> {
     verified: bool,
     execution_id: &'a str,
+    tenant: &'a str,
     subject_name: &'a str,
     subject_media_type: &'a str,
     subject_sha256: &'a str,
@@ -118,10 +124,14 @@ fn run(cli: Cli) -> Result<(), AttestationError> {
             subject,
             public_keys,
             threshold,
+            tenant,
             subject_name,
             media_type,
         } => {
             let mut policy = VerificationPolicy::default().with_minimum_signatures(threshold);
+            if let Some(tenant) = tenant {
+                policy = policy.with_tenant(tenant);
+            }
             if let Some(name) = subject_name {
                 policy = policy.with_subject_name(name);
             }
@@ -157,6 +167,7 @@ fn run(cli: Cli) -> Result<(), AttestationError> {
             write_json(&VerifyOutput {
                 verified: true,
                 execution_id: statement.predicate().execution_id(),
+                tenant: statement.predicate().tenant(),
                 subject_name: verified.subject().name(),
                 subject_media_type: verified.subject().media_type(),
                 subject_sha256: verified.subject_sha256(),
@@ -221,4 +232,33 @@ fn write_json(value: &impl Serialize) -> Result<(), AttestationError> {
     locked.write_all(&encoded)?;
     locked.write_all(b"\n")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subject_reader_accepts_server_limit_and_rejects_one_byte_more() {
+        let temporary = tempfile::tempdir().unwrap();
+        let subject = temporary.path().join("result-artifact.json");
+        let file = std::fs::File::create(&subject).unwrap();
+        file.set_len(MAX_SUBJECT_FILE_BYTES as u64).unwrap();
+        drop(file);
+
+        let accepted = read_limited_regular_file(&subject, MAX_SUBJECT_FILE_BYTES, false).unwrap();
+        assert_eq!(accepted.len(), MAX_SUBJECT_FILE_BYTES);
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&subject)
+            .unwrap();
+        file.set_len(MAX_SUBJECT_FILE_BYTES as u64 + 1).unwrap();
+        drop(file);
+        assert!(matches!(
+            read_limited_regular_file(&subject, MAX_SUBJECT_FILE_BYTES, false),
+            Err(AttestationError::SubjectArtifactTooLarge { max_bytes })
+                if max_bytes == MAX_SUBJECT_FILE_BYTES
+        ));
+    }
 }
