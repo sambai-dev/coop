@@ -66,6 +66,32 @@ exported. Recovery receipts intentionally omit evidence that could not be
 reconstructed after a restart, so those execution-specific members remain
 optional; requested limits may also be partial on migrated records.
 
+`JobDetail.attestation` reports only signed-evidence availability, immutable
+digests, sizes, media type, key ID, and tenant-scoped relative download URLs.
+`download_attestation` / `downloadAttestation` and
+`download_result_artifact` / `downloadResultArtifact` return exact bytes with
+content type and length. They reject a missing, malformed, or mismatched
+`X-Content-Sha256` and never decode then re-encode JSON. This validates HTTP
+content integrity only. It does not verify DSSE or establish trust in the
+advertised key.
+
+Save both byte arrays directly and verify them offline with an independently
+pinned public key:
+
+```bash
+coop-verify verify \
+  --envelope job.dsse.json \
+  --subject job-result.json \
+  --public-key trusted-coop-attestation.pub.pem \
+  --subject-name "urn:coop:result:$JOB_ID" \
+  --media-type application/vnd.coop.execution-result.v1+json
+```
+
+The typed `attestation_public_key()` / `attestationPublicKey()` endpoint is
+useful for discovery and rotation diagnostics, but its own `trust_notice` is
+literal: authenticate and pin the key out of band. A successful verifier exit
+authenticates the claim and exact subject, not a successful execution outcome.
+
 ## TypeScript
 
 Build and test the TypeScript package with `npm ci && npm test && npm run typecheck` under `sdks/typescript`; `npm pack` then creates an installable tarball for a consuming project. It uses platform `fetch` and `WebSocket`:

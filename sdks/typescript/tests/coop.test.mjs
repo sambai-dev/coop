@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -12,6 +13,19 @@ function response(value, status = 200, headers = {}) {
   return new Response(value === undefined ? null : JSON.stringify(value), {
     status,
     headers: { "content-type": "application/json", ...headers },
+  });
+}
+
+function binaryResponse(content, contentType, headers = {}) {
+  const bytes = Uint8Array.from(content);
+  return new Response(bytes, {
+    status: 200,
+    headers: {
+      "content-type": contentType,
+      "content-length": String(bytes.byteLength),
+      "x-content-sha256": createHash("sha256").update(bytes).digest("hex"),
+      ...headers,
+    },
   });
 }
 
@@ -505,12 +519,27 @@ test("whoami and capabilities expose the complete v0.4 discovery contract", asyn
         event_cursors: true,
         stream_tickets: true,
         receipts: true,
+        signed_attestations: true,
       },
+      attestations: {
+        enabled: true,
+        algorithm: "Ed25519",
+        envelope_format: "DSSE/in-toto Statement v1",
+        key_id: "ed25519:abc",
+        public_key_url: "/v1/attestation/public-key",
+      },
+    }),
+    response({
+      algorithm: "Ed25519",
+      key_id: "ed25519:abc",
+      public_key_pem: "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n",
+      trust_notice: "Pin this key out of band.",
     }),
   );
   const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
   const identity = await coop.whoami();
   const capabilities = await coop.capabilities();
+  const publicKey = await coop.attestationPublicKey();
   assert.equal(identity.principal_id, "legacy:acme");
   assert.deepEqual(identity.scopes, [
     "jobs:submit",
@@ -522,7 +551,151 @@ test("whoami and capabilities expose the complete v0.4 discovery contract", asyn
   assert.equal(capabilities.execution.isolation_class, "gvisor-application-kernel");
   assert.equal(capabilities.limits.concurrent_mem_mb_max, 4_096);
   assert.equal(capabilities.features.stream_tickets, true);
+  assert.equal(capabilities.features.signed_attestations, true);
+  assert.equal(capabilities.attestations.algorithm, "Ed25519");
+  assert.equal(publicKey.key_id, "ed25519:abc");
+  assert.equal(transport.calls[2].init.headers.Authorization, "Bearer secret");
   assert.equal(transport.calls[0].url.pathname, "/v1/whoami");
+});
+
+test("attestation downloads preserve exact binary order and expose validated metadata", async () => {
+  const envelopeBytes = Uint8Array.from([0, 255, 1, 128, 10, 13, 123, 125]);
+  const artifactBytes = Uint8Array.from([125, 123, 13, 10, 128, 1, 255, 0]);
+  const transport = queuedFetch(
+    binaryResponse(envelopeBytes, "application/vnd.dsse.envelope.v1+json"),
+    binaryResponse(artifactBytes, "application/vnd.coop.execution-result.v1+json"),
+  );
+  const coop = new Coop("https://example.test/prefix", "tenant-secret", {
+    fetch: transport.fetch,
+  });
+
+  const envelope = await coop.downloadAttestation("job/one");
+  const artifact = await coop.downloadResultArtifact("job/one");
+
+  assert.deepEqual(Array.from(envelope.content), Array.from(envelopeBytes));
+  assert.deepEqual(Array.from(artifact.content), Array.from(artifactBytes));
+  assert.equal(envelope.contentLength, envelopeBytes.byteLength);
+  assert.equal(envelope.contentType, "application/vnd.dsse.envelope.v1+json");
+  assert.equal(
+    envelope.sha256,
+    createHash("sha256").update(envelopeBytes).digest("hex"),
+  );
+  assert.equal(transport.calls[0].url.pathname, "/prefix/v1/jobs/job%2Fone/attestation");
+  assert.equal(
+    transport.calls[1].url.pathname,
+    "/prefix/v1/jobs/job%2Fone/result-artifact",
+  );
+  assert.equal(
+    transport.calls[0].init.headers.Accept,
+    "application/vnd.dsse.envelope.v1+json",
+  );
+  for (const call of transport.calls) {
+    assert.equal(call.init.redirect, "error");
+    assert.equal(call.init.headers.Authorization, "Bearer tenant-secret");
+    assert.equal(call.url.toString().includes("tenant-secret"), false);
+  }
+});
+
+test("artifact downloads reject missing, malformed, and mismatched digests", async () => {
+  const content = Uint8Array.from([1, 2, 3]);
+  const cases = [
+    {
+      headers: { "content-type": "application/octet-stream" },
+      code: "invalid_response",
+    },
+    {
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-content-sha256": "not-a-digest",
+      },
+      code: "invalid_response",
+    },
+    {
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-content-sha256": "0".repeat(64),
+      },
+      code: "content_digest_mismatch",
+    },
+  ];
+  for (const { headers, code } of cases) {
+    const coop = new Coop("https://example.test", "secret", {
+      fetch: async () => new Response(content, { status: 200, headers }),
+    });
+    await assert.rejects(
+      coop.downloadAttestation("job"),
+      (error) => error instanceof CoopError && error.code === code,
+    );
+  }
+});
+
+test("artifact downloads preserve tenant-scoped structured 404s", async () => {
+  const transport = queuedFetch(response({
+    error: {
+      code: "attestation_unavailable",
+      message: "no signed attestation",
+      request_id: "req-attest",
+      retryable: false,
+    },
+  }, 404));
+  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+
+  await assert.rejects(coop.downloadAttestation("foreign-or-missing"), (error) => {
+    assert(error instanceof CoopError);
+    assert.equal(error.status, 404);
+    assert.equal(error.code, "attestation_unavailable");
+    assert.equal(error.requestId, "req-attest");
+    assert.equal(error.retryable, false);
+    return true;
+  });
+  assert.equal(transport.calls.length, 1);
+  assert.equal(transport.calls[0].init.headers.Authorization, "Bearer secret");
+});
+
+test("artifact downloads reject redirected and cross-origin responses", async () => {
+  const bytes = Uint8Array.from([1]);
+  const redirected = binaryResponse(bytes, "application/octet-stream");
+  Object.defineProperty(redirected, "redirected", { value: true });
+  const crossOrigin = binaryResponse(bytes, "application/octet-stream");
+  Object.defineProperty(crossOrigin, "url", { value: "https://attacker.example/evidence" });
+  const transport = queuedFetch(redirected, crossOrigin);
+  const coop = new Coop("https://example.test", "tenant-secret", { fetch: transport.fetch });
+
+  await assert.rejects(
+    coop.downloadAttestation("job"),
+    (error) => error instanceof CoopError && error.code === "unsafe_redirect" &&
+      !String(error).includes("tenant-secret"),
+  );
+  await assert.rejects(
+    coop.downloadResultArtifact("job"),
+    (error) => error instanceof CoopError && error.code === "unsafe_redirect" &&
+      !String(error).includes("tenant-secret"),
+  );
+  assert.equal(transport.calls.every((call) => call.init.redirect === "error"), true);
+});
+
+test("artifact download deadlines and aborts stop active transfers", async () => {
+  const hangingFetch = (_url, init) => new Promise((_resolve, reject) => {
+    init.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+  });
+  const coop = new Coop("https://example.test", "secret", { fetch: hangingFetch });
+
+  await assert.rejects(coop.downloadAttestation("job", { timeoutMs: 5 }), (error) => {
+    assert(error instanceof CoopError);
+    assert.equal(error.code, "request_timeout");
+    assert.equal(error.retryable, true);
+    return true;
+  });
+
+  const controller = new AbortController();
+  const pending = coop.downloadResultArtifact("job", { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(pending, (error) => {
+    assert(error instanceof CoopError);
+    assert.equal(error.code, "request_aborted");
+    assert.equal(error.retryable, false);
+    return true;
+  });
 });
 
 test("job detail distinguishes unknown policy from persisted and executor evidence", async () => {

@@ -58,6 +58,41 @@ result = client.result(job["job_id"], timeout=60)
 print(result["status"], result["stdout"])
 ```
 
+For a terminal job with `detail["attestation"]["available"] == True`, download
+the two immutable files without JSON decoding or re-encoding:
+
+```python
+from pathlib import Path
+
+detail = client.get(job["job_id"])
+if detail["attestation"]["available"]:
+    envelope = client.download_attestation(job["job_id"])
+    subject = client.download_result_artifact(job["job_id"])
+    Path("job.dsse.json").write_bytes(envelope["content"])
+    Path("job-result.json").write_bytes(subject["content"])
+```
+
+Both download methods require the tenant bearer credential, refuse
+cross-origin redirects, preserve the exact bytes, and validate the response
+`X-Content-Sha256`. That is transport-integrity checking, not signature
+verification. Obtain and pin the operator's Ed25519 public key through an
+authenticated out-of-band channel, then verify offline:
+
+```bash
+coop-verify verify \
+  --envelope job.dsse.json \
+  --subject job-result.json \
+  --public-key trusted-coop-attestation.pub.pem \
+  --subject-name "urn:coop:result:$JOB_ID" \
+  --media-type application/vnd.coop.execution-result.v1+json
+```
+
+`attestation_public_key()` is typed discovery data and includes an explicit
+trust notice; fetching a key from the same server as the evidence does not make
+it a trust anchor. Exit zero authenticates the attestation profile and subject
+bytes, not a successful job outcome. Inspect the verifier's `outcome` and
+`event_chain_complete` fields under application policy.
+
 Pass `requirements={"minimum_isolation": "linux-shared-kernel"}` to enforce an
 execution boundary at admission. `submit_result()` additively exposes the
 response `Location` and `Idempotency-Replayed` metadata. Idempotency keys are

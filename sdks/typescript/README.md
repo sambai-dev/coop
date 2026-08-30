@@ -49,6 +49,40 @@ const result = await coop.result(job.job_id, 60_000);
 console.log(result.status, result.stdout);
 ```
 
+For a terminal job whose `detail.attestation.available` is true, preserve the
+exact DSSE envelope and signed result subject. In Node.js:
+
+```ts
+import { writeFile } from "node:fs/promises";
+
+const detail = await coop.get(job.job_id);
+if (detail.attestation.available) {
+  const envelope = await coop.downloadAttestation(job.job_id);
+  const subject = await coop.downloadResultArtifact(job.job_id);
+  await writeFile("job.dsse.json", envelope.content);
+  await writeFile("job-result.json", subject.content);
+}
+```
+
+The downloads remain authenticated to the tenant, set `redirect: "error"`,
+retain binary order, and validate `X-Content-Sha256`. The returned
+`contentType`, `contentLength`, and `sha256` describe those exact bytes; they do
+not mean the DSSE signature was verified. Pin the operator's Ed25519 public key
+through an authenticated out-of-band channel, then run:
+
+```bash
+coop-verify verify \
+  --envelope job.dsse.json \
+  --subject job-result.json \
+  --public-key trusted-coop-attestation.pub.pem \
+  --subject-name "urn:coop:result:$JOB_ID" \
+  --media-type application/vnd.coop.execution-result.v1+json
+```
+
+`attestationPublicKey()` is typed discovery data, not a trust anchor. Exit zero
+authenticates the envelope profile and exact subject; callers must separately
+evaluate `outcome` and `event_chain_complete`.
+
 For an idempotent v0.4 submission, use `submitResult()`. It preserves the
 ordinary response body under `job` and also exposes the `Location` and
 `Idempotency-Replayed` response headers:

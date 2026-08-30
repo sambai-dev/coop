@@ -193,6 +193,20 @@ export interface JobDetail extends JobView {
   execution_policy: ExecutionPolicy;
   receipt: Receipt | null;
   receipt_sha256: string | null;
+  attestation: JobAttestationStatus;
+}
+
+export interface JobAttestationStatus {
+  available: boolean;
+  key_id: string | null;
+  receipt_sha256: string | null;
+  result_media_type: string | null;
+  result_sha256: string | null;
+  result_size_bytes: number | null;
+  envelope_sha256: string | null;
+  envelope_size_bytes: number | null;
+  envelope_url: string | null;
+  result_artifact_url: string | null;
 }
 
 export type Job = JobView | JobDetail;
@@ -365,6 +379,15 @@ export interface FeatureCapabilities {
   event_cursors: boolean;
   stream_tickets: boolean;
   receipts: boolean;
+  signed_attestations: boolean;
+}
+
+export interface AttestationCapabilities {
+  enabled: boolean;
+  algorithm: string | null;
+  envelope_format: string | null;
+  key_id: string | null;
+  public_key_url: string | null;
 }
 
 export interface Capabilities {
@@ -373,6 +396,25 @@ export interface Capabilities {
   execution: ExecutionCapabilities;
   limits: LimitCapabilities;
   features: FeatureCapabilities;
+  attestations: AttestationCapabilities;
+}
+
+export interface AttestationPublicKey {
+  algorithm: string;
+  key_id: string;
+  public_key_pem: string;
+  trust_notice: string;
+}
+
+/**
+ * Exact response bytes plus HTTP integrity metadata. `sha256` has been checked
+ * against X-Content-Sha256; no DSSE signature or key trust has been verified.
+ */
+export interface ArtifactDownload {
+  content: Uint8Array;
+  contentType: string;
+  contentLength: number;
+  sha256: string;
 }
 
 export interface WhoAmI {
@@ -634,6 +676,21 @@ async function messageText(value: unknown): Promise<string> {
   return String(value);
 }
 
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) {
+    throw new CoopError("this runtime does not provide Web Crypto SHA-256", {
+      code: "digest_unavailable",
+      retryable: false,
+    });
+  }
+  // Copy into a plain ArrayBuffer-backed view so this remains accepted by
+  // strict DOM typings even when callers hold a shared or offset view.
+  const input = Uint8Array.from(bytes);
+  const digest = new Uint8Array(await subtle.digest("SHA-256", input));
+  return Array.from(digest, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
 interface RequestResult<T> {
   data: T;
   status: number;
@@ -823,6 +880,183 @@ export class Coop {
     return (await this.requestResult<T>(method, path, body, options, query, policy)).data;
   }
 
+  private async downloadArtifact(
+    path: string,
+    accept: string,
+    options: RequestOptions = {},
+  ): Promise<ArtifactDownload> {
+    const timeoutMs = options.timeoutMs ?? this.timeoutMs;
+    assertPositive("timeoutMs", timeoutMs);
+    throwIfAborted(options.signal);
+    const requestedUrl = this.url(path);
+    const controller = new AbortController();
+    let timedOut = false;
+    const onAbort = () => controller.abort(options.signal?.reason);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      let response: Response;
+      try {
+        response = await this.fetcher(requestedUrl, {
+          method: "GET",
+          redirect: "error",
+          signal: controller.signal,
+          headers: {
+            Accept: accept,
+            Authorization: `Bearer ${this.#apiKey}`,
+            "X-Coop-Client": "typescript/0.3.0",
+          },
+        });
+      } catch (cause) {
+        if (timedOut) {
+          throw new CoopError(`request timed out after ${timeoutMs}ms`, {
+            code: "request_timeout",
+            retryable: true,
+            cause,
+          });
+        }
+        if (options.signal?.aborted) throw abortError();
+        throw new CoopError(cause instanceof Error ? cause.message : String(cause), {
+          code: "transport_error",
+          retryable: true,
+          cause,
+        });
+      }
+
+      if (response.redirected) {
+        throw new CoopError("refused a redirected artifact response", {
+          status: response.status,
+          code: "unsafe_redirect",
+        });
+      }
+      if (response.url) {
+        let responseUrl: URL;
+        try {
+          responseUrl = new URL(response.url);
+        } catch (cause) {
+          throw new CoopError("artifact response URL did not have a valid HTTP origin", {
+            status: response.status,
+            code: "unsafe_redirect",
+            cause,
+          });
+        }
+        if (responseUrl.origin !== requestedUrl.origin) {
+          throw new CoopError("refused a cross-origin artifact response", {
+            status: response.status,
+            code: "unsafe_redirect",
+          });
+        }
+      }
+
+      if (!response.ok) {
+        let text: string;
+        try {
+          text = await response.text();
+        } catch (cause) {
+          if (timedOut) {
+            throw new CoopError(`request timed out after ${timeoutMs}ms`, {
+              code: "request_timeout",
+              retryable: true,
+              cause,
+            });
+          }
+          if (options.signal?.aborted) throw abortError();
+          throw new CoopError("failed to read the server response", {
+            code: "transport_error",
+            retryable: true,
+            cause,
+          });
+        }
+        throw parseHttpError(response.status, text, response.headers);
+      }
+
+      let content: Uint8Array;
+      try {
+        content = new Uint8Array(await response.arrayBuffer());
+      } catch (cause) {
+        if (timedOut) {
+          throw new CoopError(`request timed out after ${timeoutMs}ms`, {
+            code: "request_timeout",
+            retryable: true,
+            cause,
+          });
+        }
+        if (options.signal?.aborted) throw abortError();
+        throw new CoopError("failed to read the artifact response", {
+          code: "transport_error",
+          retryable: true,
+          cause,
+        });
+      }
+
+      const digestHeader = response.headers.get("x-content-sha256");
+      if (digestHeader === null) {
+        throw new CoopError("artifact response omitted X-Content-Sha256", {
+          status: response.status,
+          code: "invalid_response",
+        });
+      }
+      if (!/^[0-9a-fA-F]{64}$/.test(digestHeader)) {
+        throw new CoopError("artifact response contained a malformed X-Content-Sha256", {
+          status: response.status,
+          code: "invalid_response",
+        });
+      }
+      const actualSha256 = await sha256Hex(content);
+      if (actualSha256 !== digestHeader.toLowerCase()) {
+        throw new CoopError("artifact bytes did not match X-Content-Sha256", {
+          status: response.status,
+          code: "content_digest_mismatch",
+          retryable: true,
+        });
+      }
+
+      const contentType = response.headers.get("content-type");
+      if (contentType === null || contentType.trim() === "") {
+        throw new CoopError("artifact response omitted Content-Type", {
+          status: response.status,
+          code: "invalid_response",
+        });
+      }
+      const declaredLength = response.headers.get("content-length");
+      if (declaredLength !== null) {
+        if (!/^\d+$/.test(declaredLength)) {
+          throw new CoopError("artifact response contained a malformed Content-Length", {
+            status: response.status,
+            code: "invalid_response",
+          });
+        }
+        const parsedLength = Number(declaredLength);
+        if (!Number.isSafeInteger(parsedLength)) {
+          throw new CoopError("artifact Content-Length exceeded the safe integer range", {
+            status: response.status,
+            code: "invalid_response",
+          });
+        }
+        if (parsedLength !== content.byteLength) {
+          throw new CoopError("artifact response body did not match Content-Length", {
+            status: response.status,
+            code: "transport_error",
+            retryable: true,
+          });
+        }
+      }
+      return {
+        content,
+        contentType,
+        contentLength: content.byteLength,
+        sha256: actualSha256,
+      };
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
   async submit(
     language: Language | (string & {}),
     code: string,
@@ -953,6 +1187,35 @@ export class Coop {
 
   capabilities(options: RequestOptions = {}): Promise<Capabilities> {
     return this.request("GET", "/v1/capabilities", undefined, options);
+  }
+
+  /** Discovery only: pin this key out of band before treating it as trusted. */
+  attestationPublicKey(options: RequestOptions = {}): Promise<AttestationPublicKey> {
+    return this.request("GET", "/v1/attestation/public-key", undefined, options);
+  }
+
+  /** Download exact persisted DSSE bytes and validate their HTTP digest. */
+  downloadAttestation(
+    jobId: string,
+    options: RequestOptions = {},
+  ): Promise<ArtifactDownload> {
+    return this.downloadArtifact(
+      `${this.jobPath(jobId)}/attestation`,
+      "application/vnd.dsse.envelope.v1+json",
+      options,
+    );
+  }
+
+  /** Download exact signed-subject bytes and validate their HTTP digest. */
+  downloadResultArtifact(
+    jobId: string,
+    options: RequestOptions = {},
+  ): Promise<ArtifactDownload> {
+    return this.downloadArtifact(
+      `${this.jobPath(jobId)}/result-artifact`,
+      "application/vnd.coop.execution-result.v1+json",
+      options,
+    );
   }
 
   async list(options: ListOptions = {}): Promise<JobPage> {

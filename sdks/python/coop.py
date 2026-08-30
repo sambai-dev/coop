@@ -8,6 +8,8 @@ fallback.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import http.client
 import json
 import math
@@ -36,6 +38,9 @@ from typing import (
 )
 
 __all__ = [
+    "ArtifactDownload",
+    "AttestationCapabilities",
+    "AttestationPublicKey",
     "Capabilities",
     "CancellationResponse",
     "Coop",
@@ -52,6 +57,7 @@ __all__ = [
     "HashedCoopEvent",
     "IsolationClass",
     "Job",
+    "JobAttestationStatus",
     "JobDetail",
     "JobPage",
     "JobResult",
@@ -381,6 +387,22 @@ class JobDetail(JobView):
     execution_policy: ExecutionPolicy
     receipt: Optional[Receipt]
     receipt_sha256: Optional[str]
+    attestation: "JobAttestationStatus"
+
+
+class JobAttestationStatus(TypedDict):
+    """Availability and immutable digests for a job's signed evidence."""
+
+    available: bool
+    key_id: Optional[str]
+    receipt_sha256: Optional[str]
+    result_media_type: Optional[str]
+    result_sha256: Optional[str]
+    result_size_bytes: Optional[int]
+    envelope_sha256: Optional[str]
+    envelope_size_bytes: Optional[int]
+    envelope_url: Optional[str]
+    result_artifact_url: Optional[str]
 
 
 Job = Union[JobView, JobDetail]
@@ -467,6 +489,15 @@ class FeatureCapabilities(TypedDict):
     event_cursors: bool
     stream_tickets: bool
     receipts: bool
+    signed_attestations: bool
+
+
+class AttestationCapabilities(TypedDict):
+    enabled: bool
+    algorithm: Optional[str]
+    envelope_format: Optional[str]
+    key_id: Optional[str]
+    public_key_url: Optional[str]
 
 
 class Capabilities(TypedDict):
@@ -475,6 +506,27 @@ class Capabilities(TypedDict):
     execution: ExecutionCapabilities
     limits: LimitCapabilities
     features: FeatureCapabilities
+    attestations: AttestationCapabilities
+
+
+class AttestationPublicKey(TypedDict):
+    algorithm: str
+    key_id: str
+    public_key_pem: str
+    trust_notice: str
+
+
+class ArtifactDownload(TypedDict):
+    """Exact response bytes plus validated transport-integrity metadata.
+
+    ``sha256`` is checked against ``X-Content-Sha256``. This does not verify
+    the DSSE signature or establish trust in the server's signing key.
+    """
+
+    content: bytes
+    content_type: str
+    content_length: int
+    sha256: str
 
 
 class WhoAmI(TypedDict):
@@ -576,21 +628,48 @@ def _error_from_response(
     )
 
 
+def _header_value(headers: Mapping[str, str], name: str) -> Optional[str]:
+    """Read a response header from HTTPMessage or a test Mapping."""
+
+    value = headers.get(name)
+    if value is not None:
+        return str(value)
+    wanted = name.lower()
+    for key, candidate in headers.items():
+        if str(key).lower() == wanted:
+            return str(candidate)
+    return None
+
+
+def _http_origin(url: str) -> Tuple[str, Optional[str], int]:
+    parts = urllib.parse.urlsplit(url)
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https") or parts.hostname is None:
+        raise ValueError("URL does not have an HTTP origin")
+    port = parts.port or (443 if scheme == "https" else 80)
+    return (scheme, parts.hostname.lower(), port)
+
+
 class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
     """Prevent an HTTP redirect from forwarding a tenant key to another origin."""
 
     def __init__(self, base_url: str) -> None:
         super().__init__()
-        parts = urllib.parse.urlsplit(base_url)
-        port = parts.port or (443 if parts.scheme.lower() == "https" else 80)
-        self._origin = (parts.scheme.lower(), parts.hostname, port)
+        self._origin = _http_origin(base_url)
 
     def redirect_request(
         self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
     ) -> Any:
-        target = urllib.parse.urlsplit(urllib.parse.urljoin(req.full_url, newurl))
-        port = target.port or (443 if target.scheme.lower() == "https" else 80)
-        origin = (target.scheme.lower(), target.hostname, port)
+        absolute = urllib.parse.urljoin(req.full_url, newurl)
+        try:
+            origin = _http_origin(absolute)
+        except ValueError as exc:
+            raise CoopError(
+                "refused a redirect without a valid HTTP origin",
+                status=code,
+                code="unsafe_redirect",
+                body=newurl,
+            ) from exc
         if origin != self._origin:
             raise CoopError(
                 "refused a cross-origin redirect that could expose the API key",
@@ -637,6 +716,7 @@ class Coop:
         )
         self.api_key = api_key
         self.timeout = timeout
+        self._origin = _http_origin(self.base_url)
         self._opener = (
             opener
             or urllib.request.build_opener(_SameOriginRedirect(self.base_url)).open
@@ -772,6 +852,156 @@ class Coop:
                 else "transport_error"
             )
             raise CoopError(str(reason), code=code, retryable=True) from exc
+
+    def _request_bytes(
+        self,
+        path: str,
+        *,
+        accept: str,
+        timeout: Optional[float] = None,
+    ) -> ArtifactDownload:
+        """Read an authenticated artifact without decoding or re-encoding it."""
+
+        if timeout is not None and (
+            isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0
+        ):
+            raise ValueError("timeout must be finite and positive")
+        request = urllib.request.Request(
+            self._url(path),
+            method="GET",
+            headers={
+                "Accept": accept,
+                "Authorization": f"Bearer {self.api_key}",
+                "User-Agent": f"coop-python/{__version__}",
+            },
+        )
+        try:
+            with self._opener(
+                request,
+                timeout=self.timeout if timeout is None else timeout,
+            ) as response:
+                response_url_fn = getattr(response, "geturl", None)
+                response_url = response_url_fn() if callable(response_url_fn) else None
+                if response_url:
+                    try:
+                        response_origin = _http_origin(str(response_url))
+                    except ValueError as exc:
+                        raise CoopError(
+                            "refused a response without a valid HTTP origin",
+                            status=getattr(response, "status", None),
+                            code="unsafe_redirect",
+                        ) from exc
+                    if response_origin != self._origin:
+                        raise CoopError(
+                            "refused a cross-origin response that could expose the API key",
+                            status=getattr(response, "status", None),
+                            code="unsafe_redirect",
+                        )
+                raw = response.read()
+                response_headers = cast(
+                    Mapping[str, str], getattr(response, "headers", {})
+                )
+                response_status = cast(Optional[int], getattr(response, "status", None))
+        except urllib.error.HTTPError as exc:
+            response_headers = cast(Mapping[str, str], exc.headers)
+            try:
+                try:
+                    body = exc.read().decode("utf-8", errors="replace")
+                except (
+                    http.client.HTTPException,
+                    urllib.error.URLError,
+                    TimeoutError,
+                    OSError,
+                ) as read_exc:
+                    reason = getattr(read_exc, "reason", read_exc)
+                    raise CoopError(
+                        f"failed to read HTTP {exc.code} response body: {reason}",
+                        status=exc.code,
+                        code="transport_error",
+                        request_id=_header_value(response_headers, "x-request-id"),
+                        retryable=True,
+                        retry_after=_retry_after(response_headers),
+                    ) from read_exc
+            finally:
+                exc.close()
+            raise _error_from_response(exc.code, body, response_headers) from None
+        except CoopError:
+            raise
+        except (
+            http.client.HTTPException,
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+        ) as exc:
+            reason = getattr(exc, "reason", exc)
+            code = (
+                "request_timeout"
+                if isinstance(reason, TimeoutError)
+                else "transport_error"
+            )
+            raise CoopError(str(reason), code=code, retryable=True) from exc
+
+        digest_header = _header_value(response_headers, "x-content-sha256")
+        if digest_header is None:
+            raise CoopError(
+                "artifact response omitted X-Content-Sha256",
+                status=response_status,
+                code="invalid_response",
+            )
+        if len(digest_header) != 64 or any(
+            character not in "0123456789abcdefABCDEF" for character in digest_header
+        ):
+            raise CoopError(
+                "artifact response contained a malformed X-Content-Sha256",
+                status=response_status,
+                code="invalid_response",
+            )
+        expected_sha256 = digest_header.lower()
+        actual_sha256 = hashlib.sha256(raw).hexdigest()
+        if not hmac.compare_digest(expected_sha256, actual_sha256):
+            raise CoopError(
+                "artifact bytes did not match X-Content-Sha256",
+                status=response_status,
+                code="content_digest_mismatch",
+                retryable=True,
+            )
+
+        content_type = _header_value(response_headers, "content-type")
+        if content_type is None or not content_type.strip():
+            raise CoopError(
+                "artifact response omitted Content-Type",
+                status=response_status,
+                code="invalid_response",
+            )
+        declared_length = _header_value(response_headers, "content-length")
+        if declared_length is not None:
+            try:
+                parsed_length = int(declared_length, 10)
+            except ValueError as exc:
+                raise CoopError(
+                    "artifact response contained a malformed Content-Length",
+                    status=response_status,
+                    code="invalid_response",
+                ) from exc
+            if parsed_length < 0:
+                raise CoopError(
+                    "artifact response contained a negative Content-Length",
+                    status=response_status,
+                    code="invalid_response",
+                )
+            if parsed_length != len(raw):
+                raise CoopError(
+                    "artifact response body did not match Content-Length",
+                    status=response_status,
+                    code="transport_error",
+                    retryable=True,
+                )
+        return {
+            "content": raw,
+            "content_type": content_type,
+            "content_length": len(raw),
+            "sha256": actual_sha256,
+        }
 
     @staticmethod
     def _limits_dict(
@@ -1022,6 +1252,40 @@ class Coop:
 
     def capabilities(self) -> Capabilities:
         return cast(Capabilities, self._request("GET", "/v1/capabilities"))
+
+    def attestation_public_key(self) -> AttestationPublicKey:
+        """Return key material advertised by this authenticated Coop server.
+
+        The response is discovery data, not a trust anchor. Pin the public key
+        through an authenticated out-of-band channel before verifying evidence.
+        """
+
+        return cast(
+            AttestationPublicKey,
+            self._request("GET", "/v1/attestation/public-key"),
+        )
+
+    def download_attestation(
+        self, job_id: str, *, timeout: Optional[float] = None
+    ) -> ArtifactDownload:
+        """Download exact persisted DSSE bytes and validate their HTTP digest."""
+
+        return self._request_bytes(
+            self._job_path(job_id) + "/attestation",
+            accept="application/vnd.dsse.envelope.v1+json",
+            timeout=timeout,
+        )
+
+    def download_result_artifact(
+        self, job_id: str, *, timeout: Optional[float] = None
+    ) -> ArtifactDownload:
+        """Download exact signed-subject bytes and validate their HTTP digest."""
+
+        return self._request_bytes(
+            self._job_path(job_id) + "/result-artifact",
+            accept="application/vnd.coop.execution-result.v1+json",
+            timeout=timeout,
+        )
 
     def list(
         self,

@@ -88,6 +88,33 @@ LIMITS_SCHEMA = _object_schema(
     }
 )
 
+ATTESTATION_STATUS_SCHEMA = _object_schema(
+    {
+        "available": {"type": "boolean"},
+        "key_id": {"type": ["string", "null"]},
+        "receipt_sha256": {"type": ["string", "null"]},
+        "result_media_type": {"type": ["string", "null"]},
+        "result_sha256": {"type": ["string", "null"]},
+        "result_size_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "envelope_sha256": {"type": ["string", "null"]},
+        "envelope_size_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "envelope_url": {"type": ["string", "null"]},
+        "result_artifact_url": {"type": ["string", "null"]},
+    },
+    (
+        "available",
+        "key_id",
+        "receipt_sha256",
+        "result_media_type",
+        "result_sha256",
+        "result_size_bytes",
+        "envelope_sha256",
+        "envelope_size_bytes",
+        "envelope_url",
+        "result_artifact_url",
+    ),
+)
+
 RUN_OUTPUT_SCHEMA: JsonObject = {
     "type": "object",
     "properties": {
@@ -107,6 +134,7 @@ RUN_OUTPUT_SCHEMA: JsonObject = {
         "execution_policy": {},
         "receipt": {},
         "receipt_sha256": {"type": ["string", "null"]},
+        "attestation": ATTESTATION_STATUS_SCHEMA,
     },
     "required": ["job_id", "status", "complete"],
     "additionalProperties": True,
@@ -148,7 +176,8 @@ TOOLS: List[JsonObject] = [
         "description": (
             "Run one short Python, Node.js, or Bash job under Coop policy and return "
             "its bounded stdout, stderr, terminal status, violations, job ID, and "
-            "evidence receipt. Use this instead of a local shell for generated or "
+            "evidence receipt plus signed-attestation availability metadata. Use this "
+            "instead of a local shell for generated or "
             "untrusted snippets. It is stateless: files and installed packages do not "
             "carry into the next call."
         ),
@@ -187,7 +216,8 @@ TOOLS: List[JsonObject] = [
         "title": "Get a Coop job result",
         "description": (
             "Wait for a previously submitted Coop job and return its bounded terminal "
-            "result. Use wait_seconds=0 for an immediate status snapshot."
+            "result and signed-attestation availability metadata. Use wait_seconds=0 "
+            "for an immediate status snapshot."
         ),
         "inputSchema": _object_schema(
             {
@@ -1099,6 +1129,7 @@ class CoopMcpServer:
             "execution_policy",
             "receipt",
             "receipt_sha256",
+            "attestation",
         ):
             result[field] = detail.get(field)
 

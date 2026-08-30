@@ -1,3 +1,4 @@
+import hashlib
 import http.client
 import io
 import json
@@ -9,10 +10,17 @@ from coop import Coop, CoopError, Limits, _SameOriginRedirect, isolation_satisfi
 
 
 class Response:
-    def __init__(self, value, status=200, headers=None):
-        self.body = json.dumps(value).encode() if value is not None else b""
+    def __init__(self, value, status=200, headers=None, *, raw=None, url=None):
+        self.body = (
+            raw
+            if raw is not None
+            else json.dumps(value).encode()
+            if value is not None
+            else b""
+        )
         self.status = status
         self.headers = headers or {}
+        self.url = url
 
     def __enter__(self):
         return self
@@ -22,6 +30,9 @@ class Response:
 
     def read(self):
         return self.body
+
+    def geturl(self):
+        return self.url
 
 
 class QueueOpener:
@@ -285,6 +296,25 @@ class CoopTests(unittest.TestCase):
                 "https://example.test/moved",
             )
         self.assertEqual(raised.exception.code, "unsafe_redirect")
+
+    def test_authenticated_reads_refuse_cross_origin_redirects(self):
+        request = urllib.request.Request(
+            "https://example.test/v1/jobs/job/attestation",
+            method="GET",
+            headers={"Authorization": "Bearer tenant-secret"},
+        )
+        handler = _SameOriginRedirect("https://example.test")
+        with self.assertRaises(CoopError) as raised:
+            handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "https://attacker.example/evidence",
+            )
+        self.assertEqual(raised.exception.code, "unsafe_redirect")
+        self.assertNotIn("tenant-secret", str(raised.exception))
 
     def test_structured_error_exposes_contract_fields(self):
         payload = {
@@ -634,7 +664,17 @@ class CoopTests(unittest.TestCase):
                     "wall_seconds_max": 300,
                     "concurrent_mem_mb_max": 8192,
                 },
-                "features": {"stream_tickets": True},
+                "features": {
+                    "stream_tickets": True,
+                    "signed_attestations": True,
+                },
+                "attestations": {
+                    "enabled": True,
+                    "algorithm": "Ed25519",
+                    "envelope_format": "DSSE/in-toto Statement v1",
+                    "key_id": "ed25519:abc",
+                    "public_key_url": "/v1/attestation/public-key",
+                },
             },
         )
         client = Coop("https://example.test", "secret", opener=opener)
@@ -646,7 +686,177 @@ class CoopTests(unittest.TestCase):
             "gvisor-application-kernel",
         )
         self.assertEqual(capabilities["limits"]["concurrent_mem_mb_max"], 8192)
+        self.assertTrue(capabilities["features"]["signed_attestations"])
+        self.assertEqual(capabilities["attestations"]["algorithm"], "Ed25519")
         self.assertEqual(opener.requests[0].full_url, "https://example.test/v1/whoami")
+
+    def test_attestation_public_key_is_typed_authenticated_discovery(self):
+        key = {
+            "algorithm": "Ed25519",
+            "key_id": "ed25519:abc",
+            "public_key_pem": "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----\n",
+            "trust_notice": "Pin this key out of band.",
+        }
+        opener = QueueOpener(key)
+        client = Coop("https://example.test/prefix", "tenant-secret", opener=opener)
+
+        self.assertEqual(client.attestation_public_key(), key)
+        request = opener.requests[0]
+        self.assertEqual(
+            request.full_url,
+            "https://example.test/prefix/v1/attestation/public-key",
+        )
+        self.assertEqual(request.get_header("Authorization"), "Bearer tenant-secret")
+
+    def test_attestation_downloads_preserve_binary_order_and_transport_metadata(self):
+        envelope = bytes([0, 255, 1, 128, 10, 13, 123, 125])
+        artifact = bytes([125, 123, 13, 10, 128, 1, 255, 0])
+
+        def binary_response(content, content_type):
+            return Response(
+                None,
+                raw=content,
+                headers={
+                    "Content-Type": content_type,
+                    "Content-Length": str(len(content)),
+                    "X-Content-Sha256": hashlib.sha256(content).hexdigest(),
+                },
+                url="https://example.test/v1/jobs/job%2Fone/evidence",
+            )
+
+        opener = QueueOpener(
+            binary_response(envelope, "application/vnd.dsse.envelope.v1+json"),
+            binary_response(
+                artifact, "application/vnd.coop.execution-result.v1+json"
+            ),
+        )
+        client = Coop("https://example.test", "tenant-secret", opener=opener)
+
+        downloaded_envelope = client.download_attestation("job/one")
+        downloaded_artifact = client.download_result_artifact("job/one")
+
+        self.assertEqual(downloaded_envelope["content"], envelope)
+        self.assertEqual(list(downloaded_envelope["content"]), list(envelope))
+        self.assertEqual(downloaded_envelope["content_length"], len(envelope))
+        self.assertEqual(
+            downloaded_envelope["content_type"],
+            "application/vnd.dsse.envelope.v1+json",
+        )
+        self.assertEqual(
+            downloaded_envelope["sha256"], hashlib.sha256(envelope).hexdigest()
+        )
+        self.assertEqual(downloaded_artifact["content"], artifact)
+        self.assertEqual(
+            opener.requests[0].full_url,
+            "https://example.test/v1/jobs/job%2Fone/attestation",
+        )
+        self.assertEqual(
+            opener.requests[1].full_url,
+            "https://example.test/v1/jobs/job%2Fone/result-artifact",
+        )
+        self.assertEqual(
+            opener.requests[0].get_header("Accept"),
+            "application/vnd.dsse.envelope.v1+json",
+        )
+        for request in opener.requests:
+            self.assertEqual(
+                request.get_header("Authorization"), "Bearer tenant-secret"
+            )
+            self.assertNotIn("tenant-secret", request.full_url)
+
+    def test_artifact_download_rejects_missing_malformed_and_mismatched_digests(self):
+        content = b"exact bytes"
+        cases = (
+            ({"Content-Type": "application/octet-stream"}, "invalid_response"),
+            (
+                {
+                    "Content-Type": "application/octet-stream",
+                    "X-Content-Sha256": "not-a-digest",
+                },
+                "invalid_response",
+            ),
+            (
+                {
+                    "Content-Type": "application/octet-stream",
+                    "X-Content-Sha256": "0" * 64,
+                },
+                "content_digest_mismatch",
+            ),
+        )
+        for headers, expected_code in cases:
+            with self.subTest(expected_code=expected_code, headers=headers):
+                client = Coop(
+                    "https://example.test",
+                    "secret",
+                    opener=QueueOpener(Response(None, raw=content, headers=headers)),
+                )
+                with self.assertRaises(CoopError) as raised:
+                    client.download_attestation("job")
+                self.assertEqual(raised.exception.code, expected_code)
+
+    def test_artifact_download_preserves_structured_404(self):
+        body = io.BytesIO(
+            json.dumps(
+                {
+                    "error": {
+                        "code": "attestation_unavailable",
+                        "message": "no signed attestation",
+                        "request_id": "req-attest",
+                        "retryable": False,
+                    }
+                }
+            ).encode()
+        )
+        error = urllib.error.HTTPError(
+            "https://example.test/v1/jobs/job/attestation",
+            404,
+            "Not Found",
+            {"Content-Type": "application/json"},
+            body,
+        )
+        client = Coop("https://example.test", "secret", opener=QueueOpener(error))
+
+        with self.assertRaises(CoopError) as raised:
+            client.download_attestation("job")
+
+        self.assertEqual(raised.exception.status, 404)
+        self.assertEqual(raised.exception.code, "attestation_unavailable")
+        self.assertEqual(raised.exception.request_id, "req-attest")
+        self.assertFalse(raised.exception.retryable)
+
+    def test_artifact_download_rejects_cross_origin_responses_without_secret_text(self):
+        content = b"evidence"
+        response = Response(
+            None,
+            raw=content,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "X-Content-Sha256": hashlib.sha256(content).hexdigest(),
+            },
+            url="https://attacker.example/evidence",
+        )
+        client = Coop("https://example.test", "tenant-secret", opener=QueueOpener(response))
+
+        with self.assertRaises(CoopError) as raised:
+            client.download_result_artifact("job")
+
+        self.assertEqual(raised.exception.code, "unsafe_redirect")
+        self.assertNotIn("tenant-secret", str(raised.exception))
+        self.assertNotIn("tenant-secret", raised.exception.body)
+
+    def test_artifact_download_timeout_is_bounded_and_retryable(self):
+        opener = QueueOpener(urllib.error.URLError(TimeoutError("deadline")))
+        client = Coop("https://example.test", "secret", opener=opener)
+
+        with self.assertRaises(CoopError) as raised:
+            client.download_result_artifact("job", timeout=0.25)
+
+        self.assertEqual(raised.exception.code, "request_timeout")
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(opener.request_kwargs[0]["timeout"], 0.25)
+        for invalid in (0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                client.download_attestation("job", timeout=invalid)
 
     def test_job_detail_distinguishes_unknown_policy_and_output_evidence(self):
         stored_spec = {

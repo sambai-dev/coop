@@ -1,11 +1,15 @@
 /** Static consumer contract; checked by `npm run typecheck`, not executed. */
 import type {
+  ArtifactDownload,
+  AttestationCapabilities,
+  AttestationPublicKey,
   CancellationResult,
   Capabilities,
   CoopEvent,
   ExecutorOutputEvidence,
   HashedCoopEvent,
   JobDetail,
+  JobAttestationStatus,
   OutputEvidence,
   Receipt,
   EffectiveJobSpec,
@@ -41,6 +45,16 @@ async function consume(): Promise<void> {
   const cancelledJob: JobDetail["job_id"] | undefined = cancellation.job?.job_id;
   const identity: WhoAmI = await client.whoami();
   const capabilities: Capabilities = await client.capabilities();
+  const attestationCapabilities: AttestationCapabilities = capabilities.attestations;
+  const attestationStatus: JobAttestationStatus = detail.attestation;
+  const publicKey: AttestationPublicKey = await client.attestationPublicKey();
+  const envelope: ArtifactDownload = await client.downloadAttestation(
+    submitted.job_id,
+  );
+  const resultArtifact: ArtifactDownload = await client.downloadResultArtifact(
+    submitted.job_id,
+    { timeoutMs: 10_000 },
+  );
   const observed: IsolationClass = capabilities.execution.isolation_class;
   const postureSatisfied: boolean = isolationSatisfies(
     observed,
@@ -67,6 +81,11 @@ async function consume(): Promise<void> {
     concurrentMemory,
     cancelledJob,
     cancelled,
+    attestationCapabilities,
+    attestationStatus,
+    publicKey,
+    envelope,
+    resultArtifact,
   ];
 }
 

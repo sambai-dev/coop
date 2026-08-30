@@ -36,7 +36,7 @@ try {
   await writeFile(
     path.join(scratch, "smoke.mjs"),
     'import { Coop, CoopError, ISOLATION_CLASSES, JOB_STATUSES, isolationSatisfies } from "coop-sdk";\n' +
-      'if (typeof Coop !== "function" || typeof CoopError !== "function" || !Array.isArray(JOB_STATUSES) || !Array.isArray(ISOLATION_CLASSES) || !isolationSatisfies("gvisor-application-kernel", "linux-shared-kernel")) process.exit(1);\n',
+      'if (typeof Coop !== "function" || typeof CoopError !== "function" || typeof Coop.prototype.downloadAttestation !== "function" || typeof Coop.prototype.downloadResultArtifact !== "function" || typeof Coop.prototype.attestationPublicKey !== "function" || !Array.isArray(JOB_STATUSES) || !Array.isArray(ISOLATION_CLASSES) || !isolationSatisfies("gvisor-application-kernel", "linux-shared-kernel")) process.exit(1);\n',
   );
   // Install with lifecycle scripts disabled so this verifies the contents of
   // the tarball rather than rebuilding missing files in the consumer.

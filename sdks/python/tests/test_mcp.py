@@ -63,6 +63,14 @@ def capabilities(
             "event_cursors": True,
             "stream_tickets": True,
             "receipts": True,
+            "signed_attestations": True,
+        },
+        "attestations": {
+            "enabled": True,
+            "algorithm": "Ed25519",
+            "envelope_format": "DSSE/in-toto Statement v1",
+            "key_id": "ed25519:test",
+            "public_key_url": "/v1/attestation/public-key",
         },
     }
 
@@ -157,6 +165,18 @@ class FakeCoop:
             },
             "receipt": {"bootstrap_ready": True},
             "receipt_sha256": "a" * 64,
+            "attestation": {
+                "available": True,
+                "key_id": "ed25519:test",
+                "receipt_sha256": "a" * 64,
+                "result_media_type": "application/vnd.coop.execution-result.v1+json",
+                "result_sha256": "b" * 64,
+                "result_size_bytes": 512,
+                "envelope_sha256": "c" * 64,
+                "envelope_size_bytes": 384,
+                "envelope_url": f"/v1/jobs/{job_id}/attestation",
+                "result_artifact_url": f"/v1/jobs/{job_id}/result-artifact",
+            },
         }
 
     def event_page(self, job_id, *, after=None, limit=500):
@@ -421,6 +441,9 @@ class McpTests(unittest.TestCase):
         self.assertFalse(limits["allow_network"]["const"])
         self.assertEqual(run["execution"]["taskSupport"], "optional")
         self.assertIn("outputSchema", run)
+        attestation_schema = run["outputSchema"]["properties"]["attestation"]
+        self.assertIn("envelope_sha256", attestation_schema["properties"])
+        self.assertNotIn("content", attestation_schema["properties"])
 
         modern_call = server.handle(
             {
@@ -465,6 +488,15 @@ class McpTests(unittest.TestCase):
         self.assertTrue(result["structuredContent"]["complete"])
         self.assertEqual(result["structuredContent"]["receipt_sha256"], "a" * 64)
         self.assertTrue(result["structuredContent"]["receipt"]["bootstrap_ready"])
+        attestation = result["structuredContent"]["attestation"]
+        self.assertTrue(attestation["available"])
+        self.assertEqual(attestation["key_id"], "ed25519:test")
+        self.assertEqual(attestation["envelope_sha256"], "c" * 64)
+        self.assertNotIn("content", attestation)
+        self.assertNotIn("signature_verified", result["structuredContent"])
+        text_result = json.loads(result["content"][0]["text"])
+        self.assertEqual(text_result["attestation"], attestation)
+        self.assertNotIn("public_key_pem", result["content"][0]["text"])
         self.assertEqual(
             fake.submissions,
             [("python", "print(6 * 7)", None, {"wall_seconds": 5})],

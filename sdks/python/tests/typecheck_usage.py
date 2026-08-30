@@ -3,6 +3,9 @@
 from typing import Iterator, Optional, cast
 
 from coop import (
+    ArtifactDownload,
+    AttestationCapabilities,
+    AttestationPublicKey,
     CancellationResponse,
     Coop,
     CoopEvent,
@@ -11,6 +14,7 @@ from coop import (
     ExecutorOutputEvidence,
     HashedCoopEvent,
     IsolationClass,
+    JobAttestationStatus,
     JobDetail,
     JobPage,
     JobResult,
@@ -39,6 +43,15 @@ submitted_with_metadata: SubmitResult = client.submit_result(
 )
 page: JobPage = client.list(status="running", language="python")
 detail: JobDetail = client.get(submitted["job_id"])
+attestation_status: JobAttestationStatus = detail["attestation"]
+attestation_capabilities: AttestationCapabilities = client.capabilities()[
+    "attestations"
+]
+public_key: AttestationPublicKey = client.attestation_public_key()
+envelope: ArtifactDownload = client.download_attestation(submitted["job_id"])
+result_artifact: ArtifactDownload = client.download_result_artifact(
+    submitted["job_id"], timeout=10
+)
 receipt: Optional[Receipt] = detail["receipt"]
 terminal: JobDetail = client.wait(submitted["job_id"])
 events: Iterator[CoopEvent] = client.stream(submitted["job_id"])
@@ -72,4 +85,9 @@ _ = (
     hashed,
     submitted_with_metadata,
     isolation_ok,
+    attestation_status,
+    attestation_capabilities,
+    public_key,
+    envelope,
+    result_artifact,
 )

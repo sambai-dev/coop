@@ -59,6 +59,16 @@ OOM kill, or policy violation are successful tool transport results with a
 terminal Coop status; connection, authentication, validation, and adapter
 policy failures use MCP `isError: true`.
 
+Terminal MCP results also carry `attestation` status metadata from the job
+detail: availability, key ID, content digests and sizes, media type, and the two
+tenant-scoped download paths. The adapter deliberately does not embed the DSSE
+envelope or result artifact in MCP output, and it does not label signatures as
+verified. A trusted host can download the exact files through an SDK, retain
+them with the parent trace, and invoke `coop-verify verify` offline using an
+independently pinned operator public key. Treat the public-key API as discovery,
+not trust bootstrap; a successful verification still requires the host to
+evaluate the authenticated `outcome` and `event_chain_complete` fields.
+
 ## Production checklist
 
 - run a reviewed provider on the dedicated Linux x86_64 VM described in
