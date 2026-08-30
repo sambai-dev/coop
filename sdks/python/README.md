@@ -17,8 +17,8 @@ The PyPI package is not published yet. After it is published, install it with:
 python -m pip install "coop-sdk[stream]"
 ```
 
-The exact v0.3.0 GitHub release wheel is
-`coop_sdk-0.3.0-py3-none-any.whl`; follow the
+The exact v0.4.0 GitHub release wheel is
+`coop_sdk-0.4.0-py3-none-any.whl`; follow the
 [checksum, attestation, and installation commands](../../docs/sdks.md) rather
 than using a moving release URL.
 
@@ -34,9 +34,9 @@ coop-mcp
 
 Normally an MCP host launches the command. Use the [Hermes, OpenClaw, and
 generic host templates](../../integrations/README.md), and set
-`COOP_MCP_REQUIRE_ISOLATION=true` in production. That compatibility switch
-requires at least `linux-shared-kernel`; use `COOP_MCP_MINIMUM_ISOLATION` for an
-exact class name such as `gvisor-application-kernel` or `hardware-vm`. Coop
+`COOP_MCP_MINIMUM_ISOLATION=gvisor-application-kernel` in the guarded
+production deployment. The legacy `COOP_MCP_REQUIRE_ISOLATION=true` maps only
+to `linux-shared-kernel`; prefer the exact class name. Coop
 checks the minimum atomically at submission and the adapter validates the
 terminal observed `isolation_class` without assuming namespace-specific
 rootfs or seccomp details.
@@ -83,7 +83,7 @@ coop-verify verify \
   --envelope job.dsse.json \
   --subject job-result.json \
   --public-key trusted-coop-attestation.pub.pem \
-  --subject-name "urn:coop:result:$JOB_ID" \
+  --subject-name "coop://jobs/$JOB_ID/result" \
   --media-type application/vnd.coop.execution-result.v1+json
 ```
 

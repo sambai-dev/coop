@@ -18,7 +18,7 @@ npm ci
 npm run build
 npm pack
 # Then, from your application:
-npm install /path/to/coop/sdks/typescript/coop-sdk-0.3.0.tgz
+npm install /path/to/coop/sdks/typescript/coop-sdk-0.4.0.tgz
 ```
 
 The npm package is not published yet. After it is published, install it with:
@@ -27,8 +27,8 @@ The npm package is not published yet. After it is published, install it with:
 npm install coop-sdk
 ```
 
-The exact v0.3.0 GitHub release package is
-`coop-sdk-0.3.0.tgz`; follow the
+The exact v0.4.0 GitHub release package is
+`coop-sdk-0.4.0.tgz`; follow the
 [checksum, attestation, and installation commands](../../docs/sdks.md) rather
 than using a moving release URL.
 
@@ -75,7 +75,7 @@ coop-verify verify \
   --envelope job.dsse.json \
   --subject job-result.json \
   --public-key trusted-coop-attestation.pub.pem \
-  --subject-name "urn:coop:result:$JOB_ID" \
+  --subject-name "coop://jobs/$JOB_ID/result" \
   --media-type application/vnd.coop.execution-result.v1+json
 ```
 

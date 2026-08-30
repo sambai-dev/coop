@@ -15,7 +15,11 @@ Coop uses semantic versioning while the API is pre-1.0: minor releases may conta
 
 Do not downgrade a database after a new version has migrated it unless the release notes explicitly describe that path. Restore the pre-upgrade backup instead.
 
-v0.2 records schema version 2 in both migration history and SQLite `user_version`, refuses a database marked newer than the binary, and validates foreign keys before committing. Legacy jobs/events are preserved during the v1-to-v2 migration; old events have hash version 0 and remain explicitly unverifiable rather than being assigned fabricated hashes.
+v0.4 records schema version 4 in both migration history and SQLite
+`user_version`, refuses newer or physically downgraded/partial schemas, and
+validates row types, UTF-8, digests, accounting ledgers, triggers, indexes, and
+foreign keys before committing. Legacy jobs/events are preserved; old events
+remain explicitly unverifiable rather than receiving fabricated hashes.
 
 ## From v0.1.x to v0.2.0
 
@@ -56,3 +60,34 @@ compatible. Agent operators should give each harness a separate tenant key,
 set `COOP_MCP_REQUIRE_ISOLATION=true`, restrict its language allowlist, and
 remove alternate execution tools when Coop must be mandatory rather than an
 optional tool.
+
+## From v0.3.x to v0.4.0
+
+Treat v0.4 as a security- and deployment-sensitive upgrade:
+
+1. drain v0.3, back up SQLite plus WAL/SHM consistently, and keep the complete
+   v0.3 binary/image/rootfs/config rollback set;
+2. test v0.4 against a copy—the schema-v3-to-v4 migration adds admitted-memory
+   and accounting integrity plus attestation/outbox tables and is forward-only;
+3. install Rust 1.98-built `coop`, `coop-verify`, `coop-sandbox-init`, and
+   `coop-oci-init` from the same release;
+4. rebuild the private rootfs and manifest, provision the exact reviewed
+   `runsc`, set its manifest SHA-256, and run the real gVisor gate;
+5. generate an owner-only Ed25519 key and set
+   `COOP_ATTESTATION_MODE=sign` plus `COOP_ATTESTATION_KEY_FILE`. Production
+   refuses an implicit unsigned start; `off` must be explicit;
+6. migrate legacy keys to the indexed credential file/pepper or configure the
+   strict JWT issuer/audience/JWKS/tenant mapping and required scopes;
+7. set tenant/global queue, memory, retained-byte, and disk-reserve budgets
+   from measured host capacity;
+8. update MCP policy from the legacy boolean to the exact
+   `COOP_MCP_MINIMUM_ISOLATION` class and enable Tasks only where the host
+   negotiates the 2026 extension;
+9. run `scripts/verify-production.py`, the real Python/MCP adapter verifier,
+   all language canaries, signed-artifact downloads, and offline
+   `coop-verify` before restoring traffic.
+
+Do not run a v0.3 binary against a migrated schema-v4 database. Restore the
+pre-upgrade backup for rollback. Signing is durable but eventual, so consumers
+requiring portable evidence must wait until `attestation.available` is true
+and must pin the public key outside the signer API.

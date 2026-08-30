@@ -10,6 +10,8 @@ LLM ⇄ Hermes / OpenClaw / another MCP host ⇄ coop-mcp ⇄ Coop
 ```
 
 The Python SDK package installs a dependency-free `coop-mcp` stdio server.
+It serves stateless MCP 2026 discovery and opt-in Tasks alongside the legacy
+initialize flow, with bounded concurrent requests and cancellation.
 Follow the runnable templates and operator-policy guidance in
 [`integrations/`](../integrations/README.md).
 
@@ -74,12 +76,13 @@ evaluate the authenticated `outcome` and `event_chain_complete` fields.
 - run a reviewed provider on the dedicated Linux x86_64 VM described in
   [deployment](deployment.md)
 - use a private or TLS Coop endpoint and an integration-specific tenant key
-- set `COOP_MCP_REQUIRE_ISOLATION=true` for a minimum
-  `linux-shared-kernel` boundary, or set `COOP_MCP_MINIMUM_ISOLATION` to the
-  exact stronger class the workflow requires
+- set `COOP_MCP_MINIMUM_ISOLATION` to the exact workflow class (the guarded
+  deployment uses `gvisor-application-kernel`); retain the legacy boolean only
+  for an older configuration that intentionally means `linux-shared-kernel`
 - restrict `COOP_MCP_ALLOWED_LANGUAGES` and adapter ceilings
 - set the MCP host timeout above the intended Coop wait budget
 - disable alternate execution tools when Coop is mandatory
 - probe the MCP server, then run a canary through the actual harness
 - retain the job ID in the parent agent trace and inspect the terminal
-  `isolation_class` and receipt evidence
+  `isolation_class`, receipt, and attestation metadata; download and verify the
+  exact signed files when portable evidence is required

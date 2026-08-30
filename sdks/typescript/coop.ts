@@ -908,7 +908,7 @@ export class Coop {
           headers: {
             Accept: accept,
             Authorization: `Bearer ${this.#apiKey}`,
-            "X-Coop-Client": "typescript/0.3.0",
+            "X-Coop-Client": "typescript/0.4.0",
           },
         });
       } catch (cause) {

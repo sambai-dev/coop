@@ -25,7 +25,10 @@ The repository variable is an acknowledgement, not proof. Recheck the settings a
 6. Make the [README](../README.md) current-release link match `vVERSION` and mark the matching `MAJOR.MINOR.x` line as supported in [SECURITY.md](../SECURITY.md). The tag workflow checks both dynamically.
 7. Confirm the workspace, lockfile, SDK, Docker, Compose, changelog, and tag versions all match exactly.
 8. Re-read [AUDIT.md](../AUDIT.md), the [security boundary](security-boundary.md), and residual risks. Stop if the code enforces a weaker posture than the documents.
-9. Obtain the release approval required by the protected environment, then create and push an immutable `vVERSION` tag from the reviewed commit according to the project's signing policy.
+9. Reproduce the schema-v3-to-v4 migration, signed restart backfill, offline
+   `coop-verify` vectors, and real pinned-runsc lifecycle without skips. Confirm
+   the archive and image contain the matching `coop-verify`/init binaries.
+10. Obtain the release approval required by the protected environment, then create and push an immutable `vVERSION` tag from the reviewed commit according to the project's signing policy.
 
 No release command is run by this documentation. Do not reuse or move a published tag to correct a mistake; increment the version and publish a superseding release.
 
@@ -34,7 +37,7 @@ No release command is run by this documentation. Do not reuse or move a publishe
 For a matching, finalized tag the workflow:
 
 1. re-runs formatting, Clippy, locked tests, RustSec, SDK packaging, Docker canaries, and hostile containment;
-2. builds only the declared platform artifacts and packages the Linux helper with the Linux server;
+2. builds only the declared platform artifacts, packages `coop-verify` on every platform, and packages both execution init helpers with Linux;
 3. merges platform archives and SDK packages into one artifact set;
 4. produces an SPDX JSON SBOM and SHA-256 manifest covering every asset;
 5. records GitHub artifact attestations through OIDC;

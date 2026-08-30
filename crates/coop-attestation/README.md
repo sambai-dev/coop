@@ -83,18 +83,23 @@ Exit zero means the attestation is authentic and profile-valid, not that the
 job succeeded. Automation must compare `execution_id` and inspect the returned
 `outcome` and `event_chain_complete` fields against its own policy.
 
-## Integration boundary
+## Server integration
 
-A future server integration should:
+Coop schema v4 now implements this boundary with a durable signing outbox:
 
-1. produce and durably store one immutable result artifact per terminal job;
-2. build/sign only after the existing receipt is finalized;
-3. keep the signing key in the trusted control plane, outside the sandbox;
-4. store the exact DSSE envelope and exact result bytes/digest atomically or
-   through a durable signing outbox;
-5. expose signer identity/trust policy separately from the unauthenticated
-   `keyid` hint;
-6. make required-vs-best-effort signing an explicit operator policy.
+1. terminal receipt and outbox work commit together;
+2. the trusted control plane builds a deterministic exact result artifact;
+3. it signs only after receipt finalization and self-verifies before storage;
+4. persistence is conditional on the same receipt bytes and is idempotent;
+5. restart backfills retained terminal rows without an immutable envelope;
+6. tenant-scoped endpoints return exact artifact/envelope bytes and digests;
+7. production requires a key unless `COOP_ATTESTATION_MODE=off` is explicit.
+
+Signing is intentionally eventual. The current public-key endpoint is
+discovery metadata, not trust bootstrap; operators must pin/distribute keys
+out of band and retain prior keys through rotation. The integrated signer uses
+a local PEM rather than a KMS/HSM, and the signature is not hardware remote
+attestation.
 
 When the receipt comes from SQLite as JSON text, use
 `build_statement_from_receipt_json`; it performs the duplicate-key check before

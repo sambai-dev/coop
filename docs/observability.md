@@ -1,8 +1,8 @@
 # Observability contract
 
 Coop emits privacy-bounded structured logs and process-local metrics. Neither
-surface is an evidence ledger: job events and terminal receipts remain the
-durable source of truth.
+surface is an evidence ledger: job events, receipts, exact result artifacts,
+and signed envelopes remain the durable source of truth.
 
 ## Request and trace correlation
 
@@ -22,7 +22,7 @@ validated upstream link in process memory. That state intentionally disappears
 on restart. A future persistence migration can store those fixed-size members
 beside an execution attempt and reconstruct an OpenTelemetry `Link`; it must
 not persist raw trace headers or baggage. This is the narrow durable integration
-hook—there is no schema change in this release.
+hook—schema v4 does not persist trace headers or baggage.
 
 ## Logs
 
@@ -33,7 +33,8 @@ to JSON; development defaults to compact text. `COOP_LOG_FORMAT=compact` (or
 JSON request and job records carry `request_id`, `trace_id`, `span_id`, local
 `trace_flags`, matched route templates, and bounded upstream-link fields. Job
 IDs may appear in logs for operator investigation, but never as metric labels.
-Coop does not send logs or traces over the network and has no Collector health
+Attestation retry warnings identify the job and bounded failure context but
+never key material or result bytes. Coop does not send logs or traces over the network and has no Collector health
 dependency. A future exporter must be bounded, optional, fail-open, and flushed
 under an explicit shutdown deadline.
 
@@ -79,6 +80,6 @@ or shutdown makes readiness fail closed. Probe responses are not cacheable.
 
 This release's monitor proves read-path freshness only. It does not claim that
 the filesystem has space for the next commit. Operators must continue to alert
-on free bytes/inodes and run a dedicated authenticated canary. A future
+on free bytes/inodes and run a dedicated authenticated, signed canary. A future
 store-owned write probe can feed the same cache without adding database work to
 public readiness requests or changing their response contract.

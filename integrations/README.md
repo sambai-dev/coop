@@ -33,8 +33,8 @@ size, maximum wait, or required isolation posture. Those are process settings:
 |---|---|---|
 | `COOP_BASE_URL` | `http://127.0.0.1:7300` | Use the private/TLS Coop endpoint |
 | `COOP_API_KEY` | none; required | Give each harness its own tenant key |
-| `COOP_MCP_REQUIRE_ISOLATION` | `false` | Compatibility switch for a minimum `linux-shared-kernel` class |
-| `COOP_MCP_MINIMUM_ISOLATION` | unset | Exact required class; use `gvisor-application-kernel`, `hardware-vm`, or `confidential-vm` when that stronger boundary is mandatory |
+| `COOP_MCP_MINIMUM_ISOLATION` | unset | Exact required class; use `gvisor-application-kernel` for the guarded deployment |
+| `COOP_MCP_REQUIRE_ISOLATION` | `false` | Legacy compatibility switch mapping only to `linux-shared-kernel` |
 | `COOP_MCP_ALLOWED_LANGUAGES` | `python,node,bash` | Reduce to what the agent needs |
 | `COOP_MCP_MAX_WAIT_SECONDS` | `300` | Reduce for interactive agents if desired |
 | `COOP_MCP_MAX_CODE_BYTES` | `524288` | Reduce to bound model-generated payloads further |
@@ -54,7 +54,7 @@ namespace-specific seccomp/rootfs assertions on gVisor or VM providers.
    ```dotenv
    COOP_BASE_URL=https://coop.internal.example
    COOP_API_KEY=replace-with-the-key-only-not-tenant-prefix
-   COOP_MCP_REQUIRE_ISOLATION=true
+   COOP_MCP_MINIMUM_ISOLATION=gvisor-application-kernel
    COOP_MCP_ALLOWED_LANGUAGES=python,node
    ```
 
@@ -71,7 +71,7 @@ namespace-specific seccomp/rootfs assertions on gVisor or VM providers.
 ## OpenClaw
 
 1. Export `COOP_BASE_URL`, `COOP_API_KEY`,
-   `COOP_MCP_REQUIRE_ISOLATION=true`, and the language allowlist into the
+   `COOP_MCP_MINIMUM_ISOLATION=gvisor-application-kernel`, and the language allowlist into the
    Gateway service environment.
 2. Merge [`openclaw/openclaw.snippet.json5`](openclaw/openclaw.snippet.json5)
    into `~/.openclaw/openclaw.json`, using the absolute `coop-mcp` path when
@@ -97,7 +97,7 @@ needed:
       "env": {
         "COOP_BASE_URL": "https://coop.internal.example",
         "COOP_API_KEY": "replace-me",
-        "COOP_MCP_REQUIRE_ISOLATION": "true",
+        "COOP_MCP_MINIMUM_ISOLATION": "gvisor-application-kernel",
         "COOP_MCP_ALLOWED_LANGUAGES": "python,node"
       }
     }

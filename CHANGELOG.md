@@ -2,6 +2,42 @@
 
 All notable changes are documented here. Coop follows semantic versioning while pre-1.0; minor versions can contain API and deployment changes.
 
+## 0.4.0 — 2026-08-30
+
+### Hardened execution and admission
+
+- Add a per-job gVisor OCI provider with a pinned `runsc`, immutable private-rootfs manifest, nonce-bound workload readiness, cgroup limits, denied networking, complete cancel/timeout/delete handling, and crash/provider-switch reconciliation.
+- Make the guarded Compose bootstrap provision and verify the reviewed runtime, rootfs digest, Ed25519 key, and gVisor host prerequisites before serving traffic; retain namespaces as an explicitly weaker shared-kernel fallback.
+- Add atomic per-tenant queue leases, fair dispatch, a weighted aggregate memory budget, transactional tenant/global logical-storage quotas, a filesystem reserve watermark, and catch-up retention.
+- Make actual bound-listener validation mandatory for the binary and safe embedder API; public development credentials or subprocess execution fail closed without a separate acknowledgement.
+
+### Identity, reliability, and protocols
+
+- Add indexed peppered-HMAC credentials with principal, scope, expiry, and revocation metadata plus strict RFC 9068 JWT validation, bounded JWKS caching, RFC 6750 challenges, and protected-resource metadata.
+- Add tenant-scoped, fingerprint-bound `Idempotency-Key` submission with safe ambiguity reconciliation, typed idempotent cancellation, and OpenAPI response-header contracts.
+- Add the MCP 2026 stateless discovery contract and opt-in Tasks while preserving legacy hosts; stdio requests are concurrent and cancellable, terminal isolation evidence is validated, and durable job IDs survive wait/transport ambiguity.
+- Align the Python and TypeScript clients on the six-class isolation lattice, cursor/reconnect ordering, concurrent-memory capabilities, cancellation, idempotency metadata, and real-server package tests.
+
+### Portable signed evidence
+
+- Add the `coop-attestation` profile and `coop-verify` CLI: in-toto Statement/v1, exact DSSE PAE, Ed25519 signing, threshold verification, strict key files, frozen vectors, and a published JSON Schema.
+- Advance SQLite to schema v4 with a durable signing outbox, exact deterministic result artifacts, immutable DSSE envelopes, quota-aware storage, tenant-scoped downloads, restart backfill, and conditional receipt binding.
+- Expose signer capabilities, current public-key discovery with an explicit trust warning, per-job attestation metadata, and exact artifact/envelope digest headers. Signatures prove key possession and integrity, not trusted hardware or deterministic execution.
+
+### Operations and operator experience
+
+- Add bounded low-cardinality OpenMetrics, JSON production logs, request IDs, W3C Trace Context links, readiness caching, recovery/retention/admission metrics, and secret-free labels.
+- Add scoped `whoami`, provider-aware production verification, real Python/MCP canaries, full gVisor lifecycle gates, and RustSec/package/release-surface enforcement.
+- Polish the embedded workbench with minimum-isolation controls, provider/identity context, signed-evidence downloads, robust narrow-width states, keyboard/focus behavior, and memory-only browser credentials.
+- Pin Rust 1.98 and include `coop-verify`, checksums, an SPDX SBOM, and GitHub artifact attestations in the atomic release workflow.
+
+### Upgrade notes
+
+- Production now requires `COOP_ATTESTATION_KEY_FILE` unless signing is explicitly disabled with `COOP_ATTESTATION_MODE=off`.
+- The supported Compose path defaults to `gvisor`; rebuild the image, provision the reviewed `runsc`, regenerate the rootfs digest, and run the production verifier before restoring traffic.
+- Schema v4 is forward-only. Back up schema v3 first and restore that backup instead of attempting a binary downgrade.
+- The workspace and SDK version are `0.4.0`; Rust 1.98 is the release toolchain.
+
 ## 0.3.0 — 2026-08-27
 
 ### Agent integration

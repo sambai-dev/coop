@@ -361,6 +361,8 @@ def check_pins_and_packaging() -> int:
         "gvisor-application-kernel",
         "NETWORK_BLOCKED",
         "crash reconciliation passed",
+        "COOP_ATTESTATION_MODE=sign",
+        "coop-verify",
     ]:
         require(required in gvisor_smoke, f"gVisor release gate missing contract: {required}")
     python_manifest = read("sdks/python/pyproject.toml")

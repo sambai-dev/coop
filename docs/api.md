@@ -4,13 +4,13 @@ The OpenAPI document at `/openapi.json` is the machine-readable HTTP contract. T
 
 ## Authentication
 
-Send a bearer key on every `/v1/*` request except a WebSocket upgrade authenticated with the one-use stream ticket described below:
+Send a bearer credential on every `/v1/*` request except a WebSocket upgrade authenticated with the one-use stream ticket described below:
 
 ```http
 Authorization: Bearer TENANT_KEY
 ```
 
-The key maps to exactly one tenant. Job identifiers are not authorization tokens; access is always checked against the authenticated tenant. `/healthz`, `/readyz`, `/openapi.json`, and the dashboard shell are public by design, so do not put secrets in those responses.
+Indexed credentials and RFC 9068 JWTs resolve a principal, tenant, scopes, and authority lifetime; legacy keys map to one tenant with the complete compatibility scope set. Job identifiers are not authorization tokens. Job reads, cancellation, streams, result artifacts, and attestations always check tenant ownership, while route-specific middleware enforces `jobs:submit`, `jobs:read`, `jobs:cancel`, `service:read`, or `metrics:read`. Invalid credentials use RFC 6750 challenges. `/healthz`, `/readyz`, `/openapi.json`, and the dashboard shell are public by design, so do not put secrets in those responses.
 
 Coop uses plain HTTP/1.1. Put it behind a TLS proxy for any connection that leaves the local host or a private encrypted network; the proxy may serve HTTP/2 or HTTP/3 to clients while using HTTP/1.1 on the private Coop hop.
 
@@ -37,14 +37,14 @@ Coop uses plain HTTP/1.1. Put it behind a TLS proxy for any connection that leav
 }
 ```
 
-The namespace deployment supports `python`, `node`, and `bash` after its full
-rootfs startup preflight succeeds. Development mode probes each configured host
+The gVisor and namespace providers support `python`, `node`, and `bash` after
+their full rootfs/runtime startup preflight succeeds. Development mode probes each configured host
 runtime once at startup and advertises only the languages that pass the exact
 sanitized-environment canary in `GET /v1/capabilities`. Submitting a known but
 unavailable runtime returns `422 runtime_unavailable`; an unknown language
 returns `400 unsupported_language`. Omitted limits receive defaults and all
 client values are clamped to server ceilings. `allow_network: true` is rejected
-rather than granting egress. Namespace execution reports
+rather than granting egress. Isolated execution reports
 `networking: "disabled"`; a ready development subprocess truthfully reports
 its retained host networking as `networking: "host"`.
 
@@ -76,7 +76,7 @@ spec, execution policy, and (once terminal) receipt plus `receipt_sha256`.
 `requested_spec` remains the complete clamped-input record. Compare a non-null
 `effective_spec`—not the request—to understand what the selected backend
 actually enforced. Its `EffectiveLimits` members are individually nullable:
-the namespace backend sets all five resource controls after successful
+the gVisor and namespace providers set all five resource controls after successful
 bootstrap, while the development subprocess sets only `wall_seconds`; its
 CPU, memory, process, and file values are `null`. `limit_enforcement` carries
 the corresponding explicit booleans.
@@ -156,7 +156,53 @@ When executor telemetry survived, the optional top-level `executor_output` keeps
 
 If startup recovery finds a job that was running when the server stopped, it emits a minimal terminal receipt with `terminal_reason: "server_restarted"`, outcome/timing fields, the event-chain summary, and the receipt digest. Execution-only evidence such as effective limits, runtime posture, output hashes, and resource observations is unavailable for that interrupted run; clients must treat those members as optional rather than inventing zero values.
 
-`event_chain.complete` means the terminal transaction saw no legacy rows and the count of v1 hashed rows equalled the stored event count. It is not an on-read cryptographic verification result; an auditor must still recompute every event link. `receipt_sha256` is SHA-256 over the canonical receipt JSON with that member removed. These values detect changes relative to the retained record, but they are not signatures or external attestations; a database administrator can rewrite values and recompute them.
+`event_chain.complete` means the terminal transaction saw no legacy rows and the count of v1 hashed rows equalled the stored event count. It is not an on-read cryptographic verification result; an auditor must still recompute every event link. `receipt_sha256` is SHA-256 over the canonical receipt JSON with that member removed. These hashes are not signatures on their own; signed evidence is the separate convergent record below.
+
+### Signed attestations and result artifacts
+
+Schema v4 commits an attestation-outbox row atomically with every terminal
+receipt. A bounded control-plane worker then builds a deterministic result
+artifact, signs an in-toto Statement/v1 inside an exact-byte DSSE envelope with
+Ed25519, self-verifies it, and conditionally persists it only if the receipt
+bytes still match. Signing is therefore crash-convergent rather than falsely
+described as atomic: immediately after terminalization, `attestation.available`
+may be `false`; clients that require a signature must wait boundedly.
+
+`GET /v1/jobs/{id}` includes:
+
+```json
+{
+  "attestation": {
+    "available": true,
+    "key_id": "sha256:…",
+    "receipt_sha256": "…",
+    "result_media_type": "application/vnd.coop.execution-result.v1+json",
+    "result_sha256": "…",
+    "result_size_bytes": 321,
+    "envelope_sha256": "…",
+    "envelope_size_bytes": 2048,
+    "envelope_url": "/v1/jobs/JOB_ID/attestation",
+    "result_artifact_url": "/v1/jobs/JOB_ID/result-artifact"
+  }
+}
+```
+
+The two authenticated download routes return the **exact stored bytes**, with
+their media type, `Content-Length`, and `X-Content-Sha256`. The result artifact
+is canonical JSON containing `_type`, `schema_version: 1`, lifecycle/outcome,
+receipt digest, folded stdout/stderr, truncation, and violations. It is capped
+at 16 MiB; the DSSE envelope is capped at 2 MiB. These records share the same
+tenant authorization and large-response lifetime limits as job detail.
+
+`GET /v1/attestation/public-key` returns the current canonical SPKI PEM and
+key ID when signing is enabled. Its `trust_notice` is part of the contract:
+the unauthenticated DSSE `keyid` hint and a key fetched from the signer are not
+independent trust anchors. Pin or distribute the public key out of band, retain
+old keys across rotation, and verify the envelope plus exact result with
+`coop-verify`. Verification proves possession of that key and profile integrity;
+it does not prove trusted hardware, deterministic execution, or semantic truth.
+`COOP_ATTESTATION_MODE=off` is an explicit production policy that produces no
+signatures.
 
 ## WebSocket stream
 
@@ -178,11 +224,15 @@ Clients must handle:
 
 `GET /v1/capabilities` describes supported languages, the provider's
 `isolation_class`, per-job ceilings, the aggregate `concurrent_mem_mb_max`, and
-server features. `GET /v1/whoami` resolves the authenticated tenant and
-principal/scopes. `GET /v1/metrics` is an operator surface; keep it private and
-do not assume its values are tenant-billing counters. `/healthz` is liveness and
-`/readyz` checks process/store readiness. Use authenticated `/v1/status` plus an
-actual minimum-isolation canary to verify containment.
+server features, including signer metadata when enabled. `GET /v1/whoami`
+resolves the authenticated tenant, principal, credential/auth method, scopes,
+and authority expiry. `GET /v1/metrics` exposes tenant-scoped current-job
+metrics. The separate global `/metrics` endpoint is disabled unless
+`COOP_METRICS_TOKEN` is configured and never accepts a tenant credential; it
+uses fixed-cardinality labels and OpenMetrics negotiation. Neither surface is
+a billing ledger. `/healthz` is liveness and `/readyz` checks cached
+process/store readiness. Use authenticated `/v1/status`, signer capabilities,
+and an actual minimum-isolation plus signed-result canary before traffic.
 
 ## Errors and rate limits
 
