@@ -14,3 +14,9 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Local design-research captures and interactive decision state. Curated
+# direction comps, prompts, and research notes remain versioned.
+/.impeccable/audit/
+/.impeccable/questions/
+/.impeccable/research/mobbin/*.jpg
