@@ -839,8 +839,8 @@ async fn windows_interpreter_preflight_is_bounded_cancel_safe_and_not_repeated_p
         .expect_err("a hanging configured interpreter must fail boundedly");
     assert_eq!(timeout.kind(), std::io::ErrorKind::TimedOut);
     assert!(
-        started.elapsed() < Duration::from_secs(15),
-        "ten-second preflight timeout was not enforced: {:?}",
+        started.elapsed() < Duration::from_secs(25),
+        "twenty-second preflight timeout was not enforced: {:?}",
         started.elapsed()
     );
 
