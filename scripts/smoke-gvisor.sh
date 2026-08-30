@@ -230,6 +230,8 @@ if COOP_ENV=production \
   COOP_JOBS_ROOT="$base/jobs" \
   COOP_SANDBOX=off \
   COOP_UNSAFE_ALLOW_NAIVE=true \
+  COOP_ATTESTATION_MODE=sign \
+  COOP_ATTESTATION_KEY_FILE="$base/attestation.pem" \
   COOP_API_KEYS="smoke:$key" \
   "$server" >>"$base/server.log" 2>&1; then
   echo "Off provider unexpectedly accepted stale gVisor state" >&2
