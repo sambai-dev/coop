@@ -2,13 +2,13 @@
 
 Coop ships small reference clients under `sdks/`. They intentionally mirror the HTTP API and are suitable for embedding in agent tool loops. The OpenAPI document remains the canonical contract for generated clients.
 
-The v0.4 release workflow tests SDK source and installs both the built Python wheel and source distribution before including them, plus the npm package tarball, in the checksummed, attested GitHub release. It does not publish PyPI or npm registries. Use an exact GitHub release asset or the source-checkout paths below until a separately authenticated registry release is announced.
+The v0.5 release workflow tests SDK source and installs both the built Python wheel and source distribution before including them, plus the npm package tarball, in the checksummed, attested GitHub release. It does not publish PyPI or npm registries. Use an exact GitHub release asset or the source-checkout paths below until a separately authenticated registry release is announced.
 
-To install the v0.4.0 release, activate the intended Python virtual environment and download the exact release assets into an otherwise empty working directory. This example verifies both the checksum manifest and GitHub provenance before installation:
+To install the v0.5.0 release, activate the intended Python virtual environment and download the exact release assets into an otherwise empty working directory. This example verifies both the checksum manifest and GitHub provenance before installation:
 
 ```bash
 set -euo pipefail
-version=0.4.0
+version=0.5.0
 python_asset="coop_sdk-${version}-py3-none-any.whl"
 typescript_asset="coop-sdk-${version}.tgz"
 sdk_asset_dir="$PWD"
@@ -39,7 +39,7 @@ python -m pip install --no-deps "./$python_asset"
 npm install "${sdk_asset_dir}/${typescript_asset}"
 ```
 
-The release also includes `coop_sdk-0.4.0.tar.gz` for consumers that require a Python source distribution. On macOS or Windows, use the platform checksum commands shown in [deployment](deployment.md) in place of `sha256sum`; keep the same release-asset and constrained workflow-provenance verification.
+The release also includes `coop_sdk-0.5.0.tar.gz` for consumers that require a Python source distribution. On macOS or Windows, use the platform checksum commands shown in [deployment](deployment.md) in place of `sha256sum`; keep the same release-asset and constrained workflow-provenance verification.
 
 ## Python
 

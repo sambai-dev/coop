@@ -1,17 +1,70 @@
+<div align="center">
+
 # Coop
 
-**Run short agent-generated code behind a separate, auditable policy boundary.**
+### The self-hosted execution boundary for AI agents
+
+Run short Python, Node.js, and Bash jobs behind independently enforced policy,
+bounded output, and signed evidence.
 
 [![CI](https://github.com/sambai-dev/coop/actions/workflows/ci.yml/badge.svg)](https://github.com/sambai-dev/coop/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/sambai-dev/coop)](https://github.com/sambai-dev/coop/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.98+](https://img.shields.io/badge/Rust-1.98%2B-000000?logo=rust)](Cargo.toml)
 
-Coop is a small self-hosted service for running one short Python, Node.js, or
-Bash job. The caller supplies the code; Coop authenticates the caller, clamps
-the job's limits, executes it, bounds the output, and records what happened.
+[Quick start](#try-it-locally-trusted-code) ·
+[Why Coop](#why-coop) ·
+[Agent integrations](#agent-and-harness-integration) ·
+[Production](#production-on-a-dedicated-linux-x86_64-vm) ·
+[Security boundary](docs/security-boundary.md) ·
+[Documentation](#documentation)
 
-It is the execution layer—not an LLM, agent framework, or general-purpose
-development environment.
+</div>
+
+![Coop's Chalk-and-Carbon execution desk showing the docked composer, chronological transcript, and contextual result record](docs/assets/console-v0.5.png)
+
+Coop authenticates each caller, clamps every requested limit, executes one
+short job, bounds its output, and records what actually happened. It is the
+execution layer—not an LLM, agent framework, or general-purpose development
+environment.
+
+## Why Coop
+
+| Submit | Contain | Observe | Prove |
+|---|---|---|---|
+| One authenticated API and small SDKs | Per-job gVisor OCI isolation in the guarded production profile | Reconnectable output, cancellation, and durable event history | Hash-chained receipts plus signed DSSE/in-toto evidence |
+| Python, Node.js, or Bash | Server-clamped CPU, memory, process, file, and wall-time limits | Requested policy stays distinct from effective posture | Exact result artifacts and an offline verifier ship with every release |
+
+Most agent sandboxes protect a development workspace. Coop adds a separately
+operated API boundary for short, risky, or user-supplied execution—without
+asking the model to hold credentials or decide its own isolation policy.
+
+### Start here
+
+| If you want to… | Go to… |
+|---|---|
+| understand what Coop protects—and what it does not | [The problem Coop solves](#the-problem-coop-solves) and [the security boundary](docs/security-boundary.md) |
+| run the trusted local loop | [Try it locally](#try-it-locally-trusted-code) |
+| connect Hermes, OpenClaw, Codex, or another MCP host | [Agent and harness integration](#agent-and-harness-integration) |
+| deploy the guarded Linux x86_64 profile | [Production on a dedicated VM](#production-on-a-dedicated-linux-x86_64-vm) |
+| verify releases, receipts, and attestations | [SDK release verification](docs/sdks.md) and [operations](docs/operations.md) |
+
+> [!IMPORTANT]
+> **Security boundary:** The guarded Linux x86_64 deployment creates a separate
+> gVisor OCI workload for every job, with a pinned `runsc`, immutable
+> private-rootfs manifest, cgroup v2 limits, and denied networking. The outer
+> Coop service is still privileged and belongs on a dedicated VM. The namespace
+> backend remains a shared-kernel fallback; macOS, Windows, and other Linux architectures
+> run only the same-trust subprocess backend. Read
+> [the security boundary](docs/security-boundary.md) before accepting untrusted
+> jobs.
+
+> [!NOTE]
+> **Current release:** [v0.5.0](https://github.com/sambai-dev/coop/releases/tag/v0.5.0).
+> Its exact eight-asset set includes checksums, a combined artifact-scoped SPDX
+> SBOM, GitHub SBOM/provenance attestations, and the offline `coop-verify`
+> verifier inside each platform archive. Older release lines are unsupported
+> for new deployments.
 
 | Question | Short answer |
 |---|---|
@@ -40,26 +93,14 @@ isolation posture.
 Using both is normal: keep trusted development in the harness workspace and
 route risky or stateless execution through Coop.
 
-### Choose a path
-
-1. **Understand the boundary:** read [the problem Coop solves](#the-problem-coop-solves).
-2. **Try it on your machine:** use the [trusted local quick start](#try-it-locally-trusted-code).
-3. **Connect an agent:** follow [the MCP, Hermes, or OpenClaw setup](#agent-and-harness-integration).
-4. **Deploy it:** use the guarded [dedicated-VM bootstrap](#production-on-a-dedicated-linux-x86_64-vm).
-
-> **Security boundary:** v0.4's guarded Linux x86_64 deployment creates a separate gVisor OCI workload for every job, with a pinned `runsc`, immutable private-rootfs manifest, cgroup v2 limits, and denied networking. The outer Coop service is still privileged and belongs on a dedicated VM. The namespace backend remains a shared-kernel fallback; macOS, Windows, and other Linux architectures run only the same-trust subprocess backend. Read [the security boundary](docs/security-boundary.md) before accepting untrusted jobs.
-
-> **Current release:** [v0.4.0](https://github.com/sambai-dev/coop/releases/tag/v0.4.0). The exact eight-asset set includes checksums, a combined artifact-scoped SPDX SBOM, GitHub SBOM/provenance attestations, and the offline `coop-verify` verifier inside each platform archive. Older release lines are unsupported for new deployments.
-
 ### Operator console
 
-![Coop's light three-pane operator console showing the run queue, ordered output, and execution-boundary evidence](.impeccable/review/desktop.png)
-
-The embedded console follows the same API as every SDK: select or create a run
-on the left, monitor ordered output in the center, and compare requested policy,
-observed posture, and portable evidence on the right. The red `off · none`
-runtime shown above is an intentional local-development warning, not a claimed
-production boundary.
+The embedded console shown above follows the same API as every SDK. Compose and History
+share the left dock, the selected job unfolds as a chronological execution
+transcript, and Result & record opens as contextual evidence instead of
+permanent dashboard chrome. Requested policy remains ahead of observed posture
+and portable proof. The red `off · none` runtime shown above is an intentional
+local-development warning, not a claimed production boundary.
 
 ## The problem Coop solves
 
@@ -124,7 +165,7 @@ artifact. Normally an MCP host launches `coop-mcp`; running it directly is
 only a quick startup check:
 
 ```bash
-python -m pip install --no-deps ./coop_sdk-0.4.0-py3-none-any.whl
+python -m pip install --no-deps ./coop_sdk-0.5.0-py3-none-any.whl
 export COOP_API_KEY=coop-dev-key
 coop-mcp
 ```
@@ -312,7 +353,7 @@ wait returns the job ID instead of losing ownership of the still-running job.
    ```bash
    python -m venv ~/.local/share/coop-mcp
    ~/.local/share/coop-mcp/bin/python -m pip install --no-deps \
-     ./coop_sdk-0.4.0-py3-none-any.whl
+     ./coop_sdk-0.5.0-py3-none-any.whl
    ```
 
 3. Give the harness process—not the model—the connection and policy settings:

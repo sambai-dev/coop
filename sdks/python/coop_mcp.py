@@ -41,7 +41,7 @@ from coop import (
     isolation_satisfies,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 PROTOCOL_VERSION = "2025-11-25"
 MODERN_PROTOCOL_VERSION = "2026-07-28"

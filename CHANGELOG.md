@@ -2,6 +2,24 @@
 
 All notable changes are documented here. Coop follows semantic versioning while pre-1.0; minor versions can contain API and deployment changes.
 
+## 0.5.0 — 2026-08-31
+
+### Transcript-first execution desk
+
+- Replace the light three-pane workbench with a carbon-dark execution desk that gives the selected run's ordered transcript primary visual weight while keeping queue state, runtime posture, and tenant context immediately available.
+- Add a persistent docked run composer for Python, Node.js, and Bash with explicit minimum-isolation policy, keyboard-friendly controls, honest unavailable-runtime states, and a direct submit-to-monitor flow.
+- Rework the contextual record surface around requested policy, observed execution posture, result, receipt, and signed evidence without presenting server-reported data as independently verified.
+
+### Interaction and accessibility
+
+- Tighten responsive queue, transcript, composer, and record behavior for desktop and narrow screens while preserving exact technical content, horizontal access, visible focus, semantic state labels, reduced motion, and high-contrast operation.
+- Keep browser credentials memory-only, same-origin API and artifact access, exact inline Content Security Policy hashes, the complete six-class isolation contract, and destructive cancellation confirmation bound to the selected job identity.
+
+### Compatibility and release
+
+- This is an operator-interface release: the HTTP/OpenAPI contract, schema-v4 database, execution providers, security boundary, SDK behavior, and exact eight-asset supply-chain contract remain unchanged.
+- The workspace and SDK version are `0.5.0`; Rust 1.98 remains the release toolchain.
+
 ## 0.4.0 — 2026-08-30
 
 ### Hardened execution and admission

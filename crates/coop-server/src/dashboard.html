@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light">
-<title>Coop · Run operations</title>
+<title>Coop · Execution desk</title>
 <style>
 :root {
   color-scheme: light;
@@ -75,7 +75,7 @@ code, pre, .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", M
 .connection-details summary { list-style: none; cursor: pointer; }
 .connection-details summary::-webkit-details-marker { display: none; }
 .connection-details[open] .disclosure-icon { transform: rotate(180deg); }
-.connection-details > section { position: absolute; top: calc(100% + 10px); right: 0; z-index: 60; width: min(620px, calc(100vw - 24px)); border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; box-shadow: 0 16px 38px rgba(31, 42, 61, .16); }
+.connection-details > section { position: absolute; top: calc(100% + 10px); right: 0; z-index: 60; width: min(620px, calc(100vw - 24px)); border: 1px solid var(--border-strong); border-radius: 6px; background: #fff; box-shadow: 0 16px 38px rgba(0, 0, 0, .16); }
 .session-context { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin: 0; border-radius: inherit; background: var(--border); overflow: hidden; }
 .context-item { display: grid; align-content: center; min-width: 0; min-height: 62px; gap: 4px; padding: 9px 12px; background: #fff; }
 .context-item dt { color: var(--text-muted); font-size: 11px; font-weight: 600; }
@@ -355,6 +355,303 @@ dialog::backdrop { background: rgba(31, 41, 55, .42); }
   .limit-grid { grid-template-columns: 1fr 1fr; }
 }
 
+/* v0.5 — Chalk-and-Carbon Execution Desk */
+:root {
+  --canvas: #f5f6f9;
+  --workbench: #fdfeff;
+  --surface: #f9fafa;
+  --surface-raised: #f5f6f9;
+  --surface-inset: #f0f2f6;
+  --border: #e1e4e9;
+  --border-strong: #c8cdd6;
+  --text: #111827;
+  --text-muted: #5e6675;
+  --text-faint: #7a8392;
+  --kernel: #1e55e6;
+  --kernel-strong: #1647ca;
+  --carbon: #12171e;
+  --carbon-raised: #171d25;
+  --carbon-soft: #1b222c;
+  --carbon-border: #29323e;
+  --carbon-text: #e7ebf1;
+  --carbon-muted: #9da7b5;
+  --healthy: #198754;
+  --warning: #a76400;
+  --danger: #cc3340;
+  --cancelled: #667085;
+  --focus: #1e55e6;
+  --bar-height: 68px;
+  --dock-width: 292px;
+  --sheet-width: 310px;
+  --line-height: 22px;
+  --radius: 4px;
+}
+
+html, body { height: 100%; }
+html { background: var(--workbench); }
+body { display: flex; min-height: 100dvh; overflow: hidden; flex-direction: column; background: var(--workbench); font-size: 14px; -webkit-font-smoothing: antialiased; }
+button, input, select { min-height: 40px; }
+button { transition: background-color 150ms cubic-bezier(.23, 1, .32, 1), border-color 150ms cubic-bezier(.23, 1, .32, 1), color 150ms cubic-bezier(.23, 1, .32, 1), transform 120ms cubic-bezier(.23, 1, .32, 1); }
+button:active:not(:disabled) { transform: scale(.98); }
+* { scrollbar-color: #485362 #161c24; }
+*::-webkit-scrollbar-track { background: #161c24; }
+*::-webkit-scrollbar-thumb { border-color: #161c24; background: #485362; }
+
+.topbar { min-height: var(--bar-height); height: var(--bar-height); flex: 0 0 var(--bar-height); gap: 12px; padding: 10px 16px; border-color: var(--border); background: rgba(253, 254, 255, .99); }
+.brand { gap: 10px; }
+.brand-mark { width: 34px; height: 34px; border-color: #aeb6c3; border-radius: 4px; background: #fff; font-size: 16px; }
+.brand-name { font-size: 19px; }
+.topbar-divider { margin-block: 1px; }
+.topbar-actions { gap: 7px; }
+.boundary-chip, .connection-chip, .tenant-chip { min-height: 38px; border-radius: 4px; background: #fff; }
+.boundary-chip strong, .tenant-chip strong { max-width: 138px; }
+.key-input { width: clamp(112px, 12vw, 164px); min-height: 40px; border-radius: 4px; background: #fbfcfe; }
+.run-switcher { min-width: 0; }
+.run-switcher select { width: clamp(148px, 16vw, 212px); min-height: 40px; padding: 7px 30px 7px 10px; border: 1px solid var(--border-strong); border-radius: 4px; background: #fff; color: var(--text); font-size: 12px; }
+.history-trigger { display: none; }
+.button { border-radius: 4px; font-weight: 600; }
+.button-primary { background: var(--kernel); border-color: var(--kernel); box-shadow: 0 1px 2px rgba(30, 85, 230, .18); }
+.button-primary:hover:not(:disabled) { background: var(--kernel-strong); border-color: var(--kernel-strong); }
+
+.notice { z-index: 45; }
+.workbench { grid-template-columns: var(--dock-width) minmax(0, 1fr) var(--sheet-width); height: auto; min-height: 0; flex: 1 1 0; overflow: hidden; background: var(--carbon); }
+body.is-sheet-closed .workbench { grid-template-columns: var(--dock-width) minmax(0, 1fr); }
+body.is-sheet-closed .proof-inspector { display: none; }
+
+.dock { display: flex; min-width: 0; height: 100%; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.dock-tabs { display: grid; flex: 0 0 56px; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: 1px solid var(--border); background: var(--workbench); }
+.dock-tab { position: relative; min-height: 56px; padding: 10px 16px; border: 0; background: transparent; color: var(--text-muted); font-weight: 650; cursor: pointer; }
+.dock-tab::after { position: absolute; right: 16px; bottom: -1px; left: 16px; height: 2px; background: transparent; content: ""; }
+.dock-tab:hover { color: var(--text); }
+.dock-tab[aria-selected="true"] { color: var(--kernel); }
+.dock-tab[aria-selected="true"]::after { background: var(--kernel); }
+.dock-panel { min-height: 0; flex: 1 1 auto; }
+
+.compose-panel { overflow: hidden; }
+.composer-form { display: grid; height: 100%; grid-template-rows: minmax(0, 1fr) auto; }
+.composer-scroll { display: grid; align-content: start; gap: 14px; min-height: 0; padding: 14px 16px 20px; overflow: auto; scrollbar-color: #b3bac5 #f3f5f8; }
+.composer-scroll::-webkit-scrollbar-track { background: #f3f5f8; }
+.composer-scroll::-webkit-scrollbar-thumb { border-color: #f3f5f8; background: #b3bac5; }
+.composer-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.composer-heading h2 { font-size: 15px; }
+.shortcut-hint { color: var(--text-faint); font-size: 10px; white-space: nowrap; }
+kbd { min-width: 18px; padding: 1px 3px; border: 1px solid var(--border); border-bottom-color: var(--border-strong); border-radius: 3px; background: #fff; color: var(--text-muted); font: 10px/1.3 ui-sans-serif, system-ui, sans-serif; }
+.field { gap: 5px; }
+.field label, .field-label { color: #505969; font-size: 11px; font-weight: 650; }
+.field input, .field select, .field textarea { border-color: #cfd4dc; border-radius: 4px; background: #fff; }
+.field input:focus, .field select:focus, .field textarea:focus { border-color: var(--kernel); }
+.field-help { color: #727b89; font-size: 10px; line-height: 1.4; }
+.field-label-row { display: flex; align-items: center; justify-content: space-between; color: var(--text-faint); font-size: 10px; }
+.code-editor-shell { display: grid; min-height: 220px; grid-template-columns: 28px minmax(0, 1fr); overflow: hidden; border: 1px solid #d4d8df; border-radius: 4px; background: #fff; }
+.code-gutter { min-height: 220px; margin: 0; padding: 9px 5px 9px 0; border-right: 1px solid #e5e8ed; background: #f7f8fa; color: #8a93a1; font-size: 11px; line-height: 21px; list-style-position: inside; text-align: right; }
+.code-gutter li::marker { content: none; }
+.code-field textarea { min-height: 220px; padding: 9px 10px; resize: vertical; border: 0; border-radius: 0; color: #1e3a8a; font-size: 12px; line-height: 21px; outline: 0; }
+.code-editor-shell:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
+.composer-disclosure { border-top: 1px solid var(--border); }
+.composer-disclosure > summary { min-height: 44px; padding: 13px 0 10px; color: var(--text); font-size: 12px; font-weight: 650; cursor: pointer; }
+.composer-disclosure[open] > summary { margin-bottom: 10px; }
+.composer-disclosure .field + .limits { margin-top: 14px; }
+.limits { margin: 0; padding: 0; border: 0; }
+.limits legend { margin: 0 0 8px; padding: 0; color: var(--text); font-size: 12px; font-weight: 650; }
+.limit-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.limit-grid .field:last-child { grid-column: 1 / -1; }
+.network-field { margin-top: 10px; }
+.composer-footer { padding: 12px 16px max(14px, env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--workbench); }
+.composer-footer .dialog-error { margin-bottom: 6px; color: var(--danger); }
+.queue-button { width: 100%; min-height: 48px; font-size: 14px; }
+.composer-footer p { margin: 9px 0 0; color: var(--text-faint); font-size: 10px; line-height: 1.45; text-wrap: pretty; }
+
+.history-panel { overflow: hidden; }
+.history-panel .explorer { width: 100%; height: 100%; border: 0; }
+.history-panel .panel-heading { min-height: 52px; padding: 10px 12px; }
+.history-search { position: relative; padding: 10px; border-bottom: 1px solid var(--border); background: #f7f8fa; }
+.history-search input { width: 100%; min-height: 38px; padding-inline: 34px 10px; }
+.history-search .icon { position: absolute; top: 22px; left: 21px; color: var(--text-faint); pointer-events: none; }
+.queue-telemetry { background: var(--workbench); }
+.telemetry-item { padding-block: 7px; }
+.filters { grid-template-columns: 1fr 1fr; padding: 8px; background: #f7f8fa; }
+.filters .button { grid-column: 1 / -1; min-height: 32px; }
+.run-columns { grid-template-columns: 84px minmax(0, 1fr) 52px; padding: 7px 10px; }
+.run-button { grid-template-columns: 78px minmax(0, 1fr) 48px; min-height: 62px; padding: 8px 10px; }
+.run-button[aria-current="true"] { background: #edf2ff; box-shadow: inset 1px 0 0 var(--kernel); }
+.list-footer { min-height: 44px; }
+
+.evidence { height: 100%; min-height: 0; overflow: auto; background: var(--carbon); color: var(--carbon-text); scrollbar-color: #485362 #161c24; }
+.blank-state { min-height: 100%; background: var(--carbon); color: var(--carbon-text); }
+.blank-glyph { border-color: var(--carbon-border); background: var(--carbon-raised); color: #7ea2ff; }
+.blank-state h1 { color: var(--carbon-text); }
+.blank-state p { color: var(--carbon-muted); }
+.policy-ribbon { display: flex; min-height: 56px; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 18px; border-bottom: 1px solid var(--border); background: var(--workbench); color: var(--text); }
+.policy-ribbon > div { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.policy-ribbon strong { font-size: 12px; }
+.policy-ribbon span { color: var(--text-faint); font-size: 10px; }
+.policy-ribbon p { margin: 0; overflow: hidden; color: #3b4554; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.run-hero { padding: 14px 18px; border-color: var(--carbon-border); background: var(--carbon); color: var(--carbon-text); }
+.run-hero h1, .run-hero h2, .run-hero h3 { color: var(--carbon-text); }
+.run-title-row h1 { font-size: 13px; font-weight: 600; letter-spacing: -.01em; }
+.run-subtitle, .run-context, .stream-state { color: var(--carbon-muted); }
+.run-actions .button { border-color: #3b4655; background: var(--carbon-raised); color: var(--carbon-text); }
+.run-actions .button:hover:not(:disabled) { border-color: #657286; background: var(--carbon-soft); }
+.run-actions .button-danger { border-color: #7a3139; background: transparent; color: #ff7f89; }
+.back-to-queue { color: #8cadff; }
+
+.tabbar { min-height: 48px; padding: 5px 14px 0; border-color: var(--carbon-border); background: var(--carbon); }
+.evidence-tabs { display: flex; align-items: flex-end; gap: 2px; }
+.tabbar-spacer { flex: 1 1 auto; }
+.tab { min-height: 42px; color: var(--carbon-muted); }
+.tab:hover { color: var(--carbon-text); }
+.tab[aria-selected="true"] { color: #79a0ff; border-bottom-color: var(--kernel); }
+.tab-count { background: #202a39; color: #a8beff; }
+#tabRecord { display: none; }
+.inspector-trigger { margin-left: auto; }
+.evidence > #runEvidence > .tab-panel { padding: 0; }
+
+.transcript { min-height: 100%; margin: 0; padding: 0; list-style: none; }
+.transcript-stage { position: relative; display: grid; grid-template-columns: 110px 28px minmax(0, 1fr); min-height: 78px; padding: 14px 18px 14px 8px; border-bottom: 1px solid var(--carbon-border); color: var(--carbon-text); }
+.transcript-stage:not(:last-child)::after { position: absolute; top: 36px; bottom: -37px; left: 132px; width: 1px; background: #344050; content: ""; }
+.transcript-time { padding: 2px 10px 0 0; color: #8e99a8; font: 10.5px/1.35 "SFMono-Regular", Consolas, monospace; text-align: right; font-variant-numeric: tabular-nums; }
+.transcript-marker { position: relative; z-index: 1; width: 16px; height: 16px; margin: 2px auto 0; border: 2px solid #6f91e8; border-radius: 50%; background: var(--carbon); }
+.transcript-content { min-width: 0; padding-left: 14px; }
+.transcript-content h3 { margin: 0 0 7px; color: #79a0ff; font-size: 11px; font-weight: 700; letter-spacing: .015em; text-transform: uppercase; }
+.transcript-content p { margin: 0; color: #d4dae3; white-space: pre-wrap; overflow-wrap: anywhere; }
+.transcript-code { max-height: 132px; margin: 0; overflow: auto; color: #e3e8ef; font: 11.5px/1.55 "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; }
+.transcript-output { min-height: 160px; }
+.transcript-output .transcript-content { padding-right: 0; }
+.transcript-output .panel-toolbar { min-height: 34px; margin: -5px 0 7px; }
+.transcript-output .toolbar-meta, .transcript-output .follow-control { color: var(--carbon-muted); }
+.transcript-output .button { color: var(--carbon-text); }
+.transcript-proof .transcript-marker { border-color: #7ea2ff; }
+.transcript-terminal .transcript-marker { border-color: var(--healthy); }
+.transcript-proof .button { margin-top: 10px; border-color: #3b4655; color: #a9bdf7; }
+.virtual-viewport { height: 120px; min-height: 120px; border-color: var(--carbon-border); border-radius: 3px; background: #0d1218; }
+.log-line { border-color: #1c2430; }
+.log-line:hover { background: #171e28; }
+#panelEvents { min-height: calc(100dvh - 250px); padding: 14px 16px 18px; background: var(--carbon); }
+#panelEvents .toolbar-meta, #panelEvents .button { color: var(--carbon-muted); }
+#panelEvents .virtual-viewport { height: calc(100dvh - 306px); max-height: none; }
+
+.proof-inspector { height: 100%; min-height: 0; overflow: hidden; border-color: var(--border); background: var(--surface-raised); color: var(--text); }
+.inspector-heading { position: sticky; top: 0; z-index: 2; display: flex; min-height: 76px; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 15px 14px; border-bottom: 1px solid var(--border); background: rgba(253, 254, 255, .98); }
+.inspector-heading h2 { font-size: 15px; }
+.inspector-heading p { margin: 3px 0 0; color: var(--text-muted); font-size: 10px; }
+.inspector-scroll { height: calc(100% - 76px); overflow: auto; scrollbar-color: #b3bac5 #f3f5f8; }
+.inspector-scroll::-webkit-scrollbar-track { background: #f3f5f8; }
+.inspector-scroll::-webkit-scrollbar-thumb { border-color: #f3f5f8; background: #b3bac5; }
+.inspector-panel { padding: 0; background: var(--surface-raised); }
+.result-sheet { border-bottom: 1px solid var(--border); }
+.proof-inspector .section-card { padding: 14px; border-color: var(--border); background: var(--surface-raised); }
+.proof-inspector .inspector-section-title { padding: 12px 14px; border-color: var(--border); background: #eef0f4; }
+.proof-inspector .json-block { border-color: #d9dde4; background: #fff; color: #202735; font-size: 10px; }
+.proof-inspector .result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; border-color: var(--border); background: #fff; }
+.proof-inspector .metric { min-height: 62px; padding: 10px; border-color: var(--border); }
+.proof-inspector .metric:nth-child(2) { border-inline-end: 0; }
+.proof-inspector .metric:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
+.proof-inspector .metadata { grid-template-columns: minmax(96px, .8fr) minmax(0, 1.2fr); }
+.proof-inspector .integrity-note { background: #fff8e8; }
+.proof-inspector .button { min-height: 36px; }
+
+@media (max-width: 1240px) and (min-width: 1061px) {
+  :root { --dock-width: 278px; --sheet-width: 294px; }
+  .boundary-chip > span:not(.state-dot), .tenant-chip > span { display: none; }
+  .boundary-chip strong, .tenant-chip strong { max-width: 108px; }
+  .run-switcher select { width: 148px; }
+  .history-trigger { display: inline-flex; }
+}
+
+@media (max-width: 1060px) {
+  :root { --bar-height: 118px; }
+  body { overflow: auto; }
+  button, input, select, .button-small, .tab, .dock-tab, .follow-control { min-height: 44px; }
+  .topbar { display: grid; height: var(--bar-height); grid-template-columns: auto minmax(0, 1fr) auto; grid-template-rows: 50px 48px; gap: 4px 8px; padding: 8px 12px 10px; }
+  .brand { grid-column: 1; grid-row: 1; }
+  .topbar-divider { display: none; }
+  .boundary-chip { grid-column: 1 / -1; grid-row: 2; width: 100%; justify-content: flex-start; }
+  .tenant-chip { display: none !important; }
+  .topbar-spacer { display: none; }
+  .topbar-actions { display: flex; min-width: 0; grid-column: 2 / -1; grid-row: 1; }
+  .connection-details > section { position: fixed; top: 62px; right: 12px; }
+  .key-form { min-width: 0; flex: 1 1 210px; }
+  .key-input { min-width: 88px; flex: 1 1 auto; width: 120px; }
+  .run-switcher { flex: 1 1 150px; }
+  .run-switcher select { width: 100%; }
+  .history-trigger { display: inline-flex; }
+  .workbench, body.is-sheet-closed .workbench { display: block; height: auto; min-height: 520px; }
+  .dock, .evidence, .proof-inspector { display: none; width: 100%; height: 100%; min-height: 0; border: 0; }
+  body.is-primary-dock .dock { display: flex; }
+  body.is-primary-run .evidence { display: block; }
+  body.is-primary-sheet .proof-inspector { display: block; }
+  body:not(.is-primary-dock):not(.is-primary-run):not(.is-primary-sheet) .dock { display: flex; }
+  .proof-inspector .inspector-heading { position: sticky; }
+  .back-to-queue { display: inline-flex; }
+  .skip-link-detail { display: block; }
+  .policy-ribbon { scroll-margin-top: var(--bar-height); }
+  #tabRecord { display: none; }
+  .inspector-trigger { display: inline-flex; }
+}
+
+@media (max-width: 720px) {
+  :root { --bar-height: 166px; }
+  .topbar { height: var(--bar-height); grid-template-columns: auto minmax(0, 1fr) auto; grid-template-rows: 48px 48px 48px; }
+  .brand { grid-column: 1; grid-row: 1; }
+  .topbar-actions { display: grid; grid-column: 1 / -1; grid-row: 1 / 3; grid-template-columns: auto minmax(110px, 1fr) auto; grid-template-rows: 48px 48px; gap: 4px 6px; pointer-events: none; }
+  .topbar-actions > * { pointer-events: auto; }
+  .connection-details { grid-column: 1; grid-row: 2; }
+  .key-form { grid-column: 2 / -1; grid-row: 2; }
+  .run-switcher { grid-column: 2; grid-row: 1; }
+  .history-trigger { display: none; }
+  .topbar-actions > .button-primary { grid-column: 3; grid-row: 1; }
+  .boundary-chip { grid-row: 3; }
+  .brand-name { font-size: 17px; }
+  .dock-tabs { flex-basis: 52px; }
+  .composer-scroll { padding-inline: 14px; }
+  .code-editor-shell, .code-gutter, .code-field textarea { min-height: 260px; }
+  .run-hero-top { flex-direction: column; }
+  .run-actions { width: 100%; justify-content: flex-start; }
+  .run-title-row { flex-direction: column; align-items: flex-start; }
+  .run-title-row h1 { overflow-wrap: anywhere; white-space: normal; }
+  .policy-ribbon { align-items: flex-start; flex-direction: column; }
+  .policy-ribbon p { width: 100%; white-space: normal; }
+  .tabbar { overflow-x: auto; }
+  .transcript-stage { grid-template-columns: 28px minmax(0, 1fr); padding: 14px 12px; }
+  .transcript-stage:not(:last-child)::after { left: 25px; }
+  .transcript-time { grid-column: 2; grid-row: 1; padding: 0 0 4px 12px; text-align: left; }
+  .transcript-marker { grid-column: 1; grid-row: 1 / span 2; }
+  .transcript-content { grid-column: 2; grid-row: 2; padding-left: 12px; }
+  .transcript-output .panel-toolbar { align-items: flex-start; flex-wrap: wrap; }
+  .transcript-output .toolbar-meta { flex: 1 1 100%; }
+  .virtual-viewport { height: clamp(220px, 42vh, 440px); }
+  #panelEvents .virtual-viewport { height: calc(100dvh - 392px); min-height: 300px; }
+}
+
+@media (max-width: 440px) {
+  :root { --bar-height: 166px; }
+  .topbar { padding-inline: 8px; }
+  .brand-mark { width: 32px; height: 32px; }
+  .brand-name { display: none; }
+  .topbar-actions { grid-template-columns: minmax(100px, 1fr) minmax(100px, 1fr) auto; }
+  .run-switcher { grid-column: 1 / 3; }
+  .connection-chip { padding-inline: 8px; }
+  .key-form { grid-column: 1 / -1; }
+  .topbar-actions > .button-primary { padding-inline: 10px; }
+  .composer-heading { align-items: flex-start; flex-direction: column; }
+  .limit-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .run-columns { display: none; }
+  .run-button { grid-template-columns: 82px minmax(0, 1fr) 46px; }
+  .run-hero { padding-inline: 12px; }
+  .tabbar { padding-inline: 6px; }
+  .tab { padding-inline: 8px; }
+  .inspector-heading { min-height: 70px; padding-inline: 12px; }
+  .proof-inspector .metadata { grid-template-columns: 1fr; gap: 2px; }
+}
+
+@media (hover: hover) {
+  .run-button:hover { background: #f3f6fd; }
+}
+
+@media (pointer: coarse) {
+  button, input, select, summary, .button, .dock-tab, .tab { min-height: 44px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
@@ -370,15 +667,15 @@ dialog::backdrop { background: rgba(31, 41, 55, .42); }
 </head>
 <body>
 <!--
-THESIS: Coop is a run-to-proof operations desk; it refuses the terminal-themed dashboard of equal-weight panels.
-OWN-WORLD: Cool white application planes, ink/navy text, indigo action, semantic green/amber/red, true rows and fine dividers; dark material belongs only to code and output.
-STORY: Connect a credential, choose or create a run, follow ordered execution, compare requested policy with observed posture, then export exact proof.
-FIRST VIEWPORT: A slim command bar sits above a 300px run queue, flexible output-first workspace, and 300px boundary/evidence inspector; New run anchors the upper right.
-FORM: Three-Pane Operations Desk, grounded candidate 1 and selected pick; seed 9cf53bab.
+THESIS: Coop is a chalk-and-carbon execution desk; it refuses equal-weight dashboard chrome and makes the truthful run transcript the dominant work surface.
+OWN-WORLD: Chalk command planes surround a carbon execution well; cobalt means intent, semantic colors mean real state, and one-pixel seams plus compact square controls carry the system.
+STORY: Compose a bounded run, queue it, follow actual accepted policy and ordered output, then inspect the server-reported result and portable proof without losing context.
+FIRST VIEWPORT: A 68px command bar sits above a 292px Compose/History dock, flexible chronological transcript, and closeable 310px Result & record sheet; Queue run anchors the dock.
+FORM: User-pinned Chalk-and-Carbon Execution Desk; seed b6f33025.
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
 -->
-<a class="skip-link" href="#runQueue">Skip to run queue</a>
-<a class="skip-link skip-link-detail" href="#evidence">Skip to selected run</a>
+<a class="skip-link" href="#evidence">Skip to primary workspace</a>
+<a class="skip-link skip-link-detail" href="#leftDock">Skip to Compose and History</a>
 
 <header class="topbar">
   <div class="brand">
@@ -392,11 +689,6 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     <strong id="boundaryValue">unknown</strong>
   </div>
   <div class="tenant-chip" id="tenantChip" hidden><span>tenant</span><strong id="tenantValue"></strong></div>
-  <div class="topbar-search field search-field">
-    <label class="sr-only" for="runSearch">Search loaded runs</label>
-    <svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4"/><path d="m10 10 3 3"/></svg>
-    <input id="runSearch" type="search" placeholder="Search runs" autocomplete="off">
-  </div>
   <div class="topbar-spacer"></div>
   <div class="topbar-actions">
     <details class="connection-details">
@@ -421,6 +713,13 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       <input class="key-input mono" id="apiKey" type="password" placeholder="API key" autocomplete="off" autocapitalize="off" spellcheck="false">
       <button class="button button-small" type="submit">Apply</button>
     </form>
+    <label class="run-switcher">
+      <span class="sr-only">Selected run</span>
+      <select class="mono" id="runSwitcher" aria-label="Selected run">
+        <option value="">No run selected</option>
+      </select>
+    </label>
+    <button class="button button-quiet button-small history-trigger" id="openHistory" type="button" aria-controls="dockHistoryPanel">History</button>
     <button class="button button-primary" id="openSubmit" type="button">
       <svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>
       New run
@@ -434,7 +733,82 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
   <button class="button button-quiet button-small" id="dismissNotice" type="button">Dismiss</button>
 </div>
 
-<main class="workbench">
+<main class="workbench" id="primaryWorkspace">
+  <aside class="dock" id="leftDock" aria-label="Compose and run history">
+    <div class="dock-tabs" role="tablist" aria-label="Run workspace">
+      <button class="dock-tab" id="dockComposeTab" type="button" role="tab" aria-selected="true" aria-controls="dockComposePanel" tabindex="0" data-dock-tab="compose">Compose</button>
+      <button class="dock-tab" id="dockHistoryTab" type="button" role="tab" aria-selected="false" aria-controls="dockHistoryPanel" tabindex="-1" data-dock-tab="history">History</button>
+    </div>
+
+    <section class="dock-panel compose-panel" id="dockComposePanel" role="tabpanel" aria-labelledby="dockComposeTab">
+      <form class="composer-form" id="jobForm">
+        <div class="composer-scroll">
+          <div class="composer-heading">
+            <h2 id="submitTitle">Run composer</h2>
+            <span class="shortcut-hint"><kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd></span>
+          </div>
+          <div class="field">
+            <label for="jobLanguage">Language</label>
+            <select id="jobLanguage" name="language">
+              <option value="python">Python</option>
+              <option value="node">Node</option>
+              <option value="bash">Bash</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="minimumIsolation">Minimum isolation</label>
+            <select id="minimumIsolation" name="minimum_isolation" required>
+              <option value="none">None</option>
+              <option value="linux-shared-kernel">Linux shared kernel</option>
+              <option value="gvisor-application-kernel">gVisor application kernel</option>
+              <option value="wasm-capability">Wasm capability</option>
+              <option value="hardware-vm">Hardware VM</option>
+              <option value="confidential-vm">Confidential VM</option>
+            </select>
+            <p class="field-help" id="minimumIsolationHelp">Authenticate to load the configured provider class.</p>
+          </div>
+          <div class="field code-field">
+            <div class="field-label-row"><label for="jobCode">Code</label><span id="languageRuntime">source</span></div>
+            <div class="code-editor-shell">
+              <ol class="code-gutter mono" id="codeGutter" aria-hidden="true"></ol>
+              <textarea id="jobCode" name="code" required spellcheck="false" autocapitalize="off">import time
+for i in range(3):
+    print(f"tick {i}")
+    time.sleep(0.4)
+print("done")</textarea>
+            </div>
+          </div>
+          <details class="composer-disclosure" open>
+            <summary>Input and limits</summary>
+            <div class="field">
+              <label for="jobStdin">Standard input <span class="optional-label">optional</span></label>
+              <textarea id="jobStdin" name="stdin" spellcheck="false" autocapitalize="off" placeholder="Text passed to the process on stdin"></textarea>
+            </div>
+            <fieldset class="limits">
+              <legend>Requested limits</legend>
+              <div class="limit-grid">
+                <div class="field"><label for="limitWall">Wall seconds</label><input id="limitWall" name="wall_seconds" type="number" min="1" max="300" step="1" value="15" required></div>
+                <div class="field"><label for="limitCpu">CPU seconds</label><input id="limitCpu" name="cpu_seconds" type="number" min="1" max="240" step="1" value="10" required></div>
+                <div class="field"><label for="limitMemory">Memory MB</label><input id="limitMemory" name="mem_mb" type="number" min="16" max="4096" step="1" value="256" required></div>
+                <div class="field"><label for="limitPids">Processes</label><input id="limitPids" name="max_pids" type="number" min="8" max="1024" step="1" value="128" required></div>
+                <div class="field"><label for="limitFile">File MB</label><input id="limitFile" name="max_file_mb" type="number" min="1" max="512" step="1" value="16" required></div>
+              </div>
+              <label class="network-field">
+                <input id="limitNetwork" name="allow_network" type="checkbox">
+                <span><strong>Request network access</strong><small id="networkHelp">Off by default. The provider's observed network posture remains authoritative.</small></span>
+              </label>
+            </fieldset>
+          </details>
+        </div>
+        <div class="composer-footer">
+          <div class="dialog-error" id="submitError" role="alert"></div>
+          <button class="button button-primary queue-button" id="submitRun" type="submit">Queue run</button>
+          <p>Your code and limits are sent to the server. Results are server-reported.</p>
+        </div>
+      </form>
+    </section>
+
+    <section class="dock-panel history-panel" id="dockHistoryPanel" role="tabpanel" aria-labelledby="dockHistoryTab" hidden>
   <aside class="panel explorer" id="runQueue" aria-labelledby="explorerTitle" tabindex="-1">
     <div class="panel-heading">
       <div class="explorer-title">
@@ -443,6 +817,11 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       <button class="button button-quiet button-small" id="refreshRuns" type="button" aria-label="Refresh runs" title="Refresh runs">
         <svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><path d="M13 4v4H9M3.4 6a5 5 0 0 1 8.7-1.4L13 5.5M3 12V8h4M12.6 10a5 5 0 0 1-8.7 1.4L3 10.5"/></svg>
       </button>
+    </div>
+    <div class="history-search field search-field">
+      <label class="sr-only" for="runSearch">Search loaded runs</label>
+      <svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4"/><path d="m10 10 3 3"/></svg>
+      <input id="runSearch" type="search" placeholder="Search runs" autocomplete="off">
     </div>
     <section class="queue-telemetry" aria-label="Loaded run telemetry">
       <dl class="telemetry">
@@ -487,6 +866,8 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
       <button class="button button-quiet button-small" id="loadOlder" type="button" hidden>Load older</button>
     </div>
   </aside>
+    </section>
+  </aside>
 
   <section class="panel evidence" id="evidence" aria-label="Run evidence" tabindex="-1">
     <div class="blank-state" id="blankState">
@@ -494,22 +875,26 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
         <div class="blank-glyph">
           <svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><path d="M3 3.5h10v9H3zM5.5 6.5 7 8 5.5 9.5M8.5 10h2"/></svg>
         </div>
-        <h1 id="evidenceTitle">Select a run to inspect its boundary record</h1>
-        <p>Follow the execution spine, stream output, inspect raw events, and review the server result without leaving the ledger.</p>
-        <button class="button button-primary" id="blankNewRun" type="button">Create a run</button>
+        <h1 id="evidenceTitle">Queue a run, or choose one from History</h1>
+        <p>The execution transcript keeps accepted policy, live output, terminal result, and portable proof in one honest sequence.</p>
+        <button class="button button-primary" id="blankNewRun" type="button">Compose a run</button>
       </div>
     </div>
 
     <div id="runEvidence" hidden>
+      <section class="policy-ribbon" aria-labelledby="policyRibbonTitle">
+        <div><strong id="policyRibbonTitle">Requested policy</strong><span>not a guarantee</span></div>
+        <p class="mono" id="requestedPolicySummary">waiting for the selected run</p>
+      </section>
       <div class="run-hero">
         <button class="back-to-queue" id="backToQueue" type="button">
           <svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><path d="m10 3-5 5 5 5"/></svg>
-          Back to queue
+          Back to history
         </button>
         <div class="run-hero-top">
           <div class="run-identity">
             <div class="run-title-row">
-              <h1 id="selectedId">—</h1>
+              <h1 id="selectedId" tabindex="-1">—</h1>
               <span class="status-badge" id="selectedStatus">unknown</span>
             </div>
             <div class="run-subtitle">
@@ -530,30 +915,70 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
             <button class="button button-danger button-small" id="cancelRun" type="button" hidden>Cancel run</button>
           </div>
         </div>
-        <ol class="execution-spine" aria-label="Execution lifecycle">
+        <ol class="execution-spine sr-only" aria-label="Execution lifecycle">
           <li class="spine-stage" id="stageQueued"><span class="spine-marker" aria-hidden="true"></span><span class="spine-copy"><span class="spine-label">Queued</span><span class="spine-time" id="queuedTime">—</span></span></li>
           <li class="spine-stage" id="stageRunning"><span class="spine-marker" aria-hidden="true"></span><span class="spine-copy"><span class="spine-label">Running</span><span class="spine-time" id="runningTime">waiting</span></span></li>
           <li class="spine-stage" id="stageTerminal"><span class="spine-marker" aria-hidden="true"></span><span class="spine-copy"><span class="spine-label" id="terminalLabel">Terminal</span><span class="spine-time" id="terminalTime">waiting</span></span></li>
         </ol>
       </div>
 
-      <div class="tabbar" role="tablist" aria-label="Run evidence views">
-        <button class="tab" id="tabOutput" role="tab" aria-selected="true" aria-controls="panelOutput" tabindex="0" data-tab="output">Output <span class="tab-count" id="outputCount">0</span></button>
-        <button class="tab" id="tabEvents" role="tab" aria-selected="false" aria-controls="panelEvents" tabindex="-1" data-tab="events">Events <span class="tab-count" id="eventCount">0</span></button>
-        <button class="tab" id="tabResult" role="tab" aria-selected="false" aria-controls="panelResult" tabindex="-1" data-tab="result">Result</button>
-        <button class="tab" id="tabRecord" role="tab" aria-selected="false" aria-controls="panelRecord" tabindex="-1" data-tab="record">Record</button>
+      <div class="tabbar">
+        <div class="evidence-tabs" role="tablist" aria-label="Run evidence views">
+          <button class="tab" id="tabOutput" role="tab" aria-selected="true" aria-controls="panelOutput" tabindex="0" data-tab="output">Output <span class="tab-count" id="outputCount">0</span></button>
+          <button class="tab" id="tabEvents" role="tab" aria-selected="false" aria-controls="panelEvents" tabindex="-1" data-tab="events">Events <span class="tab-count" id="eventCount">0</span></button>
+        </div>
+        <span class="tabbar-spacer"></span>
+        <button class="tab inspector-trigger" id="tabResult" type="button" aria-controls="proofInspector" aria-expanded="true">Result &amp; record</button>
       </div>
 
       <div class="tab-panel" id="panelOutput" role="tabpanel" aria-labelledby="tabOutput" data-panel="output">
-        <div class="panel-toolbar">
-          <span class="toolbar-meta" id="outputSummary">No output received</span>
-          <span class="toolbar-spacer"></span>
-          <label class="follow-control"><input id="followTail" type="checkbox" checked>Follow tail</label>
-          <button class="button button-quiet button-small" id="copyOutput" type="button">Copy output</button>
-        </div>
-        <div class="virtual-viewport" id="outputViewport" role="log" aria-label="Run output" aria-live="off" tabindex="0">
-          <div class="virtual-spacer" id="outputSpacer"><div class="virtual-window" id="outputWindow"></div></div>
-        </div>
+        <ol class="transcript" aria-label="Execution transcript">
+          <li class="transcript-stage transcript-intent">
+            <time class="transcript-time" id="intentTime">—</time>
+            <div class="transcript-marker" aria-hidden="true"></div>
+            <div class="transcript-content"><h3>Intent</h3><pre class="transcript-code" id="intentCode">Loading requested source…</pre></div>
+          </li>
+          <li class="transcript-stage">
+            <time class="transcript-time" id="acceptedTime">—</time>
+            <div class="transcript-marker" aria-hidden="true"></div>
+            <div class="transcript-content"><h3>Accepted policy</h3><p class="mono" id="acceptedPolicy">Waiting for the accepted request…</p></div>
+          </li>
+          <li class="transcript-stage">
+            <time class="transcript-time" id="executionTime">—</time>
+            <div class="transcript-marker" aria-hidden="true"></div>
+            <div class="transcript-content"><h3>Execution</h3><p class="mono" id="executionSummary">Waiting for execution…</p></div>
+          </li>
+          <li class="transcript-stage transcript-output">
+            <div class="transcript-time" aria-hidden="true">output</div>
+            <div class="transcript-marker" aria-hidden="true"></div>
+            <div class="transcript-content">
+              <div class="panel-toolbar">
+                <span class="toolbar-meta" id="outputSummary">No output received</span>
+                <span class="toolbar-spacer"></span>
+                <label class="follow-control"><input id="followTail" type="checkbox" checked>Follow tail</label>
+                <button class="button button-quiet button-small" id="copyOutput" type="button">Copy output</button>
+              </div>
+              <div class="virtual-viewport" id="outputViewport" role="log" aria-label="Run output" aria-live="off" tabindex="0">
+                <div class="virtual-spacer" id="outputSpacer"><div class="virtual-window" id="outputWindow"></div></div>
+              </div>
+            </div>
+          </li>
+          <li class="transcript-stage">
+            <time class="transcript-time" id="systemTime">—</time>
+            <div class="transcript-marker" aria-hidden="true"></div>
+            <div class="transcript-content"><h3>System events</h3><p class="mono" id="systemSummary">No server events loaded.</p></div>
+          </li>
+          <li class="transcript-stage transcript-terminal">
+            <time class="transcript-time" id="completionTime">—</time>
+            <div class="transcript-marker" aria-hidden="true"></div>
+            <div class="transcript-content"><h3>Completion</h3><p class="mono" id="completionSummary">Run has not reached a terminal state.</p></div>
+          </li>
+          <li class="transcript-stage transcript-proof">
+            <time class="transcript-time" id="proofTime">—</time>
+            <div class="transcript-marker" aria-hidden="true"></div>
+            <div class="transcript-content"><h3>Proof</h3><p class="mono" id="proofSummary">Portable proof is not available yet.</p><button class="button button-quiet button-small" id="viewProof" type="button">View result &amp; record</button></div>
+          </li>
+        </ol>
       </div>
 
       <div class="tab-panel" id="panelEvents" role="tabpanel" aria-labelledby="tabEvents" data-panel="events" hidden>
@@ -562,94 +987,25 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
           <span class="toolbar-spacer"></span>
           <button class="button button-quiet button-small" id="copyEvents" type="button">Copy JSON</button>
         </div>
-        <div class="virtual-viewport" id="eventsViewport" aria-label="Ordered run events" tabindex="0">
+        <div class="virtual-viewport" id="eventsViewport" role="region" aria-label="Ordered run events" tabindex="0">
           <div class="virtual-spacer" id="eventsSpacer"><div class="virtual-window" id="eventsWindow"></div></div>
         </div>
       </div>
 
-      <div class="tab-panel" id="panelResult" role="tabpanel" aria-labelledby="tabResult" data-panel="result" hidden></div>
     </div>
   </section>
 
   <aside class="proof-inspector" id="proofInspector" aria-labelledby="proofInspectorTitle">
     <div class="inspector-heading">
-      <h2 id="proofInspectorTitle">Boundary &amp; evidence</h2>
-      <p>Server-reported posture and portable proof for the selected run.</p>
+      <div><h2 id="proofInspectorTitle" tabindex="-1">Result &amp; record</h2><p>Server-reported outcome and portable proof.</p></div>
+      <button class="button button-quiet button-small" id="closeInspector" type="button" aria-label="Close result and record sheet">Close</button>
     </div>
     <div class="inspector-scroll">
-      <div class="tab-panel inspector-panel" id="panelRecord" role="tabpanel" aria-labelledby="tabRecord" data-panel="record"></div>
+      <section class="tab-panel inspector-panel result-sheet" id="panelResult" aria-labelledby="proofInspectorTitle"></section>
+      <section class="tab-panel inspector-panel" id="panelRecord" aria-labelledby="proofInspectorTitle"></section>
     </div>
   </aside>
 </main>
-
-<dialog id="submitDialog" aria-labelledby="submitTitle">
-  <form class="dialog-shell" id="jobForm">
-    <div class="dialog-header">
-      <div>
-        <h2 id="submitTitle">Create a run</h2>
-        <p>The server clamps every requested limit against its configured policy.</p>
-      </div>
-      <button class="button button-quiet button-small" id="closeSubmit" type="button" aria-label="Close new run dialog">Close</button>
-    </div>
-    <div class="dialog-body">
-      <div class="dialog-grid">
-        <div class="dialog-controls">
-          <div class="field">
-            <label for="jobLanguage">Language</label>
-            <select id="jobLanguage" name="language">
-              <option value="python">Python</option>
-              <option value="node">Node</option>
-              <option value="bash">Bash</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="minimumIsolation">Minimum isolation</label>
-            <select id="minimumIsolation" name="minimum_isolation" required>
-              <option value="none">None</option>
-              <option value="linux-shared-kernel">Linux shared kernel</option>
-              <option value="gvisor-application-kernel">gVisor application kernel</option>
-              <option value="wasm-capability">Wasm capability</option>
-              <option value="hardware-vm">Hardware VM</option>
-              <option value="confidential-vm">Confidential VM</option>
-            </select>
-            <p class="field-help" id="minimumIsolationHelp">Authenticate to load the configured provider class.</p>
-          </div>
-        </div>
-        <div class="field code-field">
-          <label for="jobCode">Code</label>
-          <textarea id="jobCode" name="code" required spellcheck="false" autocapitalize="off">import time
-for i in range(3):
-    print(f"tick {i}")
-    time.sleep(0.4)
-print("done")</textarea>
-        </div>
-      </div>
-      <div class="field">
-        <label for="jobStdin">Standard input <span class="optional-label">optional</span></label>
-        <textarea id="jobStdin" name="stdin" spellcheck="false" autocapitalize="off" placeholder="Text passed to the process on stdin"></textarea>
-      </div>
-      <fieldset class="limits">
-        <legend>Requested limits</legend>
-        <div class="limit-grid">
-          <div class="field"><label for="limitWall">Wall seconds</label><input id="limitWall" name="wall_seconds" type="number" min="1" max="300" step="1" value="15" required></div>
-          <div class="field"><label for="limitCpu">CPU seconds</label><input id="limitCpu" name="cpu_seconds" type="number" min="1" max="240" step="1" value="10" required></div>
-          <div class="field"><label for="limitMemory">Memory MB</label><input id="limitMemory" name="mem_mb" type="number" min="16" max="4096" step="1" value="256" required></div>
-          <div class="field"><label for="limitPids">Processes</label><input id="limitPids" name="max_pids" type="number" min="8" max="1024" step="1" value="128" required></div>
-          <div class="field"><label for="limitFile">File MB</label><input id="limitFile" name="max_file_mb" type="number" min="1" max="512" step="1" value="16" required></div>
-        </div>
-        <label class="network-field">
-          <input id="limitNetwork" name="allow_network" type="checkbox">
-          <span><strong>Request network access</strong><small id="networkHelp">Off by default. The provider's observed network posture remains authoritative.</small></span>
-        </label>
-      </fieldset>
-      <div class="dialog-error" id="submitError" role="alert"></div>
-    </div>
-    <div class="dialog-footer">
-      <button class="button" id="cancelSubmit" type="button">Cancel</button>
-      <button class="button button-primary" id="submitRun" type="submit">Queue run</button>
-    </div>
-  </form>
-</dialog>
 
 <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
 <div class="sr-only" id="liveRegion" aria-live="polite" aria-atomic="true"></div>
@@ -673,19 +1029,21 @@ print("done")</textarea>
     boundaryChip: $("boundaryChip"), boundaryDot: $("boundaryDot"), boundaryValue: $("boundaryValue"), tenantChip: $("tenantChip"), tenantValue: $("tenantValue"),
     sessionContext: $("sessionContext"), contextProvider: $("contextProvider"), contextIsolation: $("contextIsolation"), contextTenant: $("contextTenant"), contextPrincipal: $("contextPrincipal"), contextAuth: $("contextAuth"), contextScopes: $("contextScopes"),
     globalNotice: $("globalNotice"), noticeText: $("noticeText"), dismissNotice: $("dismissNotice"),
+    leftDock: $("leftDock"), dockComposeTab: $("dockComposeTab"), dockHistoryTab: $("dockHistoryTab"), dockComposePanel: $("dockComposePanel"), dockHistoryPanel: $("dockHistoryPanel"),
     statLoaded: $("statLoaded"), statQueued: $("statQueued"), statRunning: $("statRunning"), statAttention: $("statAttention"),
     runList: $("runList"), listSummary: $("listSummary"), loadOlder: $("loadOlder"), refreshRuns: $("refreshRuns"),
-    runSearch: $("runSearch"), statusFilter: $("statusFilter"), languageFilter: $("languageFilter"), clearFilters: $("clearFilters"),
+    runSearch: $("runSearch"), runSwitcher: $("runSwitcher"), openHistory: $("openHistory"), statusFilter: $("statusFilter"), languageFilter: $("languageFilter"), clearFilters: $("clearFilters"),
     evidence: $("evidence"), blankState: $("blankState"), runEvidence: $("runEvidence"), openSubmit: $("openSubmit"), blankNewRun: $("blankNewRun"), backToQueue: $("backToQueue"),
     selectedId: $("selectedId"), selectedStatus: $("selectedStatus"), selectedLanguage: $("selectedLanguage"), selectedCreated: $("selectedCreated"), selectedProvider: $("selectedProvider"), selectedIsolation: $("selectedIsolation"), copyId: $("copyId"), cancelRun: $("cancelRun"),
     streamDot: $("streamDot"), streamState: $("streamState"), stageQueued: $("stageQueued"), stageRunning: $("stageRunning"), stageTerminal: $("stageTerminal"),
     queuedTime: $("queuedTime"), runningTime: $("runningTime"), terminalTime: $("terminalTime"), terminalLabel: $("terminalLabel"),
+    requestedPolicySummary: $("requestedPolicySummary"), intentTime: $("intentTime"), intentCode: $("intentCode"), acceptedTime: $("acceptedTime"), acceptedPolicy: $("acceptedPolicy"), executionTime: $("executionTime"), executionSummary: $("executionSummary"), systemTime: $("systemTime"), systemSummary: $("systemSummary"), completionTime: $("completionTime"), completionSummary: $("completionSummary"), proofTime: $("proofTime"), proofSummary: $("proofSummary"), viewProof: $("viewProof"), tabResult: $("tabResult"),
     outputCount: $("outputCount"), eventCount: $("eventCount"), outputSummary: $("outputSummary"), followTail: $("followTail"), copyOutput: $("copyOutput"), copyEvents: $("copyEvents"),
-    outputViewport: $("outputViewport"), outputSpacer: $("outputSpacer"), outputWindow: $("outputWindow"),
-    eventsViewport: $("eventsViewport"), eventsSpacer: $("eventsSpacer"), eventsWindow: $("eventsWindow"),
-    panelResult: $("panelResult"), panelRecord: $("panelRecord"),
-    submitDialog: $("submitDialog"), jobForm: $("jobForm"), closeSubmit: $("closeSubmit"), cancelSubmit: $("cancelSubmit"), submitRun: $("submitRun"), submitError: $("submitError"),
-    jobLanguage: $("jobLanguage"), minimumIsolation: $("minimumIsolation"), minimumIsolationHelp: $("minimumIsolationHelp"), jobCode: $("jobCode"), jobStdin: $("jobStdin"), limitWall: $("limitWall"), limitCpu: $("limitCpu"), limitMemory: $("limitMemory"), limitPids: $("limitPids"), limitFile: $("limitFile"), limitNetwork: $("limitNetwork"), networkHelp: $("networkHelp"),
+    panelOutput: $("panelOutput"), outputViewport: $("outputViewport"), outputSpacer: $("outputSpacer"), outputWindow: $("outputWindow"),
+    panelEvents: $("panelEvents"), eventsViewport: $("eventsViewport"), eventsSpacer: $("eventsSpacer"), eventsWindow: $("eventsWindow"),
+    proofInspector: $("proofInspector"), proofInspectorTitle: $("proofInspectorTitle"), closeInspector: $("closeInspector"), panelResult: $("panelResult"), panelRecord: $("panelRecord"),
+    jobForm: $("jobForm"), submitRun: $("submitRun"), submitError: $("submitError"),
+    jobLanguage: $("jobLanguage"), minimumIsolation: $("minimumIsolation"), minimumIsolationHelp: $("minimumIsolationHelp"), jobCode: $("jobCode"), codeGutter: $("codeGutter"), languageRuntime: $("languageRuntime"), jobStdin: $("jobStdin"), limitWall: $("limitWall"), limitCpu: $("limitCpu"), limitMemory: $("limitMemory"), limitPids: $("limitPids"), limitFile: $("limitFile"), limitNetwork: $("limitNetwork"), networkHelp: $("networkHelp"),
     toastRegion: $("toastRegion"), liveRegion: $("liveRegion")
   };
 
@@ -693,8 +1051,8 @@ print("done")</textarea>
     activeKey: "", keyDirty: false, authGeneration: 0, listGeneration: 0, jobs: [], nextCursor: null, selectedId: null, selectionGeneration: 0,
     detail: null, result: null, resultStatus: null, events: [], eventSeqs: new Set(), outputLines: [], stream: null, streamGeneration: 0,
     streamReconnectTimer: null, streamRetries: 0, streamFinished: false, pollTimer: null, pollInFlight: false,
-    pollBackoff: 2000, pendingRefresh: false, controllers: new Set(), activeTab: "output", followTail: true, virtualFrame: null, cancelArmedUntil: 0,
-    selectionControllers: new Set(), evidenceReadTail: Promise.resolve(), terminalEvidenceTimer: null, statusMeta: null, capabilities: null, identity: null, configuredIsolation: null, lastUpdatedAt: null, initialLoad: true, listError: null, submitOpener: null
+    pollBackoff: 2000, pendingRefresh: false, controllers: new Set(), activeTab: "output", dockView: "compose", sheetOpen: true, primaryView: "dock", returnFocusTarget: null, followTail: true, virtualFrame: null, cancelArmedUntil: 0, cancelArmedId: null,
+    selectionControllers: new Set(), evidenceReadTail: Promise.resolve(), terminalEvidenceTimer: null, statusMeta: null, capabilities: null, identity: null, configuredIsolation: null, lastUpdatedAt: null, initialLoad: true, listError: null
   };
 
   class ApiError extends Error {
@@ -775,6 +1133,44 @@ print("done")</textarea>
   function formatDuration(ms) { if (!Number.isFinite(Number(ms))) return "—"; const value = Number(ms); if (value < 1000) return Math.round(value) + " ms"; if (value < 60000) return (value / 1000).toFixed(value < 10000 ? 1 : 0) + " s"; return Math.floor(value / 60000) + "m " + Math.floor((value % 60000) / 1000) + "s"; }
   function formatBytes(bytes) { if (!Number.isFinite(Number(bytes)) || Number(bytes) < 0) return "—"; const value = Number(bytes); if (value < 1024) return Math.round(value) + " B"; if (value < 1024 * 1024) return (value / 1024).toFixed(value < 10 * 1024 ? 1 : 0) + " KiB"; return (value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0) + " MiB"; }
   function statusLabel(status) { return ({ timed_out: "timed out", oom_killed: "OOM killed" })[status] || (status || "unknown").replace(/_/g, " "); }
+  function isNarrow() { return window.matchMedia("(max-width: 1060px)").matches; }
+  function setPrimaryView(view, focusTarget) {
+    state.primaryView = view; document.body.classList.remove("is-primary-dock", "is-primary-run", "is-primary-sheet"); document.body.classList.add("is-primary-" + view);
+    if (!isNarrow() || !focusTarget) return;
+    window.setTimeout(() => { if (focusTarget.isConnected) focusTarget.focus({ preventScroll: true }); }, 0);
+  }
+  function activateDock(name, focus) {
+    state.dockView = name; const compose = name === "compose"; dom.dockComposePanel.hidden = !compose; dom.dockHistoryPanel.hidden = compose;
+    for (const tab of [dom.dockComposeTab, dom.dockHistoryTab]) { const active = tab.dataset.dockTab === name; tab.setAttribute("aria-selected", active ? "true" : "false"); tab.tabIndex = active ? 0 : -1; if (active && focus) tab.focus(); }
+    if (isNarrow()) setPrimaryView("dock", compose ? dom.jobLanguage : dom.runSearch);
+  }
+  function setSheetOpen(open, trigger, focus) {
+    state.sheetOpen = Boolean(open); document.body.classList.toggle("is-sheet-closed", !state.sheetOpen); dom.tabResult.setAttribute("aria-expanded", state.sheetOpen ? "true" : "false");
+    if (trigger) state.returnFocusTarget = trigger;
+    if (state.sheetOpen) { renderResult(); renderRecord(); if (isNarrow()) setPrimaryView("sheet", focus ? dom.proofInspectorTitle || dom.closeInspector : null); else if (focus) window.setTimeout(() => dom.proofInspectorTitle.focus({ preventScroll: true }), 0); }
+    else { if (isNarrow()) setPrimaryView("run", dom.selectedId); const target = state.returnFocusTarget; state.returnFocusTarget = null; if (focus && target && target.isConnected) window.setTimeout(() => target.focus({ preventScroll: true }), 0); }
+  }
+  function renderCodeGutter() {
+    const count = Math.max(1, dom.jobCode.value.split("\n").length); const fragment = document.createDocumentFragment(); for (let index = 1; index <= count; index += 1) { const row = document.createElement("li"); row.textContent = String(index); fragment.appendChild(row); } dom.codeGutter.replaceChildren(fragment); dom.languageRuntime.textContent = dom.jobLanguage.options[dom.jobLanguage.selectedIndex] ? dom.jobLanguage.options[dom.jobLanguage.selectedIndex].text + " source" : "source";
+  }
+  function renderRunSwitcher() {
+    const prior = state.selectedId || ""; const fragment = document.createDocumentFragment(); const empty = new Option(state.jobs.length ? "Select a run" : "No runs loaded", ""); fragment.appendChild(empty);
+    for (const job of state.jobs) { const option = new Option(shortId(job.job_id) + " · " + statusLabel(job.status), job.job_id); option.title = job.job_id; fragment.appendChild(option); }
+    dom.runSwitcher.replaceChildren(fragment); dom.runSwitcher.value = state.jobs.some((job) => job.job_id === prior) ? prior : "";
+  }
+  function policySummary(job) {
+    const requested = firstObject(job, ["requested_spec", "requested", "job_spec", "spec"]), limits = requested && requested.limits && typeof requested.limits === "object" ? requested.limits : null, boundary = runBoundary(job || {}), parts = [];
+    parts.push((requested && requested.language) || (job && job.language) || "language pending"); if (limits) { if (limits.wall_seconds !== undefined) parts.push("wall " + limits.wall_seconds + "s"); if (limits.cpu_seconds !== undefined) parts.push("cpu " + limits.cpu_seconds + "s"); if (limits.mem_mb !== undefined) parts.push("mem " + limits.mem_mb + "MB"); if (limits.max_pids !== undefined) parts.push("pids " + limits.max_pids); if (limits.max_file_mb !== undefined) parts.push("files " + limits.max_file_mb + "MB"); if (limits.allow_network !== undefined) parts.push("net " + (limits.allow_network ? "on" : "off")); } parts.push("isolation " + boundary.minimum); return parts.join(" · ");
+  }
+  function renderTranscript(job) {
+    if (!job) return; const requested = firstObject(job, ["requested_spec", "requested", "job_spec", "spec"]), boundary = runBoundary(job), attestation = job.attestation && typeof job.attestation === "object" ? job.attestation : null, receipt = firstObject(job, ["receipt", "evidence_receipt", "provenance"]), terminal = isTerminal(job.status);
+    dom.requestedPolicySummary.textContent = policySummary(job); dom.intentTime.textContent = formatClock(job.created_at_ms); dom.intentCode.textContent = requested && typeof requested.code === "string" ? requested.code : "Requested source is not included in this summary.";
+    dom.acceptedTime.textContent = formatClock(job.created_at_ms); dom.acceptedPolicy.textContent = "minimum isolation: " + boundary.minimum + "\nprovider: " + (boundary.provider || "not reported") + "\npolicy: server-reported";
+    dom.executionTime.textContent = job.started_at_ms ? formatClock(job.started_at_ms) : "pending"; dom.executionSummary.textContent = "language: " + (job.language || (requested && requested.language) || "not reported") + "\nobserved isolation: " + (boundary.observed || "pending") + "\nstream: " + dom.streamState.textContent;
+    dom.systemTime.textContent = state.events.length ? formatClock(state.events[state.events.length - 1].ts_ms || state.events[state.events.length - 1].timestamp_ms || state.events[state.events.length - 1].created_at_ms) : "pending"; dom.systemSummary.textContent = state.events.length ? state.events.length + " ordered server events loaded\nledger: " + (state.streamFinished ? "complete" : dom.streamState.textContent) : "No server events loaded.";
+    dom.completionTime.textContent = job.finished_at_ms ? formatClock(job.finished_at_ms) : "pending"; dom.completionSummary.textContent = terminal ? "status: " + statusLabel(job.status) + " · exit " + (job.exit_code === null || job.exit_code === undefined ? "not reported" : job.exit_code) + " · " + formatDuration(durationMs(job)) : "Run has not reached a terminal state.";
+    const proofAvailable = Boolean(receipt || job.receipt_sha256 || (attestation && attestation.available)); dom.proofTime.textContent = proofAvailable ? formatClock(job.finished_at_ms) : "pending"; dom.proofSummary.textContent = proofAvailable ? "Server-reported portable evidence is available." : terminal ? "Portable proof is not available for this terminal record." : "Portable proof is not available yet.";
+  }
   function applyStatusBadge(node, status) { node.className = "status-badge status-" + (status || "unknown"); node.textContent = statusLabel(status); }
   function compactJson(value) { try { return JSON.stringify(value); } catch (_) { return String(value); } }
   async function copyText(text, successMessage) { try { await navigator.clipboard.writeText(text); toast(successMessage || "Copied"); } catch (_) { toast("Clipboard access was denied", "error"); } }
@@ -831,8 +1227,9 @@ print("done")</textarea>
   function resetTenantData(reason) {
     state.authGeneration += 1; state.listGeneration += 1; state.selectionGeneration += 1; abortRequests(); closeStream(); clearTimeout(state.pollTimer); clearTimeout(state.terminalEvidenceTimer); state.pollTimer = null; state.terminalEvidenceTimer = null;
     state.jobs = []; state.nextCursor = null; state.selectedId = null; state.detail = null; state.result = null; state.resultStatus = null;
-    state.events = []; state.eventSeqs = new Set(); state.outputLines = []; state.statusMeta = null; state.capabilities = null; state.identity = null; state.configuredIsolation = null; state.lastUpdatedAt = null; state.initialLoad = true; state.listError = null; state.pendingRefresh = false;
+    state.events = []; state.eventSeqs = new Set(); state.outputLines = []; state.statusMeta = null; state.capabilities = null; state.identity = null; state.configuredIsolation = null; state.lastUpdatedAt = null; state.initialLoad = true; state.listError = null; state.pendingRefresh = false; state.cancelArmedUntil = 0; state.cancelArmedId = null; state.activeTab = "output";
     document.body.classList.remove("is-mobile-detail", "is-record-view"); dom.tenantChip.hidden = true; dom.sessionContext.hidden = true; dom.boundaryValue.textContent = "unknown"; dom.boundaryChip.className = "boundary-chip"; dom.boundaryDot.className = "state-dot"; dom.boundaryChip.title = "Server-reported execution boundary"; dom.minimumIsolation.value = "none"; dom.minimumIsolationHelp.textContent = "Authenticate to load the configured provider class.";
+    activateDock("compose", false); setPrimaryView("dock"); setSheetOpen(true, null, false);
     renderStats(); renderRunList(); renderSelection(); updateSubmissionAvailability(); if (reason) showNotice(reason, "warning");
   }
 
@@ -978,7 +1375,7 @@ print("done")</textarea>
     }
     if (!jobs.length) { const item = document.createElement("li"); item.className = "empty-inline"; item.textContent = state.listError || (state.keyDirty ? "Apply the changed API key to load runs" : state.initialLoad ? (state.activeKey ? "Loading runs…" : "Apply an API key to load runs") : (state.jobs.length ? "No loaded runs match these filters" : "No runs in this ledger yet")); dom.runList.appendChild(item); }
     dom.listSummary.textContent = jobs.length + " shown · " + state.jobs.length + " loaded" + (state.lastUpdatedAt ? " · " + formatClock(state.lastUpdatedAt) : "");
-    dom.loadOlder.hidden = state.nextCursor === null || state.nextCursor === undefined;
+    dom.loadOlder.hidden = state.nextCursor === null || state.nextCursor === undefined; renderRunSwitcher();
   }
 
   function reconcileSelection() {
@@ -1003,8 +1400,8 @@ print("done")</textarea>
     dom.selectedId.textContent = job.job_id; dom.selectedId.title = job.job_id; applyStatusBadge(dom.selectedStatus, job.status); dom.selectedLanguage.textContent = job.language || "unknown"; dom.selectedCreated.textContent = "created " + formatDateTime(job.created_at_ms);
     dom.selectedProvider.textContent = boundary.provider ? "provider " + boundary.provider : "provider pending";
     dom.selectedIsolation.textContent = boundary.observed ? "observed " + boundary.observed : "minimum " + boundary.minimum + " · pending";
-    dom.cancelRun.hidden = isTerminal(job.status); if (!dom.cancelRun.hidden && Date.now() > state.cancelArmedUntil) { const permitted = hasScope("jobs:cancel"); dom.cancelRun.disabled = !permitted; dom.cancelRun.textContent = permitted ? "Cancel run" : "Cancel unavailable"; dom.cancelRun.title = permitted ? "" : "This credential does not grant jobs:cancel"; }
-    renderSpine(job); renderRecord(); renderResult(); renderRunList();
+    dom.cancelRun.hidden = isTerminal(job.status); if (dom.cancelRun.hidden) { state.cancelArmedUntil = 0; state.cancelArmedId = null; } else if (state.cancelArmedId !== job.job_id || Date.now() > state.cancelArmedUntil) { state.cancelArmedUntil = 0; state.cancelArmedId = null; const permitted = hasScope("jobs:cancel"); dom.cancelRun.disabled = !permitted; dom.cancelRun.textContent = permitted ? "Cancel run" : "Cancel unavailable"; dom.cancelRun.title = permitted ? "" : "This credential does not grant jobs:cancel"; }
+    renderSpine(job); renderTranscript(job); renderRecord(); renderResult(); renderRunList();
   }
 
   function renderSpine(job) {
@@ -1016,10 +1413,10 @@ print("done")</textarea>
   }
 
   async function selectJob(id, moveFocus) {
-    if (!id) return; abortSelectionRequests(); clearTimeout(state.terminalEvidenceTimer); state.terminalEvidenceTimer = null; state.selectionGeneration += 1; const selection = state.selectionGeneration; closeStream(); state.selectedId = id;
+    if (!id) return; abortSelectionRequests(); clearTimeout(state.terminalEvidenceTimer); state.terminalEvidenceTimer = null; state.selectionGeneration += 1; const selection = state.selectionGeneration; closeStream(); state.selectedId = id; state.cancelArmedUntil = 0; state.cancelArmedId = null;
     state.detail = state.jobs.find((job) => job.job_id === id) || { job_id: id, status: "unknown" }; state.result = null; state.resultStatus = null; state.events = []; state.eventSeqs = new Set(); state.outputLines = [];
     state.streamRetries = 0; state.streamFinished = isTerminal(state.detail.status); state.followTail = true; dom.followTail.checked = true; setStreamState("checking", "loading ledger"); renderSelection(); renderFeeds();
-    if (moveFocus && window.matchMedia("(max-width: 1060px)").matches) { document.body.classList.add("is-mobile-detail"); window.scrollTo(0, 0); dom.evidence.focus({ preventScroll: true }); }
+    dom.runSwitcher.value = id; if (moveFocus && isNarrow()) { setPrimaryView("run", dom.selectedId); window.scrollTo(0, 0); }
     const generation = state.authGeneration;
     await loadDetail(id, selection, generation);
     if (!selectionIsCurrent(id, selection, generation)) return;
@@ -1133,7 +1530,7 @@ print("done")</textarea>
     dom.outputCount.textContent = String(state.outputLines.length); dom.eventCount.textContent = String(state.events.length);
     const stdoutCount = state.events.filter((event) => event.kind === "stdout").length, stderrCount = state.events.filter((event) => event.kind === "stderr").length;
     dom.outputSummary.textContent = state.outputLines.length ? stdoutCount + " stdout · " + stderrCount + " stderr · " + state.outputLines.length + " ledger lines" : "No output received";
-    renderVirtual(dom.outputViewport, dom.outputSpacer, dom.outputWindow, state.outputLines, renderOutputRow); renderVirtual(dom.eventsViewport, dom.eventsSpacer, dom.eventsWindow, state.events, renderEventRow);
+    renderVirtual(dom.outputViewport, dom.outputSpacer, dom.outputWindow, state.outputLines, renderOutputRow); renderVirtual(dom.eventsViewport, dom.eventsSpacer, dom.eventsWindow, state.events, renderEventRow); renderTranscript(state.detail || state.jobs.find((job) => job.job_id === state.selectedId));
   }
   function renderVirtual(viewport, spacer, windowNode, items, renderer) {
     const lineHeight = 22, viewportHeight = viewport.clientHeight || 360, overscan = 12, start = Math.max(0, Math.floor(viewport.scrollTop / lineHeight) - overscan), end = Math.min(items.length, Math.ceil((viewport.scrollTop + viewportHeight) / lineHeight) + overscan);
@@ -1261,23 +1658,22 @@ print("done")</textarea>
   }
 
   function activateTab(name, focus) {
-    state.activeTab = name; const tabs = Array.from(document.querySelectorAll("[role=tab][data-tab]"));
+    if (name !== "output" && name !== "events") return; state.activeTab = name; const tabs = Array.from(document.querySelectorAll("[role=tab][data-tab]"));
     for (const tab of tabs) { const active = tab.dataset.tab === name; tab.setAttribute("aria-selected", active ? "true" : "false"); tab.tabIndex = active ? 0 : -1; if (active && focus) tab.focus(); }
-    const wide = !window.matchMedia("(max-width: 1060px)").matches; document.body.classList.toggle("is-record-view", name === "record");
-    for (const panel of document.querySelectorAll("[data-panel]")) panel.hidden = panel.dataset.panel === "record" && wide ? false : panel.dataset.panel !== name;
+    dom.panelOutput.hidden = name !== "output"; dom.panelEvents.hidden = name !== "events";
     if (name === "output" || name === "events") scheduleFeedRender(false);
   }
 
   function returnToQueue() {
-    if (state.activeTab === "record") activateTab("output", false); document.body.classList.remove("is-mobile-detail", "is-record-view");
+    activateDock("history", false); if (isNarrow()) setPrimaryView("dock", dom.runSearch);
     const selected = Array.from(dom.runList.querySelectorAll(".run-button")).find((button) => button.dataset.jobId === state.selectedId);
     window.setTimeout(() => { (selected || dom.runList).focus({ preventScroll: false }); }, 0);
   }
 
   async function cancelSelected() {
     const id = state.selectedId; if (!id || !state.detail || isTerminal(state.detail.status) || !hasScope("jobs:cancel")) return; const now = Date.now();
-    if (state.cancelArmedUntil < now) { state.cancelArmedUntil = now + 5000; dom.cancelRun.textContent = "Confirm cancel"; announce("Press Confirm cancel to stop this run"); window.setTimeout(() => { if (Date.now() >= state.cancelArmedUntil && state.selectedId === id && !isTerminal(state.detail && state.detail.status)) { dom.cancelRun.textContent = "Cancel run"; state.cancelArmedUntil = 0; } }, 5100); return; }
-    state.cancelArmedUntil = 0; dom.cancelRun.disabled = true; dom.cancelRun.textContent = "Cancel requested";
+    if (state.cancelArmedId !== id || state.cancelArmedUntil < now) { state.cancelArmedId = id; state.cancelArmedUntil = now + 5000; dom.cancelRun.textContent = "Confirm cancel"; announce("Press Confirm cancel to stop this run"); window.setTimeout(() => { if (Date.now() >= state.cancelArmedUntil && state.cancelArmedId === id) { if (state.selectedId === id && !isTerminal(state.detail && state.detail.status)) dom.cancelRun.textContent = "Cancel run"; state.cancelArmedUntil = 0; state.cancelArmedId = null; } }, 5100); return; }
+    state.cancelArmedUntil = 0; state.cancelArmedId = null; dom.cancelRun.disabled = true; dom.cancelRun.textContent = "Cancel requested";
     try { await apiRequest("/v1/jobs/" + encodeURIComponent(id), { method: "DELETE" }); toast("Cancellation requested for " + shortId(id)); announce("Cancellation requested"); await refreshNow(false); }
     catch (error) { toast(describeError(error), "error"); dom.cancelRun.disabled = !hasScope("jobs:cancel"); dom.cancelRun.textContent = hasScope("jobs:cancel") ? "Cancel run" : "Cancel unavailable"; }
   }
@@ -1300,7 +1696,7 @@ print("done")</textarea>
   }
   function resetListForFilter() { state.listGeneration += 1; state.jobs = []; state.nextCursor = null; state.initialLoad = true; renderStats(); renderRunList(); refreshNow(true).finally(schedulePoll); }
 
-  function openSubmitDialog() { dom.submitError.textContent = ""; if (!state.activeKey || state.keyDirty) { toast("Apply an API key before creating a run", "error"); dom.apiKey.focus(); return; } const reason = submissionBlockReason(); if (reason) { toast(reason, "error"); return; } state.submitOpener = document.activeElement; dom.submitDialog.showModal(); window.setTimeout(() => dom.jobLanguage.focus(), 0); }
+  function openSubmitDialog() { dom.submitError.textContent = ""; activateDock("compose", false); if (isNarrow()) setPrimaryView("dock"); if (!state.activeKey || state.keyDirty) { toast("Apply an API key before queueing", "error"); dom.apiKey.focus(); return; } const reason = submissionBlockReason(); if (reason) { toast(reason, "error"); return; } window.setTimeout(() => dom.jobLanguage.focus(), 0); }
   function numberFrom(input) { const value = Number(input.value); return Number.isFinite(value) ? Math.trunc(value) : null; }
   async function submitJob(event) {
     event.preventDefault(); dom.submitError.textContent = ""; const blocked = submissionBlockReason(); if (blocked) { dom.submitError.textContent = blocked; return; }
@@ -1309,25 +1705,27 @@ print("done")</textarea>
     if (dom.jobStdin.value) payload.stdin = dom.jobStdin.value; dom.submitRun.disabled = true; dom.submitRun.textContent = "Queueing…"; dom.submitRun.setAttribute("aria-busy", "true");
     try {
       const response = await apiRequest("/v1/jobs", { method: "POST", body: JSON.stringify(payload) }), job = response.data || {}; if (!job.job_id) throw new ApiError("The server accepted the run without returning a job ID", { status: response.status });
-      dom.submitDialog.close(); toast("Queued run " + shortId(job.job_id)); await refreshNow(false);
+      toast("Queued run " + shortId(job.job_id)); await refreshNow(false);
       if (!state.jobs.some((item) => item.job_id === job.job_id)) { state.jobs.unshift({ job_id: job.job_id, language: payload.language, status: job.status || "queued", created_at_ms: Date.now(), started_at_ms: null, finished_at_ms: null, exit_code: null, requested_spec: { requirements: payload.requirements } }); renderStats(); renderRunList(); }
-      selectJob(job.job_id, true);
+      activateDock("history", false); selectJob(job.job_id, true);
     } catch (error) { dom.submitError.textContent = describeError(error); }
     finally { dom.submitRun.removeAttribute("aria-busy"); updateSubmissionAvailability(); }
   }
 
   dom.keyForm.addEventListener("submit", (event) => { event.preventDefault(); commitKey(); });
   dom.apiKey.addEventListener("input", () => { const differs = dom.apiKey.value.trim() !== state.activeKey; if (differs && !state.keyDirty) { state.keyDirty = true; resetTenantData("Credentials changed. Apply the key to load the new tenant; prior tenant data has been cleared."); state.keyDirty = true; setApiState("warning", "apply key"); } });
-  dom.dismissNotice.addEventListener("click", hideNotice); dom.openSubmit.addEventListener("click", openSubmitDialog); dom.blankNewRun.addEventListener("click", openSubmitDialog); dom.backToQueue.addEventListener("click", returnToQueue); dom.closeSubmit.addEventListener("click", () => dom.submitDialog.close()); dom.cancelSubmit.addEventListener("click", () => dom.submitDialog.close()); dom.jobForm.addEventListener("submit", submitJob);
-  dom.submitDialog.addEventListener("close", () => { const opener = state.submitOpener; state.submitOpener = null; if (opener && opener.isConnected) window.setTimeout(() => opener.focus(), 0); });
+  dom.dismissNotice.addEventListener("click", hideNotice); dom.openSubmit.addEventListener("click", openSubmitDialog); dom.blankNewRun.addEventListener("click", openSubmitDialog); dom.openHistory.addEventListener("click", () => activateDock("history", true)); dom.backToQueue.addEventListener("click", returnToQueue); dom.jobForm.addEventListener("submit", submitJob);
   dom.minimumIsolation.addEventListener("change", () => dom.minimumIsolation.setCustomValidity(""));
-  dom.jobLanguage.addEventListener("change", (event) => { const previous = Object.entries(samples).find((entry) => entry[1] === dom.jobCode.value); if (!dom.jobCode.value.trim() || previous) dom.jobCode.value = samples[event.target.value] || ""; });
+  dom.jobLanguage.addEventListener("change", (event) => { const previous = Object.entries(samples).find((entry) => entry[1] === dom.jobCode.value); if (!dom.jobCode.value.trim() || previous) dom.jobCode.value = samples[event.target.value] || ""; renderCodeGutter(); });
+  dom.jobCode.addEventListener("input", renderCodeGutter); dom.jobCode.addEventListener("scroll", () => { dom.codeGutter.scrollTop = dom.jobCode.scrollTop; }, { passive: true });
   dom.jobCode.addEventListener("keydown", (event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); dom.jobForm.requestSubmit(); } });
   dom.refreshRuns.addEventListener("click", () => refreshNow(true).finally(schedulePoll));
   dom.loadOlder.addEventListener("click", async () => { dom.loadOlder.disabled = true; try { await fetchJobs({ reset: false }); } catch (error) { toast(describeError(error), "error"); } finally { dom.loadOlder.disabled = false; } });
   dom.runSearch.addEventListener("input", renderRunList); dom.statusFilter.addEventListener("change", resetListForFilter); dom.languageFilter.addEventListener("change", resetListForFilter);
+  dom.runSwitcher.addEventListener("change", () => { if (dom.runSwitcher.value) selectJob(dom.runSwitcher.value, true); });
   dom.clearFilters.addEventListener("click", () => { const hadServerFilters = Boolean(dom.statusFilter.value || dom.languageFilter.value); dom.runSearch.value = ""; dom.statusFilter.value = ""; dom.languageFilter.value = ""; if (hadServerFilters) resetListForFilter(); else renderRunList(); });
   dom.copyId.addEventListener("click", () => copyText(state.selectedId || "", "Full job ID copied")); dom.cancelRun.addEventListener("click", cancelSelected);
+  dom.tabResult.addEventListener("click", () => setSheetOpen(true, dom.tabResult, true)); dom.viewProof.addEventListener("click", () => setSheetOpen(true, dom.viewProof, true)); dom.closeInspector.addEventListener("click", () => setSheetOpen(false, null, true));
   dom.copyOutput.addEventListener("click", () => copyText(state.outputLines.map((line) => line.text).join("\n"), "Output copied")); dom.copyEvents.addEventListener("click", () => copyText(JSON.stringify(state.events, null, 2), "Event ledger copied"));
   dom.followTail.addEventListener("change", () => { state.followTail = dom.followTail.checked; if (state.followTail) { dom.outputViewport.scrollTop = dom.outputViewport.scrollHeight; scheduleFeedRender(false); } });
   dom.outputViewport.addEventListener("scroll", () => { const distance = dom.outputViewport.scrollHeight - dom.outputViewport.scrollTop - dom.outputViewport.clientHeight; if (distance > 88 && state.followTail) { state.followTail = false; dom.followTail.checked = false; } scheduleFeedRender(false); }, { passive: true });
@@ -1339,13 +1737,21 @@ print("done")</textarea>
     tab.addEventListener("keydown", (event) => { const visibleTabs = tabs.filter((candidate) => candidate.getClientRects().length); const index = visibleTabs.indexOf(tab); let target = null; if (event.key === "ArrowRight") target = visibleTabs[(index + 1) % visibleTabs.length]; if (event.key === "ArrowLeft") target = visibleTabs[(index - 1 + visibleTabs.length) % visibleTabs.length]; if (event.key === "Home") target = visibleTabs[0]; if (event.key === "End") target = visibleTabs[visibleTabs.length - 1]; if (target) { event.preventDefault(); activateTab(target.dataset.tab, true); } });
   }
 
+  const dockTabs = [dom.dockComposeTab, dom.dockHistoryTab];
+  for (const tab of dockTabs) {
+    tab.addEventListener("click", () => activateDock(tab.dataset.dockTab, false));
+    tab.addEventListener("keydown", (event) => { const index = dockTabs.indexOf(tab); let target = null; if (event.key === "ArrowRight") target = dockTabs[(index + 1) % dockTabs.length]; if (event.key === "ArrowLeft") target = dockTabs[(index - 1 + dockTabs.length) % dockTabs.length]; if (event.key === "Home") target = dockTabs[0]; if (event.key === "End") target = dockTabs[dockTabs.length - 1]; if (target) { event.preventDefault(); activateDock(target.dataset.dockTab, true); } });
+  }
+
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && state.sheetOpen && (isNarrow() || dom.proofInspector.contains(document.activeElement))) { event.preventDefault(); setSheetOpen(false, null, true); } });
+
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) { schedulePoll(30000); closeStream(); }
     else { refreshNow(false).finally(schedulePoll); if (state.selectedId && !state.streamFinished && !isTerminal(state.detail && state.detail.status)) openStream(state.selectedId, state.selectionGeneration, state.authGeneration).catch(() => scheduleStreamReconnect(state.selectedId, state.selectionGeneration, state.authGeneration)); }
   });
-  window.addEventListener("resize", () => { if (!window.matchMedia("(max-width: 1060px)").matches && state.activeTab === "record") activateTab("output", false); scheduleFeedRender(false); });
+  window.addEventListener("resize", () => { if (isNarrow()) setPrimaryView(state.primaryView || (state.selectedId ? "run" : "dock")); else document.body.classList.remove("is-primary-dock", "is-primary-run", "is-primary-sheet"); scheduleFeedRender(false); });
 
-  purgeLegacyApiKeyStorage(); renderStats(); renderRunList(); renderSelection(); renderFeeds(); updateSubmissionAvailability();
+  purgeLegacyApiKeyStorage(); renderCodeGutter(); activateDock("compose", false); setSheetOpen(true, null, false); setPrimaryView("dock"); renderStats(); renderRunList(); renderSelection(); renderFeeds(); updateSubmissionAvailability();
   setApiState("", "key required"); showNotice("Enter an API key to load this tenant's execution ledger. The key is kept only in this page's memory.", "warning");
 })();
 </script>

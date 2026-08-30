@@ -3206,7 +3206,9 @@ pub async fn status(
     .into_response()
 }
 
-const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-oOtuToXQs0B3tWWs5yov6UadpucxsPXH4tQ1dSePwlk='; style-src 'sha256-IPEJ2JSNy0PyVjnAQQIxWy3GhU0S/z6ZXAwlTszs4BM='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-Y0uFn/S8W0UUKq4qSxVmQaGA4NcJvCi6aeq08AqTt8c='; style-src 'sha256-X2GFZjZLz2UDmVclWmMnlDJVaiJNJHPlcwsX4RSYVqA='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+#[cfg(test)]
+const DASHBOARD_MAX_BYTES: usize = 192 * 1024;
 
 async fn dashboard() -> Response {
     let mut response = Html(include_str!("dashboard.html")).into_response();
@@ -3278,6 +3280,28 @@ mod tests {
         assert!(source.contains("not a trust anchor"));
     }
 
+    #[test]
+    fn dashboard_execution_desk_keeps_view_and_cancel_state_scoped() {
+        let source = include_str!("dashboard.html");
+        for anchor in [
+            "data-dock-tab=\"compose\"",
+            "data-dock-tab=\"history\"",
+            "dockView: \"compose\"",
+            "sheetOpen: true",
+            "primaryView: \"dock\"",
+            "state.cancelArmedId !== id",
+            "state.cancelArmedId = null",
+            "Requested policy",
+            "not a guarantee",
+            "Server-reported portable evidence",
+        ] {
+            assert!(
+                source.contains(anchor),
+                "dashboard contract is missing {anchor}"
+            );
+        }
+    }
+
     fn base64_standard(bytes: &[u8]) -> String {
         const ALPHABET: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -3346,9 +3370,13 @@ mod tests {
         assert!(!csp.contains("ws:"));
         assert!(!csp.contains("wss:"));
 
-        let body = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        let body = axum::body::to_bytes(response.into_body(), DASHBOARD_MAX_BYTES)
             .await
             .expect("dashboard body");
+        assert!(
+            body.len() <= DASHBOARD_MAX_BYTES,
+            "dashboard exceeds its bounded HTML budget"
+        );
         let html = std::str::from_utf8(&body).expect("UTF-8 dashboard");
         assert!(html.contains("localStorage.removeItem(\"coop_api_key\")"));
         assert!(html.contains("localStorage.removeItem(\"coop_key\")"));

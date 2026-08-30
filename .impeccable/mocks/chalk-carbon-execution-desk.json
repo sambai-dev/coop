@@ -1,0 +1,19 @@
+{
+  "approved": true,
+  "approved_at": "2026-08-30T18:58:00+12:00",
+  "tool": "image_gen",
+  "seed_key": "b6f33025",
+  "target": "crates/coop-server/src/dashboard.html",
+  "viewport": {
+    "width": 1440,
+    "height": 1024
+  },
+  "actual_image": {
+    "width": 1487,
+    "height": 1058,
+    "sha256": "bc9a90eed78bf1e7360c096677106f1019a2b81de32cbb912a60f6d6ccb48383"
+  },
+  "prompt_sha256": "6d07b1da7e25e785f79c4ea9facdd52d0819fbdcbc810cf0dfdc42d00855625a",
+  "input_refs_unresolved": true,
+  "prompt": "Use case: ui-mockup\nAsset type: final combined decision comp for a production desktop web application\nDirection name: Chalk-and-Carbon Execution Desk\nPrimary request: Combine the two selected Coop concepts into one coherent 1440 x 1024 desktop screen. Preserve from the first selected reference its dark graphite transcript-first execution workspace, chronological lifecycle/tool/output rows, compact run history access, and restrained electric-blue focus. Preserve from the second selected reference its docked run composer with language/isolation/code/limits, strong Queue run action, light chalk utility planes, and contextual Result & record sheet. Do not simply place two designs side by side—resolve them into one deliberate product.\nInput images: first image is the selected dark transcript concept; second image is the selected light command-deck concept; third image is current Coop for factual controls and data.\nUser and goal: one solo technical builder launches short Python/Node/Bash jobs, watches ordered execution, spots failure, cancels active work, then inspects server-reported result and signed receipt.\nFinal layout:\n- 68px compact command bar across the top: Coop, runtime posture, tenant, connection/API key, selected run switcher, New run.\n- 292px left dock with two understated tabs, Compose and History. Show Compose active with language, minimum isolation, a real code editor, compact limits disclosure, and Queue run. History remains one keyboard shortcut away and the selected run stays visible in the top switcher.\n- Large carbon-black center canvas is the hero. It shows one chronological run transcript as distinct intent, accepted policy, execution, stdout/stderr/system events, completion, and proof availability rows. No fake chat or follow-up composer.\n- 310px right contextual sheet shows Result then Record, with a clear close control. It is visibly an overlay/context sheet rather than permanent equal-weight dashboard chrome.\n- A thin requested-policy ribbon sits above the transcript and stays distinct from observed result/posture in the right sheet.\nVisual system: chalk-white side planes and top bar, carbon/blue-black execution center, ink text, one cobalt action/focus accent, semantic status colors only for real states. Crisp humanist sans for interface labels and practical monospace for code/data. Fine dividers, mostly square geometry, 4–6px radii, no gradients, no glass, no decorative shadows, no pill-heavy styling.\nContent: realistic synthetic Python isolation canary on Aug 30 2026, successful execution with five concise transcript stages and signed receipt available. Keep every visible label plausible and readable.\nAccessibility: 14–16px body text, explicit status words plus color, strong contrast, 44px primary controls, visible keyboard focus, reduced-motion friendly.\nHard constraints: preserve current Coop connect/create/search/filter/history/cancel/output/events/result/record/copy/download capabilities. Requested policy, observed posture, and portable server-reported proof must remain separate. Explicitly label the receipt server-reported and not independently verified. Do not invent analytics, chat, agents, billing, or other features. No terminal window frame, macOS traffic lights, generic card grid, watermark, decorative AI imagery, or marketing copy."
+}

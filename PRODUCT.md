@@ -43,7 +43,8 @@ Keep the name Coop and its plainspoken, technically honest voice. Security postu
 - Embedded operator surface and behavior: `crates/coop-server/src/dashboard.html`.
 - API, CSP, and dashboard contract tests: `crates/coop-server/src/routes.rs`.
 - Current-state captures: `.impeccable/audit/`.
-- Current reference research: Mobbin screens from Databricks, Hume AI, Snowflake, GitHub, Modal, n8n, and related operator products gathered on 2026-08-30.
+- Reference research: Mobbin operator products plus the official Hermes Agent session/dashboard surfaces and OpenCode's transcript-first TUI, gathered on 2026-08-30.
+- Selected v0.5 direction: the approved Chalk-and-Carbon Execution Desk comp in `.impeccable/mocks/chalk-carbon-execution-desk.png` combines a docked Compose/History workflow, dominant chronological run transcript, and contextual Result & record sheet.
 - No customer logos, testimonials, usage claims, or external brand assets are available and none may be fabricated.
 
 ## Product Principles

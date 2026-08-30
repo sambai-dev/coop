@@ -109,3 +109,25 @@ Legacy `COOP_API_KEYS` tenant IDs must now meet the same identity contract as
 indexed credentials and OIDC mappings: 1–128 safe printable ASCII characters.
 Validate legacy tenant names before restart so every accepted job can be
 encoded into the tenant-bound portable attestation profile.
+
+## From v0.4.x to v0.5.0
+
+v0.5 is an operator-interface release. It retains the v0.4 HTTP/OpenAPI
+contract, schema-v4 database, execution providers, signed-evidence format,
+identity model, and deployment boundary. There is no database migration.
+
+Follow the standard drain, backup, canary, and rollback procedure, then replace
+all binaries and SDK artifacts with the matching v0.5 release. Rebuild the
+Compose image so its embedded dashboard and OCI version label are current, and
+repeat the production verifier before restoring traffic. Existing v0.4 API and
+MCP clients remain compatible, although their package versions should be kept
+aligned with the server for support and telemetry clarity.
+
+The embedded dashboard has a new transcript-first execution desk and docked run
+composer. Browser credentials remain memory-only; operators must reconnect
+after a reload. Revalidate keyboard operation, narrow-screen reflow, live event
+reconnect, cancellation, artifact downloads, and requested-versus-observed
+evidence on the browsers used by operators. Because v0.5 does not migrate the
+database, a v0.4 binary rollback remains possible after draining v0.5, provided
+the complete v0.4 binary/image/configuration set was retained and no separately
+introduced configuration change prevents it.
