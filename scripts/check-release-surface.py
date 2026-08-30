@@ -412,9 +412,10 @@ def check_pins_and_packaging() -> int:
         "COOP_ATTESTATION_KEY_SOURCE",
         "COOP_VERIFY_PUBLIC_KEY_FILE",
         "COOP_VERIFY_CONTAINER_IMAGE",
-        "verify_in_image generate-key",
-        "verify_in_image public-key",
-        "--entrypoint /usr/local/bin/coop-verify",
+        'host_uid=$(id -u)',
+        '--user "$host_uid:$host_gid"',
+        "/usr/local/bin/coop-verify generate-key",
+        "/usr/local/bin/coop-verify public-key",
     ]:
         require(required in container_smoke, f"container smoke contract missing: {required}")
     require(

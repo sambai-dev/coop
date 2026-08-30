@@ -39,21 +39,27 @@ if [[ "$secrets_dir" == *,* ]]; then
   echo "smoke secret directory must not contain commas" >&2
   exit 1
 fi
-verify_in_image() {
-  docker run --rm \
-    --network none \
-    --read-only \
-    --user 0:0 \
-    --cap-drop ALL \
-    --security-opt no-new-privileges \
-    --mount "type=bind,src=$secrets_dir,dst=/keys" \
-    --entrypoint /usr/local/bin/coop-verify \
-    "$image_id" "$@"
-}
-verify_in_image generate-key --output /keys/attestation.pem >/dev/null
-verify_in_image public-key \
-  --private-key /keys/attestation.pem \
-  --output /keys/attestation-public-key.pem >/dev/null
+host_uid=$(id -u)
+host_gid=$(id -g)
+docker run --rm \
+  --network none \
+  --read-only \
+  --user "$host_uid:$host_gid" \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --tmpfs "/run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=$host_uid,gid=$host_gid" \
+  --mount "type=bind,src=$secrets_dir,dst=/keys" \
+  --entrypoint /bin/sh \
+  "$image_id" -ec '
+    /usr/local/bin/coop-verify generate-key \
+      --output /run/coop-secrets/attestation.pem >/dev/null
+    /usr/local/bin/coop-verify public-key \
+      --private-key /run/coop-secrets/attestation.pem \
+      --output /run/coop-secrets/attestation-public-key.pem >/dev/null
+    install -m 0600 /run/coop-secrets/attestation.pem /keys/attestation.pem
+    install -m 0644 /run/coop-secrets/attestation-public-key.pem \
+      /keys/attestation-public-key.pem
+  '
 test "$(stat -c %a "$secrets_dir/attestation.pem")" = 600
 test "$(stat -c %a "$secrets_dir/attestation-public-key.pem")" = 644
 
