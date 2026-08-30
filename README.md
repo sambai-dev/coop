@@ -51,6 +51,16 @@ route risky or stateless execution through Coop.
 
 > **Current release:** [v0.4.0](https://github.com/sambai-dev/coop/releases/tag/v0.4.0). The exact eight-asset set includes checksums, a combined artifact-scoped SPDX SBOM, GitHub SBOM/provenance attestations, and the offline `coop-verify` verifier inside each platform archive. Older release lines are unsupported for new deployments.
 
+### Operator console
+
+![Coop's light three-pane operator console showing the run queue, ordered output, and execution-boundary evidence](.impeccable/review/desktop.png)
+
+The embedded console follows the same API as every SDK: select or create a run
+on the left, monitor ordered output in the center, and compare requested policy,
+observed posture, and portable evidence on the right. The red `off · none`
+runtime shown above is an intentional local-development warning, not a claimed
+production boundary.
+
 ## The problem Coop solves
 
 Without Coop, a tool call often ends as `subprocess.run(model_text)` inside the
@@ -393,6 +403,8 @@ development backend retains the service account's host networking and reports
 | `integrations` | MCP, Hermes, and OpenClaw setup templates |
 | `hostile-jobs` | adversarial containment probes |
 | `docs` | architecture, boundary, API, deployment, and operations |
+| `PRODUCT.md` | durable users, purpose, positioning, and product constraints |
+| `DESIGN.md` | operator-console tokens, responsive rules, and component language |
 
 ## Verification
 
