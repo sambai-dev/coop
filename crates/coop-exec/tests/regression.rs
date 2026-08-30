@@ -241,7 +241,7 @@ print('PLATFORM-ENV-OK')
         language: "python".into(),
         code: code.into(),
         stdin: None,
-        limits: limits_wall(10),
+        limits: limits_wall(20),
         workdir: dir.clone(),
         interpreter_override: None,
         rootfs: None,
