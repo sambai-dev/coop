@@ -36,8 +36,14 @@
   button, input, select, textarea { font: inherit; }
   button, input, select { min-height: 40px; }
   button { color: inherit; }
+  input, textarea { caret-color: var(--kernel-strong); }
+  input::placeholder, textarea::placeholder { color: var(--text-faint); opacity: 1; }
   code, pre, .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
   ::selection { background: #214872; color: #f4f8fc; }
+  * { scrollbar-color: var(--border-strong) var(--surface-inset); }
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-track { background: var(--surface-inset); }
+  *::-webkit-scrollbar-thumb { border: 2px solid var(--surface-inset); border-radius: 999px; background: var(--border-strong); }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   [hidden] { display: none !important; }
 
@@ -72,6 +78,7 @@
   .button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-raised); color: var(--text); font-weight: 600; line-height: 1; cursor: pointer; }
   .button:hover:not(:disabled) { border-color: #536173; background: #1b2430; }
   .button:disabled { cursor: not-allowed; opacity: .52; }
+  .button.is-loading .icon { animation: loading-turn 850ms linear infinite; }
   .button-primary { border-color: #4c8ed9; background: #1d65aa; color: #f5f9ff; }
   .button-primary:hover:not(:disabled) { border-color: #75b2f5; background: #2674bd; }
   .button-danger { border-color: #703c3d; background: #2c1719; color: #ffaaa6; }
@@ -84,6 +91,13 @@
   .notice { display: flex; align-items: flex-start; gap: 9px; padding: 9px 16px; border-bottom: 1px solid #64502e; background: #211b12; color: #f0cb85; }
   .notice.is-error { border-color: #6d3839; background: #251416; color: #ffaaa6; }
   .notice-text { flex: 1; min-width: 0; }
+
+  .session-context { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)) minmax(240px, 2fr); gap: 1px; max-width: 1600px; margin: 0 auto; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); border-left: 1px solid var(--border); background: var(--border); }
+  .context-item { display: grid; align-content: center; min-width: 0; min-height: 54px; gap: 4px; padding: 8px 12px; background: var(--workbench); }
+  .context-item dt { color: var(--text-faint); font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+  .context-item dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--text); font: 600 11.5px/1.35 "SFMono-Regular", Consolas, monospace; }
+  .scope-list { display: flex; flex-wrap: wrap; gap: 4px; }
+  .scope-pill { display: inline-flex; align-items: center; min-height: 21px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-inset); color: var(--text-muted); font: 600 10px/1 "SFMono-Regular", Consolas, monospace; white-space: nowrap; }
 
   .telemetry { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); max-width: 1600px; margin: 0 auto; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); border-left: 1px solid var(--border); background: var(--workbench); }
   .telemetry-item { display: grid; grid-template-columns: auto 1fr; align-items: baseline; gap: 8px; min-width: 0; padding: 8px 14px; border-right: 1px solid var(--border); }
@@ -122,7 +136,7 @@
   .run-button[aria-current="true"] { border-color: #3f6f9f; background: #142233; }
   .run-primary, .run-secondary { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .run-id { overflow: hidden; color: var(--text); font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-  .run-time { margin-left: auto; color: var(--text-faint); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .run-time { margin-left: auto; color: var(--text-muted); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .run-language { color: var(--kernel-strong); font: 11px/1 "SFMono-Regular", Consolas, monospace; }
   .run-duration { color: var(--text-muted); font: 11px/1 "SFMono-Regular", Consolas, monospace; font-variant-numeric: tabular-nums; }
   .run-secondary .mini-spine { margin-left: auto; }
@@ -154,6 +168,7 @@
   .run-title-row { display: flex; align-items: center; gap: 9px; min-width: 0; }
   .run-title-row h1 { overflow: hidden; font: 700 15px/1.25 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
   .run-subtitle { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--text-muted); }
+  .run-context { display: inline-flex; align-items: center; min-height: 22px; padding: 2px 7px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-inset); color: var(--text-muted); font: 600 10px/1 "SFMono-Regular", Consolas, monospace; }
   .run-actions { display: flex; align-items: center; gap: 6px; }
   .stream-state { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 11px; }
   .stream-state .state-dot { width: 6px; height: 6px; }
@@ -207,6 +222,7 @@
   .section-card:first-child { margin-top: 0; }
   .section-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
   .section-card-header h3 { margin: 0; }
+  .section-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
   .json-block { max-height: 360px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-inset); color: #cbd6e2; font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
   .metadata { display: grid; grid-template-columns: minmax(110px, 160px) minmax(0, 1fr); margin: 0; }
   .metadata dt, .metadata dd { min-width: 0; margin: 0; padding: 8px 10px; border-bottom: 1px solid var(--border); }
@@ -223,8 +239,10 @@
   .dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--workbench); }
   .dialog-header p { margin: 4px 0 0; color: var(--text-muted); font-size: 12px; }
   .dialog-body { display: grid; gap: 14px; padding: 14px 16px; overflow: auto; }
-  .dialog-grid { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; }
+  .dialog-grid { display: grid; grid-template-columns: minmax(190px, 220px) minmax(0, 1fr); align-items: start; gap: 12px; }
+  .dialog-controls { display: grid; align-content: start; gap: 14px; min-width: 0; }
   .code-field textarea { min-height: 230px; }
+  .field-help { margin: 1px 0 0; color: var(--text-faint); font-size: 10.5px; line-height: 1.45; }
   .limits { margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: 6px; }
   .limits legend { padding: 0 5px; color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
   .limit-grid { display: grid; grid-template-columns: repeat(5, minmax(88px, 1fr)); gap: 10px; }
@@ -239,8 +257,12 @@
   .toast { padding: 10px 12px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-raised); color: var(--text); }
   .toast.is-error { border-color: #8b4848; color: #ffb1ad; }
 
+  @keyframes loading-turn { to { transform: rotate(360deg); } }
+
   @media (max-width: 980px) {
     .brand-copy, .topbar-divider { display: none; }
+    .session-context { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .context-scopes { grid-column: span 2; }
     .workbench { grid-template-columns: minmax(270px, 330px) minmax(0, 1fr); }
     .limit-grid { grid-template-columns: repeat(3, minmax(88px, 1fr)); }
   }
@@ -253,6 +275,8 @@
     .key-form { flex: 1 1 100%; }
     .key-input { flex: 1; width: auto; min-width: 0; }
     .topbar-actions > .button-primary { flex: 1; }
+    .session-context { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .context-scopes { grid-column: 1 / -1; }
     .telemetry { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .telemetry-item:nth-child(2) { border-right: 0; }
     .telemetry-item:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
@@ -271,6 +295,8 @@
     .boundary-chip { max-width: calc(100vw - 68px); }
     .boundary-chip strong { max-width: 145px; }
     .tenant-chip { display: none; }
+    .context-item { min-height: 50px; padding: 7px 9px; }
+    .session-context .context-item:nth-child(5) { grid-column: 1 / -1; }
     .telemetry-item { grid-template-columns: 1fr; gap: 3px; padding: 8px 10px; }
     .workbench { gap: 8px; padding: 8px; }
     .filters { grid-template-columns: 1fr; }
@@ -301,7 +327,7 @@
 <a class="skip-link" href="#evidence">Skip to run evidence</a>
 
 <header class="topbar">
-  <div class="brand" aria-label="Coop execution workbench">
+  <div class="brand">
     <div class="brand-mark" aria-hidden="true">CO</div>
     <div class="brand-copy">
       <span class="brand-name">Coop</span>
@@ -311,7 +337,7 @@
   <div class="topbar-divider" aria-hidden="true"></div>
   <div class="boundary-chip" id="boundaryChip" title="Server-reported execution boundary">
     <span class="state-dot" id="boundaryDot" aria-hidden="true"></span>
-    <span>boundary</span>
+    <span>runtime</span>
     <strong id="boundaryValue">unknown</strong>
   </div>
   <div class="tenant-chip" id="tenantChip" hidden><span>tenant</span><strong id="tenantValue"></strong></div>
@@ -339,12 +365,25 @@
   <button class="button button-quiet button-small" id="dismissNotice" type="button">Dismiss</button>
 </div>
 
-<dl class="telemetry" aria-label="Loaded run telemetry">
-  <div class="telemetry-item"><dt>Loaded runs</dt><dd id="statLoaded">0</dd></div>
-  <div class="telemetry-item"><dt>Queued</dt><dd id="statQueued">0</dd></div>
-  <div class="telemetry-item"><dt>Running</dt><dd class="is-running" id="statRunning">0</dd></div>
-  <div class="telemetry-item"><dt>Needs attention</dt><dd class="is-attention" id="statAttention">0</dd></div>
-</dl>
+<section id="sessionContext" aria-label="Authenticated execution context" hidden>
+  <dl class="session-context">
+    <div class="context-item"><dt>Provider</dt><dd id="contextProvider">unknown</dd></div>
+    <div class="context-item"><dt>Isolation class</dt><dd id="contextIsolation">unknown</dd></div>
+    <div class="context-item"><dt>Tenant</dt><dd id="contextTenant">unknown</dd></div>
+    <div class="context-item"><dt>Principal</dt><dd id="contextPrincipal">unknown</dd></div>
+    <div class="context-item"><dt>Authentication</dt><dd id="contextAuth">unknown</dd></div>
+    <div class="context-item context-scopes"><dt>Granted scopes</dt><dd class="scope-list" id="contextScopes"><span class="scope-pill">not reported</span></dd></div>
+  </dl>
+</section>
+
+<section aria-label="Loaded run telemetry">
+  <dl class="telemetry">
+    <div class="telemetry-item"><dt>Loaded runs</dt><dd id="statLoaded">0</dd></div>
+    <div class="telemetry-item"><dt>Queued</dt><dd id="statQueued">0</dd></div>
+    <div class="telemetry-item"><dt>Running</dt><dd class="is-running" id="statRunning">0</dd></div>
+    <div class="telemetry-item"><dt>Needs attention</dt><dd class="is-attention" id="statAttention">0</dd></div>
+  </dl>
+</section>
 
 <main class="workbench">
   <aside class="panel explorer" aria-labelledby="explorerTitle">
@@ -425,6 +464,8 @@
               <span id="selectedCreated">—</span>
               <span aria-hidden="true">·</span>
               <span class="stream-state"><span class="state-dot" id="streamDot" aria-hidden="true"></span><span id="streamState">disconnected</span></span>
+              <span class="run-context" id="selectedProvider">provider pending</span>
+              <span class="run-context" id="selectedIsolation">isolation pending</span>
             </div>
           </div>
           <div class="run-actions">
@@ -490,13 +531,27 @@
     </div>
     <div class="dialog-body">
       <div class="dialog-grid">
-        <div class="field">
-          <label for="jobLanguage">Language</label>
-          <select id="jobLanguage" name="language">
-            <option value="python">Python</option>
-            <option value="node">Node</option>
-            <option value="bash">Bash</option>
-          </select>
+        <div class="dialog-controls">
+          <div class="field">
+            <label for="jobLanguage">Language</label>
+            <select id="jobLanguage" name="language">
+              <option value="python">Python</option>
+              <option value="node">Node</option>
+              <option value="bash">Bash</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="minimumIsolation">Minimum isolation</label>
+            <select id="minimumIsolation" name="minimum_isolation" required>
+              <option value="none">None</option>
+              <option value="linux-shared-kernel">Linux shared kernel</option>
+              <option value="gvisor-application-kernel">gVisor application kernel</option>
+              <option value="wasm-capability">Wasm capability</option>
+              <option value="hardware-vm">Hardware VM</option>
+              <option value="confidential-vm">Confidential VM</option>
+            </select>
+            <p class="field-help" id="minimumIsolationHelp">Authenticate to load the configured provider class.</p>
+          </div>
         </div>
         <div class="field code-field">
           <label for="jobCode">Code</label>
@@ -522,7 +577,7 @@ print("done")</textarea>
         </div>
         <label class="network-field">
           <input id="limitNetwork" name="allow_network" type="checkbox">
-          <span><strong>Request network access</strong><small>Off by default. The active server policy may still deny this request.</small></span>
+          <span><strong>Request network access</strong><small id="networkHelp">Off by default. The provider's observed network posture remains authoritative.</small></span>
         </label>
       </fieldset>
       <div class="dialog-error" id="submitError" role="alert"></div>
@@ -544,6 +599,7 @@ print("done")</textarea>
   const $ = (id) => document.getElementById(id);
   const terminalStatuses = new Set(["succeeded", "failed", "timed_out", "oom_killed", "cancelled", "error"]);
   const attentionStatuses = new Set(["failed", "timed_out", "oom_killed", "error"]);
+  const isolationClasses = new Set(["none", "linux-shared-kernel", "gvisor-application-kernel", "wasm-capability", "hardware-vm", "confidential-vm"]);
   const samples = {
     python: 'import time\nfor i in range(3):\n    print(f"tick {i}")\n    time.sleep(0.4)\nprint("done")',
     node: 'for (let i = 0; i < 3; i++) {\n  console.log(`tick ${i}`);\n  await new Promise(resolve => setTimeout(resolve, 400));\n}\nconsole.log("done");',
@@ -553,12 +609,13 @@ print("done")</textarea>
   const dom = {
     apiKey: $("apiKey"), keyForm: $("keyForm"), apiChip: $("apiChip"), apiDot: $("apiDot"), apiState: $("apiState"),
     boundaryChip: $("boundaryChip"), boundaryDot: $("boundaryDot"), boundaryValue: $("boundaryValue"), tenantChip: $("tenantChip"), tenantValue: $("tenantValue"),
+    sessionContext: $("sessionContext"), contextProvider: $("contextProvider"), contextIsolation: $("contextIsolation"), contextTenant: $("contextTenant"), contextPrincipal: $("contextPrincipal"), contextAuth: $("contextAuth"), contextScopes: $("contextScopes"),
     globalNotice: $("globalNotice"), noticeText: $("noticeText"), dismissNotice: $("dismissNotice"),
     statLoaded: $("statLoaded"), statQueued: $("statQueued"), statRunning: $("statRunning"), statAttention: $("statAttention"),
     runList: $("runList"), listSummary: $("listSummary"), loadOlder: $("loadOlder"), refreshRuns: $("refreshRuns"),
     runSearch: $("runSearch"), statusFilter: $("statusFilter"), languageFilter: $("languageFilter"), clearFilters: $("clearFilters"),
     evidence: $("evidence"), blankState: $("blankState"), runEvidence: $("runEvidence"), openSubmit: $("openSubmit"), blankNewRun: $("blankNewRun"),
-    selectedId: $("selectedId"), selectedStatus: $("selectedStatus"), selectedLanguage: $("selectedLanguage"), selectedCreated: $("selectedCreated"), copyId: $("copyId"), cancelRun: $("cancelRun"),
+    selectedId: $("selectedId"), selectedStatus: $("selectedStatus"), selectedLanguage: $("selectedLanguage"), selectedCreated: $("selectedCreated"), selectedProvider: $("selectedProvider"), selectedIsolation: $("selectedIsolation"), copyId: $("copyId"), cancelRun: $("cancelRun"),
     streamDot: $("streamDot"), streamState: $("streamState"), stageQueued: $("stageQueued"), stageRunning: $("stageRunning"), stageTerminal: $("stageTerminal"),
     queuedTime: $("queuedTime"), runningTime: $("runningTime"), terminalTime: $("terminalTime"), terminalLabel: $("terminalLabel"),
     outputCount: $("outputCount"), eventCount: $("eventCount"), outputSummary: $("outputSummary"), followTail: $("followTail"), copyOutput: $("copyOutput"), copyEvents: $("copyEvents"),
@@ -566,7 +623,7 @@ print("done")</textarea>
     eventsViewport: $("eventsViewport"), eventsSpacer: $("eventsSpacer"), eventsWindow: $("eventsWindow"),
     panelResult: $("panelResult"), panelRecord: $("panelRecord"),
     submitDialog: $("submitDialog"), jobForm: $("jobForm"), closeSubmit: $("closeSubmit"), cancelSubmit: $("cancelSubmit"), submitRun: $("submitRun"), submitError: $("submitError"),
-    jobLanguage: $("jobLanguage"), jobCode: $("jobCode"), jobStdin: $("jobStdin"), limitWall: $("limitWall"), limitCpu: $("limitCpu"), limitMemory: $("limitMemory"), limitPids: $("limitPids"), limitFile: $("limitFile"), limitNetwork: $("limitNetwork"),
+    jobLanguage: $("jobLanguage"), minimumIsolation: $("minimumIsolation"), minimumIsolationHelp: $("minimumIsolationHelp"), jobCode: $("jobCode"), jobStdin: $("jobStdin"), limitWall: $("limitWall"), limitCpu: $("limitCpu"), limitMemory: $("limitMemory"), limitPids: $("limitPids"), limitFile: $("limitFile"), limitNetwork: $("limitNetwork"), networkHelp: $("networkHelp"),
     toastRegion: $("toastRegion"), liveRegion: $("liveRegion")
   };
 
@@ -575,7 +632,7 @@ print("done")</textarea>
     detail: null, result: null, resultStatus: null, events: [], eventSeqs: new Set(), outputLines: [], stream: null, streamGeneration: 0,
     streamReconnectTimer: null, streamRetries: 0, streamFinished: false, pollTimer: null, pollInFlight: false,
     pollBackoff: 2000, pendingRefresh: false, controllers: new Set(), activeTab: "output", followTail: true, virtualFrame: null, cancelArmedUntil: 0,
-    selectionControllers: new Set(), evidenceReadTail: Promise.resolve(), statusMeta: null, capabilities: null, lastUpdatedAt: null, initialLoad: true, listError: null
+    selectionControllers: new Set(), evidenceReadTail: Promise.resolve(), terminalEvidenceTimer: null, statusMeta: null, capabilities: null, identity: null, configuredIsolation: null, lastUpdatedAt: null, initialLoad: true, listError: null, submitOpener: null
   };
 
   class ApiError extends Error {
@@ -643,7 +700,7 @@ print("done")</textarea>
   }
   function setApiState(kind, label) { dom.apiDot.className = "state-dot" + (kind ? " is-" + kind : ""); dom.apiState.textContent = label; }
   function setStreamState(kind, label) { dom.streamDot.className = "state-dot" + (kind ? " is-" + kind : ""); dom.streamState.textContent = label; }
-  function showNotice(message, tone) { dom.noticeText.textContent = message; dom.globalNotice.className = "notice" + (tone === "error" ? " is-error" : ""); dom.globalNotice.hidden = false; }
+  function showNotice(message, tone) { dom.noticeText.textContent = message; dom.globalNotice.className = "notice" + (tone === "error" ? " is-error" : ""); dom.globalNotice.setAttribute("role", tone === "error" ? "alert" : "status"); dom.globalNotice.hidden = false; }
   function hideNotice() { dom.globalNotice.hidden = true; }
   function toast(message, tone) { const node = document.createElement("div"); node.className = "toast" + (tone === "error" ? " is-error" : ""); node.textContent = message; dom.toastRegion.appendChild(node); window.setTimeout(() => node.remove(), 4500); }
   function announce(message) { dom.liveRegion.textContent = ""; window.setTimeout(() => { dom.liveRegion.textContent = message; }, 20); }
@@ -659,18 +716,67 @@ print("done")</textarea>
   function applyStatusBadge(node, status) { node.className = "status-badge status-" + (status || "unknown"); node.textContent = statusLabel(status); }
   function compactJson(value) { try { return JSON.stringify(value); } catch (_) { return String(value); } }
   async function copyText(text, successMessage) { try { await navigator.clipboard.writeText(text); toast(successMessage || "Copied"); } catch (_) { toast("Clipboard access was denied", "error"); } }
+  async function downloadArtifact(path, filename, button) {
+    const url = new URL(path, window.location.href); if (url.origin !== window.location.origin) { toast("The server returned a cross-origin artifact URL; download blocked", "error"); return; }
+    const controller = new AbortController(), previousLabel = button.textContent; state.controllers.add(controller); button.disabled = true; button.textContent = "Downloading…"; button.setAttribute("aria-busy", "true");
+    try {
+      const response = await fetch(url.pathname + url.search, { headers: { Authorization: "Bearer " + state.activeKey }, signal: controller.signal });
+      if (!response.ok) throw normalizeError(await parseResponse(response), response);
+      const bytes = await response.arrayBuffer(), blob = new Blob([bytes], { type: response.headers.get("content-type") || "application/octet-stream" }), objectUrl = URL.createObjectURL(blob), link = document.createElement("a");
+      link.href = objectUrl; link.download = filename; document.body.appendChild(link); link.click(); link.remove(); window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000); toast("Downloaded " + filename);
+    } catch (error) { if (!error || error.name !== "AbortError") toast("Download failed: " + describeError(error), "error"); }
+    finally { state.controllers.delete(controller); button.disabled = false; button.textContent = previousLabel; button.removeAttribute("aria-busy"); }
+  }
+  function hasScope(scope) { return !state.identity || !Array.isArray(state.identity.scopes) || state.identity.scopes.includes(scope); }
+  function executionContext() {
+    const capabilitiesExecution = state.capabilities && state.capabilities.execution;
+    const statusExecution = state.statusMeta && state.statusMeta.execution;
+    return capabilitiesExecution && typeof capabilitiesExecution === "object" ? capabilitiesExecution : statusExecution && typeof statusExecution === "object" ? statusExecution : null;
+  }
+  function renderSessionContext() {
+    const execution = executionContext(), identity = state.identity;
+    dom.sessionContext.hidden = !execution && !identity;
+    dom.contextProvider.textContent = execution && execution.backend ? String(execution.backend) : sandboxLabel(state.statusMeta);
+    dom.contextIsolation.textContent = execution && isolationClasses.has(execution.isolation_class) ? execution.isolation_class : "not reported";
+    dom.contextTenant.textContent = identity && identity.tenant ? String(identity.tenant) : "not reported";
+    dom.contextPrincipal.textContent = identity && identity.principal_id ? String(identity.principal_id) : "not reported";
+    const authParts = [];
+    if (identity && identity.auth_method) authParts.push(String(identity.auth_method));
+    if (identity && identity.credential_id) authParts.push(String(identity.credential_id));
+    dom.contextAuth.textContent = authParts.length ? authParts.join(" · ") : "not reported";
+    dom.contextScopes.replaceChildren();
+    const scopes = identity && Array.isArray(identity.scopes) ? identity.scopes : [];
+    if (!scopes.length) { const missing = document.createElement("span"); missing.className = "scope-pill"; missing.textContent = "not reported"; dom.contextScopes.appendChild(missing); }
+    else for (const scope of scopes) { const pill = document.createElement("span"); pill.className = "scope-pill"; pill.textContent = String(scope); dom.contextScopes.appendChild(pill); }
+    if (identity && identity.expires_at_ms) dom.contextAuth.title = "Credential expires " + formatDateTime(identity.expires_at_ms); else dom.contextAuth.removeAttribute("title");
+  }
+
+  function submissionBlockReason() {
+    if (!state.activeKey || state.keyDirty) return "";
+    if (!state.capabilities) return "Waiting for authenticated provider capabilities";
+    if (!state.configuredIsolation) return "The server reported an unsupported isolation class";
+    if (dom.jobLanguage.disabled) return "This server has no runnable language runtime configured";
+    if (!hasScope("jobs:submit")) return "This credential does not grant jobs:submit";
+    return "";
+  }
+  function updateSubmissionAvailability() {
+    const reason = submissionBlockReason(), blocked = Boolean(state.activeKey && reason);
+    for (const button of [dom.openSubmit, dom.blankNewRun]) { button.disabled = blocked; if (blocked) button.title = reason; else button.removeAttribute("title"); }
+    dom.submitRun.disabled = Boolean(reason);
+    dom.submitRun.textContent = reason ? (dom.jobLanguage.disabled ? "No runtimes available" : "Run unavailable") : "Queue run";
+  }
 
   function resetTenantData(reason) {
-    state.authGeneration += 1; state.listGeneration += 1; state.selectionGeneration += 1; abortRequests(); closeStream(); clearTimeout(state.pollTimer); state.pollTimer = null;
+    state.authGeneration += 1; state.listGeneration += 1; state.selectionGeneration += 1; abortRequests(); closeStream(); clearTimeout(state.pollTimer); clearTimeout(state.terminalEvidenceTimer); state.pollTimer = null; state.terminalEvidenceTimer = null;
     state.jobs = []; state.nextCursor = null; state.selectedId = null; state.detail = null; state.result = null; state.resultStatus = null;
-    state.events = []; state.eventSeqs = new Set(); state.outputLines = []; state.statusMeta = null; state.capabilities = null; state.lastUpdatedAt = null; state.initialLoad = true; state.listError = null; state.pendingRefresh = false;
-    dom.tenantChip.hidden = true; dom.boundaryValue.textContent = "unknown"; dom.boundaryChip.className = "boundary-chip"; dom.boundaryDot.className = "state-dot"; dom.boundaryChip.title = "Server-reported execution boundary";
-    renderStats(); renderRunList(); renderSelection(); if (reason) showNotice(reason, "warning");
+    state.events = []; state.eventSeqs = new Set(); state.outputLines = []; state.statusMeta = null; state.capabilities = null; state.identity = null; state.configuredIsolation = null; state.lastUpdatedAt = null; state.initialLoad = true; state.listError = null; state.pendingRefresh = false;
+    dom.tenantChip.hidden = true; dom.sessionContext.hidden = true; dom.boundaryValue.textContent = "unknown"; dom.boundaryChip.className = "boundary-chip"; dom.boundaryDot.className = "state-dot"; dom.boundaryChip.title = "Server-reported execution boundary"; dom.minimumIsolation.value = "none"; dom.minimumIsolationHelp.textContent = "Authenticate to load the configured provider class.";
+    renderStats(); renderRunList(); renderSelection(); updateSubmissionAvailability(); if (reason) showNotice(reason, "warning");
   }
 
   function commitKey() {
     const nextKey = dom.apiKey.value.trim(); dom.apiKey.value = ""; resetTenantData(); state.activeKey = nextKey; state.keyDirty = false;
-    renderRunList();
+    renderRunList(); updateSubmissionAvailability();
     if (!nextKey) { setApiState("", "key required"); showNotice("Enter an API key to load this tenant's execution ledger.", "warning"); return; }
     hideNotice(); bootstrap();
   }
@@ -684,19 +790,30 @@ print("done")</textarea>
   }
 
   function renderStatusMeta(meta) {
-    const label = sandboxLabel(meta), lower = label.toLowerCase();
-    dom.boundaryValue.textContent = label + (meta && meta.version ? " · v" + meta.version : "");
+    const execution = executionContext(), provider = execution && execution.backend ? String(execution.backend) : sandboxLabel(meta), isolation = execution && isolationClasses.has(execution.isolation_class) ? execution.isolation_class : "unknown";
+    dom.boundaryValue.textContent = provider + " · " + isolation;
     dom.boundaryChip.className = "boundary-chip"; dom.boundaryDot.className = "state-dot is-ready";
-    const execution = meta && meta.execution && typeof meta.execution === "object" ? meta.execution : null;
-    if ((execution && execution.isolated === false) || ["off", "none", "naive", "disabled", "development"].some((word) => lower.includes(word))) {
-      dom.boundaryChip.classList.add("is-danger"); dom.boundaryDot.className = "state-dot is-error"; dom.boundaryChip.title = "Server reports that the execution boundary is disabled or development-only";
-    } else if (lower === "unknown" || lower.includes("namespace") || (execution && execution.private_rootfs === false)) {
-      dom.boundaryChip.classList.add("is-warning"); dom.boundaryDot.className = "state-dot is-warning"; dom.boundaryChip.title = "Server-reported execution boundary; review deployment trust requirements";
-    } else dom.boundaryChip.title = "Server-reported execution boundary";
+    if (!execution || isolation === "unknown") {
+      dom.boundaryChip.classList.add("is-warning"); dom.boundaryDot.className = "state-dot is-warning";
+    } else if (isolation === "none" || execution.isolated === false) {
+      dom.boundaryChip.classList.add("is-danger"); dom.boundaryDot.className = "state-dot is-error";
+    } else if (isolation === "linux-shared-kernel" || execution.private_rootfs === false) {
+      dom.boundaryChip.classList.add("is-warning"); dom.boundaryDot.className = "state-dot is-warning";
+    }
+    const filterClaim = provider === "gvisor" ? "gVisor does not claim the namespace guest seccomp filter." : execution && execution.seccomp ? "Namespace guest seccomp is reported enabled." : "No namespace guest seccomp claim is reported.";
+    dom.boundaryChip.title = "Provider " + provider + "; isolation class " + isolation + ". " + filterClaim;
+    renderSessionContext();
   }
 
   function applyCapabilities(capabilities) {
     if (!capabilities || typeof capabilities !== "object") return;
+    const execution = capabilities.execution && typeof capabilities.execution === "object" ? capabilities.execution : null;
+    const configuredIsolation = execution && isolationClasses.has(execution.isolation_class) ? execution.isolation_class : null;
+    state.configuredIsolation = configuredIsolation;
+    dom.minimumIsolation.value = configuredIsolation || "none";
+    dom.minimumIsolationHelp.textContent = configuredIsolation ? "Defaults to the configured provider class, " + configuredIsolation + ". Sent atomically as requirements.minimum_isolation; an unsatisfied or separate Wasm requirement is rejected before persistence." : "The server did not report a recognized six-class isolation contract; submission is blocked.";
+    const networking = execution && execution.networking;
+    dom.networkHelp.textContent = networking === "disabled" ? "This provider reports networking disabled; the request cannot enable it." : networking === "host" ? "This provider reports host networking; the flag does not create an isolation boundary." : "The provider's observed network posture remains authoritative.";
     const languages = capabilities.languages || capabilities.supported_languages;
     if (Array.isArray(languages)) {
       const currentForm = dom.jobLanguage.value, currentFilter = dom.languageFilter.value;
@@ -705,9 +822,9 @@ print("done")</textarea>
       for (const value of values) { dom.jobLanguage.appendChild(new Option(value, value)); dom.languageFilter.appendChild(new Option(value, value)); }
       if (!values.length) {
         const unavailable = new Option("No runtimes available", ""); unavailable.disabled = true; unavailable.selected = true; dom.jobLanguage.appendChild(unavailable);
-        dom.jobLanguage.disabled = true; dom.submitRun.disabled = true; dom.submitRun.textContent = "No runtimes available"; dom.submitError.textContent = "This server has no runnable language runtime configured.";
+        dom.jobLanguage.disabled = true; dom.submitError.textContent = "This server has no runnable language runtime configured.";
       } else {
-        dom.jobLanguage.disabled = false; dom.submitRun.disabled = false; dom.submitRun.textContent = "Queue run"; if (dom.submitError.textContent === "This server has no runnable language runtime configured.") dom.submitError.textContent = "";
+        dom.jobLanguage.disabled = false; if (dom.submitError.textContent === "This server has no runnable language runtime configured.") dom.submitError.textContent = "";
         if (values.includes(currentForm)) dom.jobLanguage.value = currentForm;
       }
       if (values.includes(currentFilter)) dom.languageFilter.value = currentFilter;
@@ -717,22 +834,25 @@ print("done")</textarea>
       const mappings = [[dom.limitWall, "wall_seconds", "wall_seconds_max"], [dom.limitCpu, "cpu_seconds", "cpu_seconds_max"], [dom.limitMemory, "mem_mb", "mem_mb_max"], [dom.limitPids, "max_pids", "pids_max"], [dom.limitFile, "max_file_mb", "file_mb_max"]];
       for (const [input, key, maxKey] of mappings) { const raw = limits[maxKey] ?? limits[key]; const value = raw && typeof raw === "object" ? raw.max : raw; if (Number.isFinite(Number(value))) input.max = String(value); }
     }
+    renderStatusMeta(state.statusMeta); updateSubmissionAvailability();
   }
 
   async function bootstrap() {
-    const generation = state.authGeneration; setApiState("checking", "checking"); dom.runList.setAttribute("aria-busy", "true");
+    const generation = state.authGeneration; setApiState("checking", "checking"); dom.runList.setAttribute("aria-busy", "true"); updateSubmissionAvailability();
     try {
       const [statusResponse, whoamiResponse, capabilitiesResponse] = await Promise.all([apiRequest("/v1/status", {}, generation), optionalRequest("/v1/whoami", {}, generation), optionalRequest("/v1/capabilities", {}, generation)]);
       if (generation !== state.authGeneration) return;
-      state.statusMeta = statusResponse.data || {}; state.capabilities = capabilitiesResponse && capabilitiesResponse.data; renderStatusMeta(state.statusMeta); applyCapabilities(state.capabilities);
-      if (whoamiResponse && whoamiResponse.data && whoamiResponse.data.tenant) { dom.tenantValue.textContent = String(whoamiResponse.data.tenant); dom.tenantChip.hidden = false; }
+      state.statusMeta = statusResponse.data || {}; state.capabilities = capabilitiesResponse && capabilitiesResponse.data; state.identity = whoamiResponse && whoamiResponse.data; applyCapabilities(state.capabilities); renderStatusMeta(state.statusMeta); renderSessionContext();
+      if (state.identity && state.identity.tenant) { dom.tenantValue.textContent = String(state.identity.tenant); dom.tenantChip.hidden = false; }
+      updateSubmissionAvailability();
       await fetchJobs({ reset: true, generation }); if (generation !== state.authGeneration) return;
       setApiState("ready", "connected"); hideNotice(); state.pollBackoff = 2000; schedulePoll();
     } catch (error) {
       if (error && error.name === "AbortError") return;
       const authFailure = error instanceof ApiError && (error.status === 401 || error.status === 403);
-      state.listError = authFailure ? "The applied API key was rejected" : "Could not load the execution ledger: " + describeError(error); renderRunList();
-      setApiState("error", authFailure ? "key rejected" : "unavailable"); showNotice(describeError(error), "error"); dom.runList.setAttribute("aria-busy", "false");
+      const failure = authFailure ? "The applied API key was rejected. Enter a valid key and apply it again." : error instanceof TypeError ? "Could not reach Coop. Check that the server is running, then apply the API key again." : describeError(error);
+      state.listError = failure; renderRunList(); updateSubmissionAvailability();
+      setApiState("error", authFailure ? "key rejected" : "unavailable"); showNotice(failure, "error"); dom.runList.setAttribute("aria-busy", "false");
       if (!authFailure) { state.pollBackoff = Math.min(Math.max(state.pollBackoff * 2, 4000), 30000); schedulePoll(state.pollBackoff); }
     }
   }
@@ -745,9 +865,14 @@ print("done")</textarea>
     return "/v1/jobs?" + params.toString();
   }
   function normalizeJobList(payload) { if (Array.isArray(payload)) return { items: payload, nextCursor: null }; if (payload && Array.isArray(payload.items)) return { items: payload.items, nextCursor: payload.next_cursor ?? null }; if (payload && Array.isArray(payload.jobs)) return { items: payload.jobs, nextCursor: payload.next_cursor ?? null }; return { items: [], nextCursor: null }; }
+  function mergeJobSummary(target, summary) {
+    const merged = Object.assign({}, target || {}), fields = ["job_id", "tenant", "language", "status", "created_at_ms", "started_at_ms", "finished_at_ms", "exit_code"];
+    for (const field of fields) if (summary && Object.prototype.hasOwnProperty.call(summary, field)) merged[field] = summary[field];
+    return merged;
+  }
   function mergeJobs(items, reset) {
-    if (reset) { const prior = new Map(state.jobs.map((job) => [job.job_id, job])); state.jobs = items.map((job) => Object.assign({}, prior.get(job.job_id) || {}, job)); }
-    else { const seen = new Set(state.jobs.map((job) => job.job_id)); for (const job of items) { const index = state.jobs.findIndex((current) => current.job_id === job.job_id); if (index >= 0) state.jobs[index] = Object.assign({}, state.jobs[index], job); else if (!seen.has(job.job_id)) { state.jobs.push(job); seen.add(job.job_id); } } }
+    if (reset) { const prior = new Map(state.jobs.map((job) => [job.job_id, job])); state.jobs = items.map((job) => { const previous = prior.get(job.job_id); return Object.assign(previous && previous.requested_spec ? { requested_spec: previous.requested_spec } : {}, job); }); }
+    else { const seen = new Set(state.jobs.map((job) => job.job_id)); for (const job of items) { const index = state.jobs.findIndex((current) => current.job_id === job.job_id); if (index >= 0) { const requested = state.jobs[index].requested_spec; state.jobs[index] = Object.assign(requested ? { requested_spec: requested } : {}, job); } else if (!seen.has(job.job_id)) { state.jobs.push(job); seen.add(job.job_id); } } }
   }
 
   async function fetchJobs(options) {
@@ -796,15 +921,27 @@ print("done")</textarea>
 
   function reconcileSelection() {
     if (!state.selectedId) return; const listed = state.jobs.find((job) => job.job_id === state.selectedId); if (!listed) return;
-    const previousStatus = state.detail && state.detail.status; state.detail = Object.assign({}, state.detail || {}, listed); renderSelection();
-    if (!isTerminal(previousStatus) && isTerminal(listed.status)) { state.streamFinished = true; closeStream(false); loadResult(state.selectedId, state.selectionGeneration, state.authGeneration); announce("Run " + shortId(listed.job_id) + " finished " + statusLabel(listed.status)); }
+    const previousStatus = state.detail && state.detail.status; state.detail = mergeJobSummary(state.detail, listed); renderSelection();
+    if (!isTerminal(previousStatus) && isTerminal(listed.status)) { state.streamFinished = true; closeStream(false); const id = state.selectedId, selection = state.selectionGeneration, generation = state.authGeneration; loadResult(id, selection, generation).then(() => scheduleTerminalEvidenceRefresh(id, selection, generation)); announce("Run " + shortId(listed.job_id) + " finished " + statusLabel(listed.status)); }
+  }
+
+  function runBoundary(job) {
+    const requested = firstObject(job, ["requested_spec", "requested", "job_spec", "spec"]), effective = firstObject(job, ["effective_spec", "effective", "effective_limits"]), policy = firstObject(job, ["execution_policy", "policy"]), receipt = firstObject(job, ["receipt", "evidence_receipt", "provenance"]);
+    const requirements = requested && requested.requirements && typeof requested.requirements === "object" ? requested.requirements : null;
+    const minimum = requirements && isolationClasses.has(requirements.minimum_isolation) ? requirements.minimum_isolation : receipt && isolationClasses.has(receipt.minimum_isolation) ? receipt.minimum_isolation : "none";
+    const observed = effective && isolationClasses.has(effective.isolation_class) ? effective.isolation_class : receipt && isolationClasses.has(receipt.isolation_class) ? receipt.isolation_class : policy && isolationClasses.has(policy.isolation_class) ? policy.isolation_class : null;
+    const provider = policy && policy.sandbox ? String(policy.sandbox) : receipt && receipt.sandbox ? String(receipt.sandbox) : null;
+    return { minimum, observed, provider };
   }
 
   function renderSelection() {
     const job = state.detail || state.jobs.find((item) => item.job_id === state.selectedId), hasSelection = Boolean(state.selectedId && job);
     dom.blankState.hidden = hasSelection; dom.runEvidence.hidden = !hasSelection; if (!hasSelection) return;
+    const boundary = runBoundary(job);
     dom.selectedId.textContent = job.job_id; dom.selectedId.title = job.job_id; applyStatusBadge(dom.selectedStatus, job.status); dom.selectedLanguage.textContent = job.language || "unknown"; dom.selectedCreated.textContent = "created " + formatDateTime(job.created_at_ms);
-    dom.cancelRun.hidden = isTerminal(job.status); if (!dom.cancelRun.hidden && Date.now() > state.cancelArmedUntil) { dom.cancelRun.disabled = false; dom.cancelRun.textContent = "Cancel run"; }
+    dom.selectedProvider.textContent = boundary.provider ? "provider " + boundary.provider : "provider pending";
+    dom.selectedIsolation.textContent = boundary.observed ? "observed " + boundary.observed : "minimum " + boundary.minimum + " · pending";
+    dom.cancelRun.hidden = isTerminal(job.status); if (!dom.cancelRun.hidden && Date.now() > state.cancelArmedUntil) { const permitted = hasScope("jobs:cancel"); dom.cancelRun.disabled = !permitted; dom.cancelRun.textContent = permitted ? "Cancel run" : "Cancel unavailable"; dom.cancelRun.title = permitted ? "" : "This credential does not grant jobs:cancel"; }
     renderSpine(job); renderRecord(); renderResult(); renderRunList();
   }
 
@@ -817,7 +954,7 @@ print("done")</textarea>
   }
 
   async function selectJob(id, moveFocus) {
-    if (!id) return; abortSelectionRequests(); state.selectionGeneration += 1; const selection = state.selectionGeneration; closeStream(); state.selectedId = id;
+    if (!id) return; abortSelectionRequests(); clearTimeout(state.terminalEvidenceTimer); state.terminalEvidenceTimer = null; state.selectionGeneration += 1; const selection = state.selectionGeneration; closeStream(); state.selectedId = id;
     state.detail = state.jobs.find((job) => job.job_id === id) || { job_id: id, status: "unknown" }; state.result = null; state.resultStatus = null; state.events = []; state.eventSeqs = new Set(); state.outputLines = [];
     state.streamRetries = 0; state.streamFinished = isTerminal(state.detail.status); state.followTail = true; dom.followTail.checked = true; setStreamState("checking", "loading ledger"); renderSelection(); renderFeeds();
     if (moveFocus && window.matchMedia("(max-width: 760px)").matches) dom.evidence.focus({ preventScroll: false });
@@ -832,6 +969,16 @@ print("done")</textarea>
   async function loadDetail(id, selection, generation) {
     try { const response = await evidenceRequest(id, selection, generation, "/v1/jobs/" + encodeURIComponent(id)); if (!selectionIsCurrent(id, selection, generation)) return; state.detail = Object.assign({}, state.detail || {}, response.data || {}); renderSelection(); }
     catch (error) { if (error && error.name === "AbortError") return; if (selection === state.selectionGeneration) showNotice("Could not load the selected run record: " + describeError(error), "error"); }
+  }
+
+  function scheduleTerminalEvidenceRefresh(id, selection, generation, attempt) {
+    const nextAttempt = attempt || 0, delays = [0, 250, 750, 1500, 3000]; clearTimeout(state.terminalEvidenceTimer);
+    state.terminalEvidenceTimer = window.setTimeout(async () => {
+      state.terminalEvidenceTimer = null; await loadDetail(id, selection, generation); if (!selectionIsCurrent(id, selection, generation)) return;
+      const receipt = firstObject(state.detail, ["receipt", "evidence_receipt", "provenance"]), boundary = runBoundary(state.detail), attestationCapabilities = state.capabilities && state.capabilities.attestations, attestation = state.detail && state.detail.attestation;
+      const receiptReady = Boolean(receipt || boundary.observed), attestationReady = !attestationCapabilities || attestationCapabilities.enabled !== true || Boolean(attestation && attestation.available);
+      if (!(receiptReady && attestationReady) && nextAttempt + 1 < delays.length) scheduleTerminalEvidenceRefresh(id, selection, generation, nextAttempt + 1);
+    }, delays[nextAttempt]);
   }
 
   async function loadResult(id, selection, generation) {
@@ -868,7 +1015,7 @@ print("done")</textarea>
     }
     if (event.kind === "finished") {
       state.streamFinished = true; const data = event.data || {}; state.detail = Object.assign({}, state.detail || {}, { status: data.status || (state.detail && state.detail.status), exit_code: data.exit_code ?? (state.detail && state.detail.exit_code), finished_at_ms: event.ts_ms || (state.detail && state.detail.finished_at_ms) });
-      const listed = state.jobs.find((job) => job.job_id === state.selectedId); if (listed) Object.assign(listed, state.detail); renderSelection(); loadResult(state.selectedId, state.selectionGeneration, state.authGeneration); window.setTimeout(() => refreshNow(false), 250); announce("Run " + shortId(state.selectedId) + " finished " + statusLabel(data.status));
+      const listed = state.jobs.find((job) => job.job_id === state.selectedId); if (listed) Object.assign(listed, mergeJobSummary({}, state.detail)); renderSelection(); const id = state.selectedId, selection = state.selectionGeneration, generation = state.authGeneration; loadResult(id, selection, generation).then(() => scheduleTerminalEvidenceRefresh(id, selection, generation)); window.setTimeout(() => refreshNow(false), 250); announce("Run " + shortId(state.selectedId) + " finished " + statusLabel(data.status));
     } else if (event.kind === "violation") announce("Sandbox limit violation recorded for run " + shortId(state.selectedId));
     scheduleFeedRender(true);
   }
@@ -952,39 +1099,79 @@ print("done")</textarea>
   }
   function firstObject(source, keys) { for (const key of keys) if (source && source[key] && typeof source[key] === "object") return source[key]; return null; }
 
+  function evidenceMetadataSection(title, rows, action, noteText) {
+    const section = document.createElement("section"); section.className = "section-card";
+    const header = document.createElement("div"); header.className = "section-card-header"; const heading = document.createElement("h3"); heading.textContent = title; header.appendChild(heading);
+    if (action) header.appendChild(action);
+    const list = document.createElement("dl"); list.className = "metadata";
+    for (const row of rows) metadataRow(list, row[0], row[1]);
+    section.append(header, list);
+    if (noteText) { const note = document.createElement("p"); note.className = "integrity-note"; note.textContent = noteText; section.appendChild(note); }
+    return section;
+  }
+
   function receiptEvidenceSection(job, receipt) {
     const chain = receipt && receipt.event_chain && typeof receipt.event_chain === "object" ? receipt.event_chain : null;
     if (!job.receipt_sha256 && !chain) return null;
-    const section = document.createElement("section"); section.className = "section-card";
-    const header = document.createElement("div"); header.className = "section-card-header"; const heading = document.createElement("h3"); heading.textContent = "Receipt integrity metadata"; header.appendChild(heading);
-    if (job.receipt_sha256) { const copy = document.createElement("button"); copy.type = "button"; copy.className = "button button-quiet button-small"; copy.textContent = "Copy digest"; copy.addEventListener("click", () => copyText(job.receipt_sha256, "Receipt digest copied")); header.appendChild(copy); }
-    const list = document.createElement("dl"); list.className = "metadata";
-    metadataRow(list, "Canonical receipt SHA-256", job.receipt_sha256);
+    const rows = [["Canonical receipt SHA-256", job.receipt_sha256]];
     if (chain) {
-      metadataRow(list, "Chain version", chain.version);
-      metadataRow(list, "Chain completeness", typeof chain.complete === "boolean" ? (chain.complete ? "complete" : "incomplete") : null);
-      metadataRow(list, "Reported verification status", chain.status ?? (typeof chain.valid === "boolean" ? (chain.valid ? "valid" : "invalid") : null));
-      metadataRow(list, "Chain head", chain.head);
-      metadataRow(list, "Event rows", chain.events);
-      metadataRow(list, "Hashed v1 event rows", chain.verified_events);
-      metadataRow(list, "Legacy unhashed rows", chain.legacy_events);
+      rows.push(["Chain version", chain.version], ["Chain completeness", typeof chain.complete === "boolean" ? (chain.complete ? "complete" : "incomplete") : null], ["Reported verification status", chain.status ?? (typeof chain.valid === "boolean" ? (chain.valid ? "valid" : "invalid") : null)], ["Chain head", chain.head], ["Event rows", chain.events], ["Hashed v1 event rows", chain.verified_events], ["Legacy unhashed rows", chain.legacy_events]);
     }
-    const note = document.createElement("p"); note.className = "integrity-note"; note.textContent = "Server-recorded hash metadata only. This dashboard does not recompute event links or provide a signature; independently verify the receipt and retained event ledger before treating them as attested.";
-    section.append(header, list, note); return section;
+    let action = null;
+    if (job.receipt_sha256) { action = document.createElement("button"); action.type = "button"; action.className = "button button-quiet button-small"; action.textContent = "Copy digest"; action.addEventListener("click", () => copyText(job.receipt_sha256, "Receipt digest copied")); }
+    return evidenceMetadataSection("Receipt integrity metadata", rows, action, "Server-recorded hash metadata only. This dashboard does not recompute event links or provide a signature; independently verify the receipt and retained event ledger before treating them as attested.");
+  }
+
+  function artifactButton(label, path, filename) {
+    if (!path) return null; const button = document.createElement("button"); button.type = "button"; button.className = "button button-small"; button.textContent = label; button.addEventListener("click", () => downloadArtifact(path, filename, button)); return button;
+  }
+
+  function attestationEvidenceSection(job) {
+    const capabilities = state.capabilities && state.capabilities.attestations && typeof state.capabilities.attestations === "object" ? state.capabilities.attestations : null;
+    const attestation = job && job.attestation && typeof job.attestation === "object" ? job.attestation : null;
+    if (!capabilities && !attestation) return null;
+    const available = Boolean(attestation && attestation.available), enabled = Boolean(capabilities && capabilities.enabled), disabled = Boolean(capabilities && capabilities.enabled === false);
+    const status = available ? "available" : disabled ? "disabled" : enabled ? (isTerminal(job.status) ? "pending" : "awaiting terminal result") : "not reported";
+    const rows = [
+      ["Status", status],
+      ["Algorithm", capabilities && capabilities.algorithm],
+      ["Envelope format", capabilities && capabilities.envelope_format],
+      ["Key ID", (attestation && attestation.key_id) || (capabilities && capabilities.key_id)],
+      ["Receipt SHA-256", attestation && attestation.receipt_sha256],
+      ["Result media type", attestation && attestation.result_media_type],
+      ["Result SHA-256", attestation && attestation.result_sha256],
+      ["Result size", attestation && attestation.result_size_bytes !== null && attestation.result_size_bytes !== undefined ? formatBytes(attestation.result_size_bytes) : null],
+      ["Envelope SHA-256", attestation && attestation.envelope_sha256],
+      ["Envelope size", attestation && attestation.envelope_size_bytes !== null && attestation.envelope_size_bytes !== undefined ? formatBytes(attestation.envelope_size_bytes) : null],
+      ["Public key endpoint", capabilities && capabilities.public_key_url]
+    ];
+    const actions = document.createElement("div"); actions.className = "section-actions"; const safeId = String(job.job_id || "run").replace(/[^a-zA-Z0-9._-]/g, "_");
+    for (const button of [
+      available && artifactButton("Download envelope", attestation.envelope_url, "coop-" + safeId + ".dsse.json"),
+      available && artifactButton("Download result", attestation.result_artifact_url, "coop-" + safeId + ".result.json"),
+      capabilities && capabilities.public_key_url && artifactButton("Download key record", capabilities.public_key_url, "coop-attestation-public-key.json")
+    ]) if (button) actions.appendChild(button);
+    const note = available ? "These are exact server-provided artifact bytes, not a dashboard verification result. The served public key and key ID are discovery material, not a trust anchor; establish trust out of band and independently verify the DSSE envelope, result digest, and receipt." : disabled ? "This server reports signed attestations disabled. Receipt hash metadata remains unsigned." : enabled ? "Signing is enabled, but a signed envelope is not available yet. Terminal evidence is refreshed briefly; reload the run if signing is still pending." : "This server did not report whether signed attestations are enabled.";
+    return evidenceMetadataSection("Signed attestation", rows, actions.childElementCount ? actions : null, note);
+  }
+
+  function appendEvidenceSections(container, job, receipt) {
+    const renderers = [receiptEvidenceSection, attestationEvidenceSection];
+    for (const renderer of renderers) { const section = renderer(job, receipt); if (section) container.appendChild(section); }
   }
 
   function renderRecord() {
     dom.panelRecord.replaceChildren(); const job = state.detail;
     if (!job) { const empty = document.createElement("p"); empty.className = "empty-inline"; empty.textContent = "Select a run to inspect its record."; dom.panelRecord.appendChild(empty); return; }
+    const requested = firstObject(job, ["requested_spec", "requested", "job_spec", "spec"]), effective = firstObject(job, ["effective_spec", "effective", "effective_limits"]), policy = firstObject(job, ["execution_policy", "policy"]), receipt = firstObject(job, ["receipt", "evidence_receipt", "provenance"]), boundary = runBoundary(job);
     const base = document.createElement("section"); base.className = "section-card"; const header = document.createElement("div"); header.className = "section-card-header"; const heading = document.createElement("h3"); heading.textContent = "Run record"; header.appendChild(heading);
     const list = document.createElement("dl"); list.className = "metadata";
-    metadataRow(list, "Job ID", job.job_id); metadataRow(list, "Tenant", job.tenant); metadataRow(list, "Language", job.language); metadataRow(list, "Status", statusLabel(job.status)); metadataRow(list, "Created", formatDateTime(job.created_at_ms)); metadataRow(list, "Started", job.started_at_ms ? formatDateTime(job.started_at_ms) : null); metadataRow(list, "Finished", job.finished_at_ms ? formatDateTime(job.finished_at_ms) : null); metadataRow(list, "Exit code", job.exit_code === null || job.exit_code === undefined ? null : job.exit_code); metadataRow(list, "Duration", formatDuration(durationMs(job))); metadataRow(list, "Request ID", job.request_id || job.correlation_id); metadataRow(list, "Canonical receipt SHA-256", job.receipt_sha256);
+    metadataRow(list, "Job ID", job.job_id); metadataRow(list, "Tenant", job.tenant); metadataRow(list, "Language", job.language); metadataRow(list, "Status", statusLabel(job.status)); metadataRow(list, "Provider", boundary.provider); metadataRow(list, "Minimum isolation", boundary.minimum); metadataRow(list, "Observed isolation", boundary.observed || "pending"); metadataRow(list, "Created", formatDateTime(job.created_at_ms)); metadataRow(list, "Started", job.started_at_ms ? formatDateTime(job.started_at_ms) : null); metadataRow(list, "Finished", job.finished_at_ms ? formatDateTime(job.finished_at_ms) : null); metadataRow(list, "Exit code", job.exit_code === null || job.exit_code === undefined ? null : job.exit_code); metadataRow(list, "Duration", formatDuration(durationMs(job))); metadataRow(list, "Request ID", job.request_id || job.correlation_id); metadataRow(list, "Canonical receipt SHA-256", job.receipt_sha256);
     base.append(header, list); dom.panelRecord.appendChild(base);
-    const requested = firstObject(job, ["requested_spec", "requested", "job_spec", "spec"]), effective = firstObject(job, ["effective_spec", "effective", "effective_limits"]), policy = firstObject(job, ["execution_policy", "policy"]), receipt = firstObject(job, ["receipt", "evidence_receipt", "provenance"]), receiptEvidence = receiptEvidenceSection(job, receipt);
     if (requested) dom.panelRecord.appendChild(sectionWithJson("Requested spec", requested));
     if (effective) dom.panelRecord.appendChild(sectionWithJson("Effective spec", effective));
     if (policy) dom.panelRecord.appendChild(sectionWithJson("Execution policy", policy));
-    if (receiptEvidence) dom.panelRecord.appendChild(receiptEvidence);
+    appendEvidenceSections(dom.panelRecord, job, receipt);
     if (receipt) dom.panelRecord.appendChild(sectionWithJson("Execution receipt", receipt));
   }
 
@@ -1008,21 +1195,21 @@ print("done")</textarea>
   }
 
   async function cancelSelected() {
-    const id = state.selectedId; if (!id || !state.detail || isTerminal(state.detail.status)) return; const now = Date.now();
+    const id = state.selectedId; if (!id || !state.detail || isTerminal(state.detail.status) || !hasScope("jobs:cancel")) return; const now = Date.now();
     if (state.cancelArmedUntil < now) { state.cancelArmedUntil = now + 5000; dom.cancelRun.textContent = "Confirm cancel"; announce("Press Confirm cancel to stop this run"); window.setTimeout(() => { if (Date.now() >= state.cancelArmedUntil && state.selectedId === id && !isTerminal(state.detail && state.detail.status)) { dom.cancelRun.textContent = "Cancel run"; state.cancelArmedUntil = 0; } }, 5100); return; }
     state.cancelArmedUntil = 0; dom.cancelRun.disabled = true; dom.cancelRun.textContent = "Cancel requested";
     try { await apiRequest("/v1/jobs/" + encodeURIComponent(id), { method: "DELETE" }); toast("Cancellation requested for " + shortId(id)); announce("Cancellation requested"); await refreshNow(false); }
-    catch (error) { toast(describeError(error), "error"); dom.cancelRun.disabled = false; dom.cancelRun.textContent = "Cancel run"; }
+    catch (error) { toast(describeError(error), "error"); dom.cancelRun.disabled = !hasScope("jobs:cancel"); dom.cancelRun.textContent = hasScope("jobs:cancel") ? "Cancel run" : "Cancel unavailable"; }
   }
 
   async function refreshNow(showErrors) {
     if (!state.activeKey || state.keyDirty) return;
     if (state.pollInFlight) { state.pendingRefresh = state.pendingRefresh || Boolean(showErrors); return; }
-    state.pollInFlight = true; dom.refreshRuns.disabled = true;
+    state.pollInFlight = true; dom.refreshRuns.disabled = true; dom.refreshRuns.classList.add("is-loading"); dom.refreshRuns.setAttribute("aria-busy", "true");
     try { await fetchJobs({ reset: true }); setApiState("ready", "connected"); state.pollBackoff = 2000; }
     catch (error) { if (error && error.name !== "AbortError") { setApiState("warning", "degraded"); state.pollBackoff = Math.min(Math.max(state.pollBackoff * 2, 4000), error.retryAfterMs || 30000); if (state.initialLoad) { state.listError = "Could not load the execution ledger: " + describeError(error); renderRunList(); } if (showErrors) toast(describeError(error), "error"); } }
     finally {
-      state.pollInFlight = false; dom.refreshRuns.disabled = false;
+      state.pollInFlight = false; dom.refreshRuns.disabled = false; dom.refreshRuns.classList.remove("is-loading"); dom.refreshRuns.removeAttribute("aria-busy");
       const runPending = state.pendingRefresh; state.pendingRefresh = false;
       if (runPending) window.setTimeout(() => refreshNow(true).finally(schedulePoll), 0);
     }
@@ -1033,24 +1220,27 @@ print("done")</textarea>
   }
   function resetListForFilter() { state.listGeneration += 1; state.jobs = []; state.nextCursor = null; state.initialLoad = true; renderStats(); renderRunList(); refreshNow(true).finally(schedulePoll); }
 
-  function openSubmitDialog() { dom.submitError.textContent = ""; if (!state.activeKey || state.keyDirty) { toast("Apply an API key before creating a run", "error"); dom.apiKey.focus(); return; } if (dom.jobLanguage.disabled) { toast("This server has no runnable language runtime configured", "error"); return; } dom.submitDialog.showModal(); window.setTimeout(() => dom.jobLanguage.focus(), 0); }
+  function openSubmitDialog() { dom.submitError.textContent = ""; if (!state.activeKey || state.keyDirty) { toast("Apply an API key before creating a run", "error"); dom.apiKey.focus(); return; } const reason = submissionBlockReason(); if (reason) { toast(reason, "error"); return; } state.submitOpener = document.activeElement; dom.submitDialog.showModal(); window.setTimeout(() => dom.jobLanguage.focus(), 0); }
   function numberFrom(input) { const value = Number(input.value); return Number.isFinite(value) ? Math.trunc(value) : null; }
   async function submitJob(event) {
-    event.preventDefault(); dom.submitError.textContent = ""; if (!dom.jobForm.reportValidity()) return;
-    const payload = { language: dom.jobLanguage.value, code: dom.jobCode.value, limits: { wall_seconds: numberFrom(dom.limitWall), cpu_seconds: numberFrom(dom.limitCpu), mem_mb: numberFrom(dom.limitMemory), max_pids: numberFrom(dom.limitPids), max_file_mb: numberFrom(dom.limitFile), allow_network: dom.limitNetwork.checked } };
-    if (dom.jobStdin.value) payload.stdin = dom.jobStdin.value; dom.submitRun.disabled = true; dom.submitRun.textContent = "Queueing…";
+    event.preventDefault(); dom.submitError.textContent = ""; const blocked = submissionBlockReason(); if (blocked) { dom.submitError.textContent = blocked; return; }
+    const minimumIsolation = dom.minimumIsolation.value; dom.minimumIsolation.setCustomValidity(isolationClasses.has(minimumIsolation) ? "" : "Select one of the six supported isolation classes."); if (!dom.jobForm.reportValidity()) return;
+    const payload = { language: dom.jobLanguage.value, code: dom.jobCode.value, requirements: { minimum_isolation: minimumIsolation }, limits: { wall_seconds: numberFrom(dom.limitWall), cpu_seconds: numberFrom(dom.limitCpu), mem_mb: numberFrom(dom.limitMemory), max_pids: numberFrom(dom.limitPids), max_file_mb: numberFrom(dom.limitFile), allow_network: dom.limitNetwork.checked } };
+    if (dom.jobStdin.value) payload.stdin = dom.jobStdin.value; dom.submitRun.disabled = true; dom.submitRun.textContent = "Queueing…"; dom.submitRun.setAttribute("aria-busy", "true");
     try {
       const response = await apiRequest("/v1/jobs", { method: "POST", body: JSON.stringify(payload) }), job = response.data || {}; if (!job.job_id) throw new ApiError("The server accepted the run without returning a job ID", { status: response.status });
       dom.submitDialog.close(); toast("Queued run " + shortId(job.job_id)); await refreshNow(false);
-      if (!state.jobs.some((item) => item.job_id === job.job_id)) { state.jobs.unshift({ job_id: job.job_id, language: payload.language, status: job.status || "queued", created_at_ms: Date.now(), started_at_ms: null, finished_at_ms: null, exit_code: null }); renderStats(); renderRunList(); }
+      if (!state.jobs.some((item) => item.job_id === job.job_id)) { state.jobs.unshift({ job_id: job.job_id, language: payload.language, status: job.status || "queued", created_at_ms: Date.now(), started_at_ms: null, finished_at_ms: null, exit_code: null, requested_spec: { requirements: payload.requirements } }); renderStats(); renderRunList(); }
       selectJob(job.job_id, true);
     } catch (error) { dom.submitError.textContent = describeError(error); }
-    finally { const unavailable = dom.jobLanguage.disabled; dom.submitRun.disabled = unavailable; dom.submitRun.textContent = unavailable ? "No runtimes available" : "Queue run"; }
+    finally { dom.submitRun.removeAttribute("aria-busy"); updateSubmissionAvailability(); }
   }
 
   dom.keyForm.addEventListener("submit", (event) => { event.preventDefault(); commitKey(); });
   dom.apiKey.addEventListener("input", () => { const differs = dom.apiKey.value.trim() !== state.activeKey; if (differs && !state.keyDirty) { state.keyDirty = true; resetTenantData("Credentials changed. Apply the key to load the new tenant; prior tenant data has been cleared."); state.keyDirty = true; setApiState("warning", "apply key"); } });
   dom.dismissNotice.addEventListener("click", hideNotice); dom.openSubmit.addEventListener("click", openSubmitDialog); dom.blankNewRun.addEventListener("click", openSubmitDialog); dom.closeSubmit.addEventListener("click", () => dom.submitDialog.close()); dom.cancelSubmit.addEventListener("click", () => dom.submitDialog.close()); dom.jobForm.addEventListener("submit", submitJob);
+  dom.submitDialog.addEventListener("close", () => { const opener = state.submitOpener; state.submitOpener = null; if (opener && opener.isConnected) window.setTimeout(() => opener.focus(), 0); });
+  dom.minimumIsolation.addEventListener("change", () => dom.minimumIsolation.setCustomValidity(""));
   dom.jobLanguage.addEventListener("change", (event) => { const previous = Object.entries(samples).find((entry) => entry[1] === dom.jobCode.value); if (!dom.jobCode.value.trim() || previous) dom.jobCode.value = samples[event.target.value] || ""; });
   dom.jobCode.addEventListener("keydown", (event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); dom.jobForm.requestSubmit(); } });
   dom.refreshRuns.addEventListener("click", () => refreshNow(true).finally(schedulePoll));
@@ -1075,7 +1265,7 @@ print("done")</textarea>
   });
   window.addEventListener("resize", () => scheduleFeedRender(false));
 
-  purgeLegacyApiKeyStorage(); renderStats(); renderRunList(); renderSelection(); renderFeeds();
+  purgeLegacyApiKeyStorage(); renderStats(); renderRunList(); renderSelection(); renderFeeds(); updateSubmissionAvailability();
   setApiState("", "key required"); showNotice("Enter an API key to load this tenant's execution ledger. The key is kept only in this page's memory.", "warning");
 })();
 </script>

@@ -3135,7 +3135,7 @@ pub async fn status(
     .into_response()
 }
 
-const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-52+6ciKeVgrKBMP2mSN2eiJex2A7gZVbQllG+GKKBds='; style-src 'sha256-OnkbHLJCao4lUInrIixJS5R6vH5qJxZa5q7aCWDVZGs='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-fgX/zcZhoq+Tl/guH7+be+iH99c5e1/94UoAJJkNgpM='; style-src 'sha256-icyWFSqGBj9cTbI7vz8dQVl9HaVRKLwbQWLF4hU7bWQ='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 async fn dashboard() -> Response {
     let mut response = Html(include_str!("dashboard.html")).into_response();
@@ -3175,9 +3175,36 @@ mod tests {
         let source = include_str!("dashboard.html");
         assert!(source.contains("No runtimes available"));
         assert!(source.contains("dom.jobLanguage.disabled = true"));
-        assert!(source.contains("dom.submitRun.disabled = true"));
+        assert!(source.contains("dom.submitRun.disabled = Boolean(reason)"));
         assert!(source
             .contains("dom.languageFilter.replaceChildren(new Option(\"All languages\", \"\"))"));
+    }
+
+    #[test]
+    fn dashboard_submits_the_six_class_isolation_contract_atomically() {
+        let source = include_str!("dashboard.html");
+        for isolation in [
+            "none",
+            "linux-shared-kernel",
+            "gvisor-application-kernel",
+            "wasm-capability",
+            "hardware-vm",
+            "confidential-vm",
+        ] {
+            assert!(
+                source.contains(&format!("value=\"{isolation}\"")),
+                "dashboard isolation selector is missing {isolation}"
+            );
+        }
+        assert!(source.contains("requirements: { minimum_isolation: minimumIsolation }"));
+        assert!(source.contains("execution.isolation_class"));
+        assert!(source.contains("state.identity.scopes.includes(scope)"));
+        assert!(source.contains("gVisor does not claim the namespace guest seccomp filter"));
+        assert!(source.contains("job.attestation"));
+        assert!(source.contains("attestation.envelope_url"));
+        assert!(source.contains("attestation.result_artifact_url"));
+        assert!(source.contains("url.origin !== window.location.origin"));
+        assert!(source.contains("not a trust anchor"));
     }
 
     fn base64_standard(bytes: &[u8]) -> String {
