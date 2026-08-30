@@ -48,12 +48,30 @@ policy; Coop can only govern jobs that reach its API.
 
 ## Failure semantics
 
-`coop_run_code` submits once and never transparently retries submission. If its
-wait budget expires, it returns `complete: false` with the durable `job_id`.
-Call `coop_job_result` or `coop_cancel_job` with that ID. Direct SDK callers can
-use an `Idempotency-Key` (maximum 128 visible ASCII bytes) and explicitly opt
-into one ambiguous transport retry; the same key and canonical job spec then
-resolve to the original job.
+`coop_run_code` gives every submission a UUID idempotency key and permits one
+ambiguous HTTP retry with that key. If both submission acknowledgements are
+lost, the running adapter retains the key for ten minutes under an opaque HMAC
+fingerprint of the target tenant, submission policy, and normalized job spec.
+The next matching call reuses the unresolved key; a different tenant, policy,
+code, stdin, language, or limit gets a different key. A valid acknowledged
+`job_id` resolves and removes only that exact entry, so a later intentional
+matching call creates a new job.
+
+The process-local reconciliation table reserves space before submitting, holds
+at most 1,024 active or unresolved operations, and fails a new distinct call
+closed rather than evicting an unexpired ambiguity. A restart or ten-minute
+expiry ends this recovery window, so hosts must not layer unbounded automatic
+retries over `coop_run_code`. Concurrent matching calls that started before an
+ambiguity retain distinct keys; while one unresolved key is actively being
+reconciled, another indistinguishable call fails closed. Wait duration and MCP
+Task response mode do not change the submitted job fingerprint.
+
+If the post-submit wait budget expires, the adapter returns `complete: false`
+with the acknowledged durable `job_id`. Call `coop_job_result` or
+`coop_cancel_job` with that ID. Direct SDK callers can use an `Idempotency-Key`
+(maximum 128 visible ASCII bytes) and explicitly opt into one ambiguous
+transport retry; the same key and canonical job spec then resolve to the
+original job.
 
 Tool results include both MCP structured content and the same JSON serialized
 as text for older hosts. Execution failures such as a nonzero exit, timeout,

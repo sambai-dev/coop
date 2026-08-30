@@ -9,6 +9,8 @@ MCP hosts without running a second network service.
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -19,6 +21,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import (
     Any,
+    Callable,
     Dict,
     List,
     Mapping,
@@ -51,12 +54,24 @@ DEFAULT_MAX_WAIT_SECONDS = 300
 DEFAULT_MAX_CODE_BYTES = 512 * 1024
 DEFAULT_TASK_POLL_INTERVAL_MS = 1_000
 DEFAULT_TASK_TTL_MS = 3_600_000
+SUBMISSION_RECONCILIATION_TTL_SECONDS = 600.0
+MAX_SUBMISSION_RECONCILIATIONS = 1_024
 MAX_CONCURRENT_REQUESTS = 16
 LANGUAGES = frozenset({"python", "node", "bash"})
 
 JsonScalar = Union[None, bool, int, float, str]
 JsonValue = Union[JsonScalar, List["JsonValue"], Dict[str, "JsonValue"]]
 JsonObject = Dict[str, JsonValue]
+# Keep this in lockstep with coop_types::Limits::default: the HTTP server fills
+# sparse limits before computing its canonical idempotency fingerprint.
+DEFAULT_JOB_LIMITS: JsonObject = {
+    "wall_seconds": 15,
+    "cpu_seconds": 10,
+    "mem_mb": 256,
+    "max_pids": 128,
+    "max_file_mb": 16,
+    "allow_network": False,
+}
 
 
 def _json_object(value: Mapping[str, Any]) -> JsonObject:
@@ -408,6 +423,172 @@ class _McpProtocolError(Exception):
 RequestId = Union[int, str]
 
 
+def _submission_fingerprint(
+    secret: bytes,
+    *,
+    base_url: str,
+    api_key: str,
+    allowed_languages: Sequence[str],
+    max_code_bytes: int,
+    minimum_isolation: IsolationClass,
+    language: str,
+    code: str,
+    stdin: Optional[str],
+    limits: Optional[Mapping[str, Any]],
+) -> bytes:
+    """Return an opaque tenant, policy, and canonical submission fingerprint."""
+
+    normalized_limits: Dict[str, Any] = dict(DEFAULT_JOB_LIMITS)
+    normalized_limits.update(limits or {})
+    scope = {
+        "arguments": {
+            "code": code,
+            "language": language,
+            "limits": normalized_limits,
+            "stdin": stdin,
+        },
+        "policy": {
+            "allowed_languages": sorted(allowed_languages),
+            "max_code_bytes": max_code_bytes,
+            "minimum_isolation": minimum_isolation,
+        },
+        "target_tenant": {
+            "api_key": api_key,
+            "base_url": base_url.rstrip("/"),
+        },
+    }
+    canonical = json.dumps(
+        scope,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hmac.new(
+        secret,
+        b"coop-mcp/submission-reconciliation/v1\x00" + canonical,
+        hashlib.sha256,
+    ).digest()
+
+
+class _SubmissionEntry:
+    def __init__(self, idempotency_key: str) -> None:
+        self.idempotency_key = idempotency_key
+        self.active = True
+        self.unresolved = False
+        self.expires_at = 0.0
+        self.resolved = False
+
+
+class _SubmissionClaim:
+    def __init__(self, fingerprint: bytes, entry: _SubmissionEntry) -> None:
+        self.fingerprint = fingerprint
+        self.entry = entry
+        self.finished = False
+
+    @property
+    def idempotency_key(self) -> str:
+        return self.entry.idempotency_key
+
+
+class _SubmissionReconciler:
+    """Bound unresolved submission keys without conflating concurrent new calls."""
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = SUBMISSION_RECONCILIATION_TTL_SECONDS,
+        capacity: int = MAX_SUBMISSION_RECONCILIATIONS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if ttl_seconds <= 0 or capacity <= 0:
+            raise ValueError("submission reconciliation bounds must be positive")
+        self._ttl_seconds = ttl_seconds
+        self._capacity = capacity
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._entries: Dict[bytes, List[_SubmissionEntry]] = {}
+        self._size = 0
+
+    def _remove_locked(self, fingerprint: bytes, entry: _SubmissionEntry) -> None:
+        bucket = self._entries.get(fingerprint)
+        if bucket is None:
+            return
+        for index, candidate in enumerate(bucket):
+            if candidate is entry:
+                del bucket[index]
+                self._size -= 1
+                entry.resolved = True
+                if not bucket:
+                    del self._entries[fingerprint]
+                return
+
+    def _prune_locked(self, now: float) -> None:
+        for fingerprint, bucket in list(self._entries.items()):
+            for entry in list(bucket):
+                if not entry.active and (
+                    not entry.unresolved or entry.expires_at <= now
+                ):
+                    self._remove_locked(fingerprint, entry)
+
+    def acquire(self, fingerprint: bytes, fresh_key: str) -> _SubmissionClaim:
+        """Lease an unresolved key or reserve bounded state for a fresh POST."""
+
+        with self._lock:
+            self._prune_locked(self._clock())
+            bucket = self._entries.get(fingerprint, [])
+            for entry in bucket:
+                if entry.unresolved and not entry.active and not entry.resolved:
+                    entry.active = True
+                    return _SubmissionClaim(fingerprint, entry)
+            if any(
+                entry.unresolved and entry.active and not entry.resolved
+                for entry in bucket
+            ):
+                raise RuntimeError(
+                    "an identical ambiguous submission is already being reconciled"
+                )
+            if self._size >= self._capacity:
+                raise RuntimeError(
+                    "submission reconciliation capacity is exhausted; retry after "
+                    "an unresolved submission expires"
+                )
+            entry = _SubmissionEntry(fresh_key)
+            self._entries.setdefault(fingerprint, []).append(entry)
+            self._size += 1
+            return _SubmissionClaim(fingerprint, entry)
+
+    def finish(
+        self,
+        claim: _SubmissionClaim,
+        *,
+        accepted: bool,
+        unresolved: bool,
+    ) -> None:
+        """Conditionally resolve, retain, or release one exact claim generation."""
+
+        with self._lock:
+            if claim.finished:
+                return
+            claim.finished = True
+            entry = claim.entry
+            entry.active = False
+            if entry.resolved:
+                return
+            if accepted:
+                self._remove_locked(claim.fingerprint, entry)
+                return
+            if unresolved:
+                entry.unresolved = True
+                entry.expires_at = self._clock() + self._ttl_seconds
+                return
+            if entry.unresolved and entry.expires_at > self._clock():
+                # A definitive failure of this retry does not disprove the earlier
+                # accepted-or-not outcome. Keep the original expiry and key.
+                return
+            self._remove_locked(claim.fingerprint, entry)
+
+
 class _RequestContext:
     def __init__(self, request_id: RequestId) -> None:
         self.request_id = request_id
@@ -448,6 +629,8 @@ class CoopMcpServer:
         self._state_lock = threading.Lock()
         self._active_lock = threading.Lock()
         self._active: Dict[RequestId, _RequestContext] = {}
+        self._submission_fingerprint_secret = os.urandom(32)
+        self._submission_reconciler = _SubmissionReconciler()
 
     @staticmethod
     def _server_info() -> JsonObject:
@@ -921,22 +1104,63 @@ class CoopMcpServer:
         limits = self._validate_limits(limits_value, capabilities)
         wait_seconds = self._wait_seconds(arguments, default=60, allow_zero=False)
 
-        submission = self.client.submit_result(
-            language,
-            code,
+        fingerprint = _submission_fingerprint(
+            self._submission_fingerprint_secret,
+            base_url=self.config.base_url,
+            api_key=self.config.api_key,
+            allowed_languages=sorted(self.config.allowed_languages),
+            max_code_bytes=self.config.max_code_bytes,
+            minimum_isolation=self.config.minimum_isolation,
+            language=language,
+            code=code,
             stdin=stdin_value,
             limits=limits,
-            requirements=cast(
-                ExecutionRequirements,
-                {"minimum_isolation": self.config.minimum_isolation},
-            ),
-            idempotency_key=(
-                context.idempotency_key if context is not None else str(uuid.uuid4())
-            ),
-            retry_ambiguous=True,
         )
-        submitted = submission["job"]
-        job_id = submitted["job_id"]
+        claim = self._submission_reconciler.acquire(
+            fingerprint,
+            context.idempotency_key if context is not None else str(uuid.uuid4()),
+        )
+        try:
+            submission = self.client.submit_result(
+                language,
+                code,
+                stdin=stdin_value,
+                limits=limits,
+                requirements=cast(
+                    ExecutionRequirements,
+                    {"minimum_isolation": self.config.minimum_isolation},
+                ),
+                idempotency_key=claim.idempotency_key,
+                retry_ambiguous=True,
+            )
+        except CoopError:
+            self._submission_reconciler.finish(
+                claim,
+                accepted=False,
+                # submit_result() exposes only the final error. Any CoopError can
+                # therefore follow an earlier accepted-or-not transport attempt.
+                unresolved=True,
+            )
+            raise
+        except Exception:
+            self._submission_reconciler.finish(claim, accepted=False, unresolved=False)
+            raise
+        submission_value: Any = submission
+        if not isinstance(submission_value, dict):
+            self._submission_reconciler.finish(claim, accepted=False, unresolved=True)
+            raise RuntimeError("Coop returned invalid submission metadata")
+        submission_mapping = cast(Dict[str, Any], submission_value)
+        submitted_value: Any = submission_mapping.get("job")
+        if not isinstance(submitted_value, dict):
+            self._submission_reconciler.finish(claim, accepted=False, unresolved=True)
+            raise RuntimeError("Coop returned invalid submission metadata")
+        submitted = cast(Dict[str, Any], submitted_value)
+        job_id_value: Any = submitted.get("job_id")
+        if not isinstance(job_id_value, str) or not job_id_value:
+            self._submission_reconciler.finish(claim, accepted=False, unresolved=True)
+            raise RuntimeError("Coop returned an invalid submitted job ID")
+        job_id = job_id_value
+        self._submission_reconciler.finish(claim, accepted=True, unresolved=False)
         if context is not None and context.record_job(job_id):
             try:
                 self.client.cancel(job_id)

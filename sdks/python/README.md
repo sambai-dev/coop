@@ -41,6 +41,15 @@ checks the minimum atomically at submission and the adapter validates the
 terminal observed `isolation_class` without assuming namespace-specific
 rootfs or seccomp details.
 
+For `coop_run_code`, the adapter uses one UUID across the initial HTTP submit
+and one ambiguous retry. When both acknowledgements are lost, it retains that
+key for ten minutes under a tenant-, policy-, and normalized-job fingerprint,
+then reuses it for the next identical call. The process-local table is capped
+at 1,024 active or unresolved operations and fails closed at capacity. A valid
+acknowledged job ID clears the exact entry; changed submissions and later
+intentional identical runs receive fresh keys. Do not rely on this bounded
+window across adapter restarts or configure unbounded host retries.
+
 ```python
 from coop import Coop, Limits
 

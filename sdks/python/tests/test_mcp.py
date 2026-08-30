@@ -12,6 +12,8 @@ from coop_mcp import (
     TASKS_EXTENSION,
     CoopMcpServer,
     McpConfig,
+    _submission_fingerprint,
+    _SubmissionReconciler,
     serve,
 )
 
@@ -504,6 +506,209 @@ class McpTests(unittest.TestCase):
         self.assertEqual(fake.requirements, [{"minimum_isolation": "none"}])
         self.assertEqual(len(fake.idempotency_keys), 1)
         self.assertTrue(fake.idempotency_keys[0])
+
+    def test_run_code_reconciles_both_lost_submit_acknowledgements(self):
+        class LoseBothAcknowledgements(FakeCoop):
+            def __init__(self):
+                super().__init__()
+                self.lose_next_submission = True
+
+            def submit_result(
+                self,
+                language,
+                code,
+                stdin=None,
+                limits=None,
+                requirements=None,
+                idempotency_key=None,
+                retry_ambiguous=False,
+            ):
+                if self.lose_next_submission:
+                    self.lose_next_submission = False
+                    self.idempotency_keys.extend([idempotency_key, idempotency_key])
+                    raise CoopError(
+                        "both submission acknowledgements were lost",
+                        code="request_timeout",
+                        retryable=True,
+                        idempotency_key=idempotency_key,
+                    )
+                return super().submit_result(
+                    language,
+                    code,
+                    stdin,
+                    limits,
+                    requirements,
+                    idempotency_key,
+                    retry_ambiguous,
+                )
+
+        fake = LoseBothAcknowledgements()
+        server = initialized_server(fake)
+        original = {"language": "python", "code": "print(42)"}
+
+        lost = tool_call(server, "coop_run_code", original)
+        self.assertTrue(lost["isError"])
+        first_key = fake.idempotency_keys[0]
+        self.assertEqual(fake.idempotency_keys, [first_key, first_key])
+
+        changed = tool_call(
+            server,
+            "coop_run_code",
+            {"language": "python", "code": "print(43)"},
+        )
+        self.assertFalse(changed["isError"])
+        changed_key = fake.idempotency_keys[2]
+        self.assertNotEqual(changed_key, first_key)
+
+        recovered = tool_call(
+            server,
+            "coop_run_code",
+            {
+                "language": "python",
+                "code": "print(42)",
+                "limits": {"allow_network": False},
+            },
+        )
+        self.assertFalse(recovered["isError"])
+        self.assertEqual(fake.idempotency_keys[3], first_key)
+
+        repeated_after_success = tool_call(server, "coop_run_code", original)
+        self.assertFalse(repeated_after_success["isError"])
+        self.assertNotEqual(fake.idempotency_keys[4], first_key)
+
+    def test_run_code_retains_key_when_retry_masks_the_first_ambiguity(self):
+        class MixedFailure(FakeCoop):
+            def __init__(self):
+                super().__init__()
+                self.fail_next_submission = True
+
+            def submit_result(
+                self,
+                language,
+                code,
+                stdin=None,
+                limits=None,
+                requirements=None,
+                idempotency_key=None,
+                retry_ambiguous=False,
+            ):
+                if self.fail_next_submission:
+                    self.fail_next_submission = False
+                    self.idempotency_keys.extend([idempotency_key, idempotency_key])
+                    raise CoopError(
+                        "the retry failed after an ambiguous first attempt",
+                        status=500,
+                        code="internal_error",
+                        idempotency_key=idempotency_key,
+                    )
+                return super().submit_result(
+                    language,
+                    code,
+                    stdin,
+                    limits,
+                    requirements,
+                    idempotency_key,
+                    retry_ambiguous,
+                )
+
+        fake = MixedFailure()
+        server = initialized_server(fake)
+        arguments = {"language": "python", "code": "print(42)"}
+
+        failed = tool_call(server, "coop_run_code", arguments)
+        self.assertTrue(failed["isError"])
+        first_key = fake.idempotency_keys[0]
+        self.assertEqual(fake.idempotency_keys, [first_key, first_key])
+        recovered = tool_call(server, "coop_run_code", arguments)
+        self.assertFalse(recovered["isError"])
+        self.assertEqual(fake.idempotency_keys[2], first_key)
+
+    def test_submission_fingerprint_separates_tenant_policy_and_arguments(self):
+        values = {
+            "base_url": "https://coop.example.test/",
+            "api_key": "tenant-a-key",
+            "allowed_languages": ["python", "node"],
+            "max_code_bytes": 1024,
+            "minimum_isolation": "linux-shared-kernel",
+            "language": "python",
+            "code": "print(42)",
+            "stdin": None,
+            "limits": {"wall_seconds": 5, "mem_mb": 128},
+        }
+        secret = b"f" * 32
+        baseline = _submission_fingerprint(secret, **values)
+        reordered = dict(values)
+        reordered["limits"] = {"mem_mb": 128, "wall_seconds": 5}
+        self.assertEqual(baseline, _submission_fingerprint(secret, **reordered))
+        defaults = dict(values)
+        defaults["limits"] = None
+        explicit_default = dict(values)
+        explicit_default["limits"] = {"allow_network": False}
+        self.assertEqual(
+            _submission_fingerprint(secret, **defaults),
+            _submission_fingerprint(secret, **explicit_default),
+        )
+        for changed in (
+            {"api_key": "tenant-b-key"},
+            {"minimum_isolation": "gvisor-application-kernel"},
+            {"code": "print(43)"},
+        ):
+            candidate = dict(values)
+            candidate.update(changed)
+            self.assertNotEqual(baseline, _submission_fingerprint(secret, **candidate))
+
+    def test_submission_reconciler_preserves_concurrent_new_calls_and_generations(self):
+        now = [0.0]
+        reconciler = _SubmissionReconciler(
+            ttl_seconds=10,
+            capacity=4,
+            clock=lambda: now[0],
+        )
+        fingerprint = b"same-operation"
+
+        first = reconciler.acquire(fingerprint, "K1")
+        second = reconciler.acquire(fingerprint, "K2")
+        self.assertEqual(first.idempotency_key, "K1")
+        self.assertEqual(second.idempotency_key, "K2")
+        reconciler.finish(first, accepted=False, unresolved=True)
+        reconciler.finish(second, accepted=False, unresolved=True)
+
+        retry_first = reconciler.acquire(fingerprint, "unused-1")
+        retry_second = reconciler.acquire(fingerprint, "unused-2")
+        self.assertEqual(retry_first.idempotency_key, "K1")
+        self.assertEqual(retry_second.idempotency_key, "K2")
+        with self.assertRaisesRegex(RuntimeError, "already being reconciled"):
+            reconciler.acquire(fingerprint, "must-not-submit")
+
+        reconciler.finish(retry_first, accepted=True, unresolved=False)
+        reconciler.finish(retry_second, accepted=True, unresolved=False)
+        after_success = reconciler.acquire(fingerprint, "K3")
+        self.assertEqual(after_success.idempotency_key, "K3")
+
+    def test_submission_reconciler_ttl_capacity_and_definitive_cleanup(self):
+        now = [0.0]
+        reconciler = _SubmissionReconciler(
+            ttl_seconds=10,
+            capacity=1,
+            clock=lambda: now[0],
+        )
+        first = reconciler.acquire(b"first", "K1")
+        with self.assertRaisesRegex(RuntimeError, "capacity is exhausted"):
+            reconciler.acquire(b"second", "K2")
+        reconciler.finish(first, accepted=False, unresolved=True)
+
+        retained = reconciler.acquire(b"first", "unused")
+        self.assertEqual(retained.idempotency_key, "K1")
+        reconciler.finish(retained, accepted=False, unresolved=True)
+        with self.assertRaisesRegex(RuntimeError, "capacity is exhausted"):
+            reconciler.acquire(b"second", "K2")
+
+        now[0] = 11.0
+        after_expiry = reconciler.acquire(b"second", "K2")
+        self.assertEqual(after_expiry.idempotency_key, "K2")
+        reconciler.finish(after_expiry, accepted=False, unresolved=False)
+        after_definitive_failure = reconciler.acquire(b"third", "K3")
+        self.assertEqual(after_definitive_failure.idempotency_key, "K3")
 
     def test_tasks_map_durably_to_coop_job_ids_when_both_sides_opt_in(self):
         fake = FakeCoop()

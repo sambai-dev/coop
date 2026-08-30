@@ -107,9 +107,17 @@ needed:
 
 Use the host's secret-reference mechanism instead of literal credentials when
 it has one. Set its per-call timeout above the adapter wait budget (330 seconds
-for the default maximum). Do not configure automatic retries for
-`coop_run_code`: a lost response does not prove that the job was not durably
-submitted. Use the returned job ID for reads and cancellation.
+for the default maximum). The adapter reuses one UUID for its initial submit
+and one ambiguous HTTP retry. If both acknowledgements are lost, an identical
+call to the same running adapter can reconcile that UUID for ten minutes; the
+bounded 1,024-entry table is tenant-, policy-, and job-spec-scoped and fails
+closed at capacity. A valid acknowledged job ID clears the exact entry so a
+later intentional identical call remains a new job.
+
+Do not configure unbounded automatic retries for `coop_run_code`: the recovery
+table is process-local, and a restart or expiry means a lost response still
+does not prove that the job was not durably submitted. Use the returned job ID
+for reads and cancellation.
 
 ## Where Coop fits
 
