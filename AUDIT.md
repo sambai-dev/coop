@@ -108,7 +108,7 @@ The digest lets the server or an auditor with the canonical fields detect accide
 | API contract | generated/static OpenAPI validation and examples |
 | Packaging | locked Docker build plus image/rootfs canary |
 | Dependencies | RustSec advisory scan of `Cargo.lock` |
-| Release integrity | tag/version check, checksums, SPDX SBOM, GitHub artifact attestation, one atomic publish job |
+| Release integrity | tag/version check, exact asset allowlist, checksums, artifact-scoped SPDX/SBOM attestation, GitHub provenance, one reconciled atomic publish job |
 
 A skipped containment suite is not a passing result. Ordinary `cargo test` runs do not execute ignored hostile tests.
 

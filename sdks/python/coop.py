@@ -425,7 +425,7 @@ class CoopEvent(_RequiredCoopEvent, total=False):
 
 
 class HashedCoopEvent(_RequiredCoopEvent):
-    """A v0.2 event after the caller has validated its evidence fields."""
+    """An event after the caller has validated its evidence fields."""
 
     prev_hash: Optional[str]
     event_hash: str
@@ -1532,7 +1532,7 @@ class Coop:
         except CoopError as exc:
             if exc.status not in (404, 405):
                 raise
-            # A structured v0.2 error such as `job_not_found` is not evidence
+            # A structured Coop error such as `job_not_found` is not evidence
             # that this endpoint is missing. Only an explicit opt-in plus an
             # unstructured legacy HTTP code may place a credential in a URL.
             legacy_endpoint_missing = exc.code in ("http_404", "http_405")
@@ -1646,7 +1646,7 @@ class Coop:
                 yield event
                 if self._terminal_event(event):
                     terminal_seen = True
-            # A v0.2 terminal event is the final durable row. Yield the rest
+            # A current terminal event is the final durable row. Yield the rest
             # of a legacy replay page before stopping so compatibility data is
             # never silently dropped.
             if terminal_seen:

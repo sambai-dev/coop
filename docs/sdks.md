@@ -7,6 +7,7 @@ The v0.4 release workflow tests SDK source and installs both the built Python wh
 To install the v0.4.0 release, activate the intended Python virtual environment and download the exact release assets into an otherwise empty working directory. This example verifies both the checksum manifest and GitHub provenance before installation:
 
 ```bash
+set -euo pipefail
 version=0.4.0
 python_asset="coop_sdk-${version}-py3-none-any.whl"
 typescript_asset="coop-sdk-${version}.tgz"
@@ -15,15 +16,30 @@ gh release download "v${version}" --repo sambai-dev/coop \
   --pattern "$python_asset" \
   --pattern "$typescript_asset" \
   --pattern SHA256SUMS
-sha256sum --check --ignore-missing SHA256SUMS
-gh attestation verify "$python_asset" --repo sambai-dev/coop
-gh attestation verify "$typescript_asset" --repo sambai-dev/coop
+verify_github_asset() {
+  gh release verify-asset "v${version}" "$1" --repo sambai-dev/coop
+  gh attestation verify "$1" \
+    --repo sambai-dev/coop \
+    --signer-workflow sambai-dev/coop/.github/workflows/release.yml \
+    --source-ref "refs/tags/v${version}" \
+    --predicate-type https://slsa.dev/provenance/v1 \
+    --deny-self-hosted-runners
+}
+verify_github_asset SHA256SUMS
+for asset in "$python_asset" "$typescript_asset"; do
+  expected=$(awk -v file="$asset" '
+    $2 == file && $1 ~ /^[0-9a-f]{64}$/ { digest=$1; count++ }
+    END { if (count != 1) exit 1; print digest }
+  ' SHA256SUMS)
+  printf '%s  %s\n' "$expected" "$asset" | sha256sum --check --strict -
+  verify_github_asset "$asset"
+done
 python -m pip install --no-deps "./$python_asset"
 # Run this last command from the consuming Node.js project:
 npm install "${sdk_asset_dir}/${typescript_asset}"
 ```
 
-The release also includes `coop_sdk-0.4.0.tar.gz` for consumers that require a Python source distribution. On macOS or Windows, use the platform checksum commands shown in [deployment](deployment.md) in place of `sha256sum`; the asset names and `gh attestation verify` commands are unchanged.
+The release also includes `coop_sdk-0.4.0.tar.gz` for consumers that require a Python source distribution. On macOS or Windows, use the platform checksum commands shown in [deployment](deployment.md) in place of `sha256sum`; keep the same release-asset and constrained workflow-provenance verification.
 
 ## Python
 
@@ -119,9 +135,9 @@ server does not enable permissive CORS. Cross-origin browser access requires an
 explicit origin allowlist at the reverse proxy, and exposes the bearer key to
 the frontend runtime.
 
-Node versions without a global `WebSocket` fall back to cursor replay. Both SDKs mint a one-use stream ticket before opening a WebSocket. Legacy API-key query compatibility is disabled by default and accepts only an explicit opt-in plus an unstructured v0.1 endpoint-missing response; structured v0.2 errors never put a key in a URL. Review [api.md](api.md) before enabling it for a trusted legacy server.
+Node versions without a global `WebSocket` fall back to cursor replay. Both SDKs mint a one-use stream ticket before opening a WebSocket. Legacy API-key query compatibility is disabled by default and accepts only an explicit opt-in plus an unstructured v0.1 endpoint-missing response; structured Coop errors never put a key in a URL. Review [api.md](api.md) before enabling it for a trusted legacy server.
 
-`wait` and `result` reject non-finite deadlines, treat a zero budget as an immediate timeout, and cap each in-flight request to the remaining overall budget. A structured v0.2 `job_not_found` response is returned to the caller and is never mistaken for evidence that `/result` or `/stream-ticket` is a missing legacy route.
+`wait` and `result` reject non-finite deadlines, treat a zero budget as an immediate timeout, and cap each in-flight request to the remaining overall budget. A structured `job_not_found` response is returned to the caller and is never mistaken for evidence that `/result` or `/stream-ticket` is a missing legacy route.
 
 The server may deliberately close a response connection after 30 seconds with zero socket write progress, and every connection (including an upgraded WebSocket) has a 10-minute absolute lifetime. Both clients treat an early EOF, a rejected response body, or a `Content-Length` mismatch as a retryable transport failure rather than parsing partial JSON. It is safe to retry detail, result, and replay reads with bounded backoff. Persist a replay cursor only after the whole page has decoded successfully; after a failure, request the previous cursor again and deduplicate events by `(job_id, seq)`. A WebSocket reconnect mints a new one-use ticket and resumes from the last accepted sequence. Submission is different: repeat an ambiguously acknowledged `POST /v1/jobs` only when it carried an `Idempotency-Key`, and reuse the exact key and canonical job specification.
 

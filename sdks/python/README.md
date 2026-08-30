@@ -113,10 +113,10 @@ execution boundary at admission. `submit_result()` additively exposes the
 response `Location` and `Idempotency-Replayed` metadata. Idempotency keys are
 1–128 visible ASCII bytes; ambiguous retries remain opt-in and reuse one key.
 
-The v0.2 client obtains a one-use stream ticket, so API keys do not appear in
+The client obtains a one-use stream ticket, so API keys do not appear in
 WebSocket URLs. The legacy v0.1 query-key fallback is disabled by default
 because URLs leak into logs and history. Enable it only for a trusted legacy
-server with `allow_legacy_query_key=True`; structured v0.2 errors never trigger
+server with `allow_legacy_query_key=True`; structured Coop errors never trigger
 that fallback.
 
 `CoopError` exposes `status`, `code`, `request_id`, `retryable`, `retry_after`,

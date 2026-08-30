@@ -209,12 +209,27 @@ Before using a moving `releases/latest` URL, verify that it resolves to v0.4.0 o
 The following commands require a current [GitHub CLI](https://cli.github.com/) with artifact-attestation support; authenticate it according to your organization's policy before downloading. For Linux x86_64:
 
 ```bash
+set -euo pipefail
 version=0.4.0
 asset=coop-x86_64-unknown-linux-musl.tar.gz
 gh release download "v${version}" --repo sambai-dev/coop \
   --pattern "$asset" --pattern SHA256SUMS
-sha256sum --check --ignore-missing SHA256SUMS
-gh attestation verify "$asset" --repo sambai-dev/coop
+verify_github_asset() {
+  gh release verify-asset "v${version}" "$1" --repo sambai-dev/coop
+  gh attestation verify "$1" \
+    --repo sambai-dev/coop \
+    --signer-workflow sambai-dev/coop/.github/workflows/release.yml \
+    --source-ref "refs/tags/v${version}" \
+    --predicate-type https://slsa.dev/provenance/v1 \
+    --deny-self-hosted-runners
+}
+verify_github_asset SHA256SUMS
+expected=$(awk -v file="$asset" '
+  $2 == file && $1 ~ /^[0-9a-f]{64}$/ { digest=$1; count++ }
+  END { if (count != 1) exit 1; print digest }
+' SHA256SUMS)
+printf '%s  %s\n' "$expected" "$asset" | sha256sum --check --strict -
+verify_github_asset "$asset"
 tar -xzf "$asset"
 sudo install -o root -g root -m 0755 \
   coop-x86_64-unknown-linux-musl/coop /usr/local/bin/coop
@@ -234,14 +249,28 @@ This installs binaries only. Build the private rootfs, configuration, service, a
 For an Apple-silicon macOS development installation:
 
 ```bash
+set -euo pipefail
 version=0.4.0
 asset=coop-aarch64-apple-darwin.tar.gz
 gh release download "v${version}" --repo sambai-dev/coop \
   --pattern "$asset" --pattern SHA256SUMS
-expected=$(awk -v file="$asset" '$2 == file { print $1 }' SHA256SUMS)
+verify_github_asset() {
+  gh release verify-asset "v${version}" "$1" --repo sambai-dev/coop
+  gh attestation verify "$1" \
+    --repo sambai-dev/coop \
+    --signer-workflow sambai-dev/coop/.github/workflows/release.yml \
+    --source-ref "refs/tags/v${version}" \
+    --predicate-type https://slsa.dev/provenance/v1 \
+    --deny-self-hosted-runners
+}
+verify_github_asset SHA256SUMS
+expected=$(awk -v file="$asset" '
+  $2 == file && $1 ~ /^[0-9a-f]{64}$/ { digest=$1; count++ }
+  END { if (count != 1) exit 1; print digest }
+' SHA256SUMS)
 actual=$(shasum -a 256 "$asset" | awk '{ print $1 }')
-test -n "$expected" && test "$actual" = "$expected"
-gh attestation verify "$asset" --repo sambai-dev/coop
+test "$actual" = "$expected"
+verify_github_asset "$asset"
 tar -xzf "$asset"
 install -d "$HOME/.local/bin"
 install -m 0755 coop-aarch64-apple-darwin/coop "$HOME/.local/bin/coop"
@@ -251,23 +280,46 @@ install -m 0755 coop-aarch64-apple-darwin/coop-verify "$HOME/.local/bin/coop-ver
 For an x86_64 Windows development installation in PowerShell:
 
 ```powershell
+$ErrorActionPreference = "Stop"
 $version = "0.4.0"
 $asset = "coop-x86_64-pc-windows-msvc.zip"
 gh release download "v$version" --repo sambai-dev/coop `
     --pattern $asset --pattern SHA256SUMS
-$line = (Select-String -Path SHA256SUMS -Pattern ([regex]::Escape($asset) + '$')).Line
-if (-not $line) { throw "checksum is missing for $asset" }
+if ($LASTEXITCODE -ne 0) { throw "release download failed" }
+gh release verify-asset "v$version" SHA256SUMS --repo sambai-dev/coop
+if ($LASTEXITCODE -ne 0) { throw "release verification failed for SHA256SUMS" }
+gh attestation verify SHA256SUMS `
+    --repo sambai-dev/coop `
+    --signer-workflow sambai-dev/coop/.github/workflows/release.yml `
+    --source-ref "refs/tags/v$version" `
+    --predicate-type https://slsa.dev/provenance/v1 `
+    --deny-self-hosted-runners
+if ($LASTEXITCODE -ne 0) { throw "workflow provenance failed for SHA256SUMS" }
+$escapedAsset = [regex]::Escape($asset)
+$lines = @(Get-Content -LiteralPath SHA256SUMS | Where-Object {
+    $_ -match "^([0-9a-f]{64})  $escapedAsset$"
+})
+if ($lines.Count -ne 1) { throw "checksum must contain exactly one row for $asset" }
+$line = $lines[0]
 $expected = ($line -split '\s+')[0].ToLowerInvariant()
 $actual = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLowerInvariant()
-if (-not $expected -or $actual -ne $expected) { throw "checksum mismatch: $asset" }
-gh attestation verify $asset --repo sambai-dev/coop
+if ($actual -ne $expected) { throw "checksum mismatch: $asset" }
+gh release verify-asset "v$version" $asset --repo sambai-dev/coop
+if ($LASTEXITCODE -ne 0) { throw "release verification failed for $asset" }
+gh attestation verify $asset `
+    --repo sambai-dev/coop `
+    --signer-workflow sambai-dev/coop/.github/workflows/release.yml `
+    --source-ref "refs/tags/v$version" `
+    --predicate-type https://slsa.dev/provenance/v1 `
+    --deny-self-hosted-runners
+if ($LASTEXITCODE -ne 0) { throw "workflow provenance failed for $asset" }
 Expand-Archive -Path $asset -DestinationPath . -Force
 New-Item -ItemType Directory -Force "$HOME\bin" | Out-Null
 Copy-Item "coop-x86_64-pc-windows-msvc\coop.exe" "$HOME\bin\coop.exe"
 Copy-Item "coop-x86_64-pc-windows-msvc\coop-verify.exe" "$HOME\bin\coop-verify.exe"
 ```
 
-Add the chosen user-local binary directory to `PATH`. The checksum file and SPDX JSON SBOM are release assets. GitHub verification proves which workflow produced the archive; it does not turn a development subprocess into isolation or gVisor into trusted hardware.
+Add the chosen user-local binary directory to `PATH`. The checksum file and combined SPDX JSON SBOM are release assets. `SHA256SUMS` names and hashes the other seven assets; its own release and workflow attestations authenticate the downloaded manifest. The SPDX inventories freshly extracted content from the six built archives/packages, and its separate SBOM attestation binds that document to those payload digests. The constrained provenance check authenticates the expected release workflow and tag for the exact bytes; it does not turn a development subprocess into isolation or gVisor into trusted hardware.
 
 The Apple-silicon macOS and x86_64 Windows archives run the local-development subprocess backend only. Non-x86_64 Linux source builds have the same limitation. They are useful for trusted-code integration work, not production containment. A production x86_64 Linux binary installation still needs the private rootfs, cgroup/systemd setup, keys, TLS ingress, and hostile-suite validation described above.
 

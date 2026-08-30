@@ -57,7 +57,7 @@ let wire_bytes = envelope.to_json_bytes()?;
 # }
 ```
 
-Verification accepts a precomputed [`ArtifactDigest`](https://docs.rs/coop-attestation/latest/coop_attestation/struct.ArtifactDigest.html)
+Verification accepts a precomputed [`ArtifactDigest`](src/format.rs#L44)
 so a server can hash large result files incrementally. The offline CLI instead
 requires a non-symlink regular file and caps it at 16 MiB to match the server's
 exact result-artifact ceiling while avoiding FIFO/device

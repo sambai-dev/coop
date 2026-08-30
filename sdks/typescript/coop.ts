@@ -226,7 +226,7 @@ export interface CoopEvent {
   hash_version?: number | null;
 }
 
-/** A v0.2 event after the caller has validated its evidence fields. */
+/** An event after the caller has validated its evidence fields. */
 export interface HashedCoopEvent extends CoopEvent {
   prev_hash: string | null;
   event_hash: string;
@@ -1524,7 +1524,7 @@ export class Coop {
       return url;
     } catch (error) {
       if (!(error instanceof CoopError) || (error.status !== 404 && error.status !== 405)) throw error;
-      // A structured v0.2 `job_not_found` is not evidence that stream tickets
+      // A structured Coop `job_not_found` is not evidence that stream tickets
       // are unsupported. Query-key compatibility is explicit and limited to
       // the unstructured HTTP code emitted by legacy servers.
       const legacyEndpointMissing = error.code === "http_404" || error.code === "http_405";
@@ -1697,7 +1697,7 @@ export class Coop {
         }
         continue;
       }
-      // v0.2 finalization makes the terminal row last. A legacy server can
+      // Current finalization makes the terminal row last. A legacy server can
       // retain a tail after it, so only stop after draining a short final page.
       if (terminalEventSeen) return;
       // A terminal projection is only a hint to accelerate replay. Never let a
@@ -1728,7 +1728,7 @@ export class Coop {
   /**
    * @deprecated A bare key is intentionally rejected. Use
    * `{ allowLegacyQueryKey: true, legacyApiKey: key }` for a trusted v0.1
-   * server, or omit both options for ticket-based v0.2 streaming.
+   * server, or omit both options for ticket-based streaming.
    */
   stream(
     jobId: string,

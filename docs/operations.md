@@ -118,4 +118,4 @@ Never point two live Coop instances at the same SQLite file. Coop takes an adjac
 
 ## Rootfs maintenance
 
-Treat the private rootfs as an immutable release artifact. Build a new tree, patch interpreters and libraries, compute its manifest/digest, run all language canaries and hostile tests, then switch `COOP_ROOTFS` during a controlled restart. Do not mutate the live tree while jobs are running.
+Treat the private rootfs as an immutable deployment input, not as a Coop GitHub release asset. Build a new tree, patch interpreters and libraries, compute and preserve its manifest/digest and package inventory, run all language canaries and hostile tests, then switch `COOP_ROOTFS` during a controlled restart. Do not mutate the live tree while jobs are running.

@@ -119,12 +119,12 @@ Every network method accepts an `AbortSignal` directly or through its options.
 `CoopError` exposes `status`, `code`, `requestId`, `retryable`, and
 `retryAfterMs`.
 
-Streaming obtains a short-lived, one-use v0.2 ticket before opening a
+Streaming obtains a short-lived, one-use ticket before opening a
 WebSocket. On runtimes without `WebSocket`, `streamEvents()` uses the cursor
 replay endpoint. A v0.1 query-key fallback remains available for compatibility
 but is disabled by default because URLs leak into logs and history. Enable it
 only for a trusted legacy server with `allowLegacyQueryKey: true`; structured
-v0.2 errors never trigger that fallback.
+Coop errors never trigger that fallback.
 
 `submit()` accepts the sparse `JobSpec` shape, while `get()` and `wait()`
 return `JobDetail`. The requested `StoredJobSpec` is complete.

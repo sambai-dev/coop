@@ -49,7 +49,7 @@ route risky or stateless execution through Coop.
 
 > **Security boundary:** v0.4's guarded Linux x86_64 deployment creates a separate gVisor OCI workload for every job, with a pinned `runsc`, immutable private-rootfs manifest, cgroup v2 limits, and denied networking. The outer Coop service is still privileged and belongs on a dedicated VM. The namespace backend remains a shared-kernel fallback; macOS, Windows, and other Linux architectures run only the same-trust subprocess backend. Read [the security boundary](docs/security-boundary.md) before accepting untrusted jobs.
 
-> **Current release:** [v0.4.0](https://github.com/sambai-dev/coop/releases/tag/v0.4.0). Release assets include checksums, an SPDX SBOM, GitHub build provenance, and the offline `coop-verify` attestation verifier. Older release lines are unsupported for new deployments.
+> **Current release:** [v0.4.0](https://github.com/sambai-dev/coop/releases/tag/v0.4.0). The exact eight-asset set includes checksums, a combined artifact-scoped SPDX SBOM, GitHub SBOM/provenance attestations, and the offline `coop-verify` verifier inside each platform archive. Older release lines are unsupported for new deployments.
 
 ## The problem Coop solves
 
@@ -108,12 +108,13 @@ Open <http://127.0.0.1:7300>. Development mode uses the public local key
 `coop-dev-key` if `COOP_API_KEYS` is unset. The explicit `off` setting uses an
 **unisolated subprocess**. Do not expose it or submit code you do not trust.
 
-In a second terminal, install the published adapter. Normally an MCP host
-launches `coop-mcp`; running it directly is only a quick startup check:
+In a second terminal, download and verify the published wheel using the
+[fail-closed SDK release procedure](docs/sdks.md), then install that local
+artifact. Normally an MCP host launches `coop-mcp`; running it directly is
+only a quick startup check:
 
 ```bash
-python -m pip install --no-deps \
-  https://github.com/sambai-dev/coop/releases/download/v0.4.0/coop_sdk-0.4.0-py3-none-any.whl
+python -m pip install --no-deps ./coop_sdk-0.4.0-py3-none-any.whl
 export COOP_API_KEY=coop-dev-key
 coop-mcp
 ```
@@ -296,12 +297,12 @@ wait returns the job ID instead of losing ownership of the still-running job.
 ### Connect a harness
 
 1. Start Coop locally or deploy it on the dedicated VM.
-2. Install the published adapter in an operator-owned environment:
+2. Follow the [checksum, release-attestation, and constrained workflow-provenance checks](docs/sdks.md), then install the verified wheel in an operator-owned environment:
 
    ```bash
    python -m venv ~/.local/share/coop-mcp
    ~/.local/share/coop-mcp/bin/python -m pip install --no-deps \
-     https://github.com/sambai-dev/coop/releases/download/v0.4.0/coop_sdk-0.4.0-py3-none-any.whl
+     ./coop_sdk-0.4.0-py3-none-any.whl
    ```
 
 3. Give the harness process—not the model—the connection and policy settings:

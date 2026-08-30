@@ -124,7 +124,7 @@ Do not poll job status in a short loop. It creates unnecessary SQLite load and c
 
 Detail, replay, and folded-result JSON use a capacity-one 64 KiB response pump under global/per-tenant lifetime admission. The response body owns that admission permit and the serialized buffer until EOF or connection teardown, so progressing clients receive the complete declared JSON even at low bandwidth. Every accepted connection has a 30-second write-progress deadline: if Hyper is trying to write response bytes and the socket accepts no bytes for that entire interval, the server closes the connection, drops the body, and reclaims its capacity. A positive socket write resets that deadline; the independent 10-minute absolute connection lifetime remains the outer bound.
 
-The transport admits at most 256 connections, gives every HTTP/1 request head a total 30 seconds (including silent and partial-preface peers), and closes every connection after an absolute 10 minutes. These are compiled v0.2 safety invariants and are logged at startup. The connection permit and absolute deadline move into an upgraded WebSocket; idle reads do not arm the write-progress timer, but the absolute lifetime still requires cursor-based reconnect. The request-head timer ends before a handler, `/result` wait, response transfer, or WebSocket session begins. Graceful shutdown first lets those upgraded sockets close normally; if the bounded HTTP drain expires, dropping the server force-closes guarded socket I/O and reclaims the global permit.
+The transport admits at most 256 connections, gives every HTTP/1 request head a total 30 seconds (including silent and partial-preface peers), and closes every connection after an absolute 10 minutes. These are compiled transport safety invariants and are logged at startup. The connection permit and absolute deadline move into an upgraded WebSocket; idle reads do not arm the write-progress timer, but the absolute lifetime still requires cursor-based reconnect. The request-head timer ends before a handler, `/result` wait, response transfer, or WebSocket session begins. Graceful shutdown first lets those upgraded sockets close normally; if the bounded HTTP drain expires, dropping the server force-closes guarded socket I/O and reclaims the global permit.
 
 A response cut short by a transport boundary does not satisfy its declared `Content-Length`; clients must reject it as incomplete JSON. Detail, result, and replay are idempotent reads and may be retried with backoff from durable state. For replay, advance `after` only after a complete page has decoded and been accepted, then resume from that page's `next_cursor`; never advance a cursor from a truncated response. Do not apply this rule blindly to `POST /v1/jobs`: a submission transport failure does not prove that the durable job was not accepted. Prefer replay pagination when consuming a large event history.
 
@@ -136,7 +136,7 @@ Common event kinds include lifecycle transitions, `stdout`, `stderr`, `violation
 
 ### Receipts and hash chains
 
-Every new v0.2 event carries `hash_version: 1`, `prev_hash`, and `event_hash`. The event digest covers a versioned domain separator, job ID, previous hash, sequence, timestamp, kind, and canonical JSON data. A migrated v0.1 event uses `hash_version: 0`; it is preserved but explicitly unverifiable.
+Every newly written event carries `hash_version: 1`, `prev_hash`, and `event_hash`. The event digest covers a versioned domain separator, job ID, previous hash, sequence, timestamp, kind, and canonical JSON data. A migrated v0.1 event uses `hash_version: 0`; it is preserved but explicitly unverifiable.
 
 The terminal receipt records code/stdin/policy hashes, requested and effective
 limits, backend/seccomp/network posture, private-rootfs and dedicated-bootstrap
@@ -218,7 +218,7 @@ signatures.
 
 First send an authenticated `POST /v1/jobs/{id}/stream-ticket`. It returns a short-lived, one-use, job-bound ticket and stream URL. Open that URL with `ws://` (or `wss://` behind TLS). The server consumes the ticket before active-stream admission, sends persisted history first, then live events, and finishes after the terminal event. A `429`/`503` capacity rejection therefore requires minting a new ticket after `Retry-After`. Reconnect by minting a new ticket and continue from the last sequence; deduplicate by job ID and sequence number.
 
-Browser WebSocket APIs cannot set an `Authorization` header. Stream tickets exist so the long-lived API key never needs to enter a WebSocket URL. The bundled clients disable their v0.1 API-key query fallback by default; enabling it requires an explicit opt-in and should be limited to a trusted legacy server because URLs leak into history, logs, and proxy telemetry. Structured v0.2 errors never trigger the fallback.
+Browser WebSocket APIs cannot set an `Authorization` header. Stream tickets exist so the long-lived API key never needs to enter a WebSocket URL. The bundled clients disable their v0.1 API-key query fallback by default; enabling it requires an explicit opt-in and should be limited to a trusted legacy server because URLs leak into history, logs, and proxy telemetry. Structured Coop errors never trigger the fallback.
 
 Clients must handle:
 

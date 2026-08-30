@@ -32,10 +32,11 @@ jobs:
           bash -n scripts/prepare-test-rootfs.sh scripts/smoke-container.sh
           scripts/bootstrap-production.sh scripts/container-entrypoint.sh
           scripts/smoke-gvisor.sh
-      - name: Validate production verifier syntax
+      - name: Validate release and production helper syntax
         run: >-
           python3 -m py_compile scripts/verify-production.py
           scripts/verify-python-adapter.py scripts/build-rootfs-manifest.py
+          scripts/release-artifacts.py
       - name: Test production verifier provider fixtures
         run: python3 -m unittest discover -s scripts/tests -v
 

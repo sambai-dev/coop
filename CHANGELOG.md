@@ -31,7 +31,7 @@ All notable changes are documented here. Coop follows semantic versioning while 
 - Add bounded low-cardinality OpenMetrics, JSON production logs, request IDs, W3C Trace Context links, readiness caching, recovery/retention/admission metrics, and secret-free labels.
 - Add scoped `whoami`, provider-aware production verification, real Python/MCP canaries, full gVisor lifecycle gates, and RustSec/package/release-surface enforcement.
 - Polish the embedded workbench with minimum-isolation controls, provider/identity context, signed-evidence downloads, robust narrow-width states, keyboard/focus behavior, and memory-only browser credentials.
-- Pin Rust 1.98 and include `coop-verify`, checksums, an SPDX SBOM, and GitHub artifact attestations in the atomic release workflow.
+- Pin Rust 1.98 and include `coop-verify`, exact checksums, a combined artifact-scoped SPDX SBOM, SBOM/provenance attestations, archive inventory checks, and remote draft reconciliation in the atomic release workflow.
 
 ### Upgrade notes
 
