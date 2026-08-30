@@ -3203,7 +3203,7 @@ pub async fn status(
     .into_response()
 }
 
-const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-fgX/zcZhoq+Tl/guH7+be+iH99c5e1/94UoAJJkNgpM='; style-src 'sha256-icyWFSqGBj9cTbI7vz8dQVl9HaVRKLwbQWLF4hU7bWQ='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-oOtuToXQs0B3tWWs5yov6UadpucxsPXH4tQ1dSePwlk='; style-src 'sha256-IPEJ2JSNy0PyVjnAQQIxWy3GhU0S/z6ZXAwlTszs4BM='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 async fn dashboard() -> Response {
     let mut response = Html(include_str!("dashboard.html")).into_response();
