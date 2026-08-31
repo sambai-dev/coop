@@ -624,6 +624,7 @@ def check_pins_and_packaging() -> int:
         "--name rookhold-mcp",
         "Build musl-native standalone CLI and MCP apps",
         "python:3.12-alpine@sha256:285a71327884a4d50efbea30104473b0fa43ecefa499458899670ca30dae76e5",
+        "apk add --no-cache binutils",
         "Smoke standalone terminal apps without Python packaging",
         "Stage the direct single-file CLI download",
         "mcp-server",
