@@ -2,6 +2,14 @@
 
 All notable changes are documented here. Rookhold follows semantic versioning while pre-1.0; minor versions can contain API and deployment changes.
 
+## 0.7.1 — 2026-08-31
+
+### Hermes-inspired terminal palette
+
+- Restyle the human CLI around a true black surface, off-white hierarchy, and one accessible electric-blue action voice informed by Hermes Agent's current visual identity.
+- Lift the reference blue for readable text on dark terminals, keep `NO_COLOR` behavior unchanged, and reserve green, amber, red, and slate for explicit execution and security state.
+- Regenerate the README CLI/MCP recording from the same palette and document the visual provenance without importing or vendoring another agent runtime.
+
 ## 0.7.0 — 2026-08-31
 
 ### Terminal-first operation

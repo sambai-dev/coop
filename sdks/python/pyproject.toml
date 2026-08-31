@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rookhold-sdk"
-version = "0.7.0"
+version = "0.7.1"
 description = "Typed, dependency-free Python client for the Rookhold execution gateway"
 readme = "README.md"
 requires-python = ">=3.9"

@@ -13,14 +13,14 @@ execution boundary by itself.
 
 ## Install
 
-Download the exact `rookhold_sdk-0.7.0-py3-none-any.whl` release asset and
+Download the exact `rookhold_sdk-0.7.1-py3-none-any.whl` release asset and
 verify it using [the SDK release procedure](sdks.md). Install it into an
 operator-owned virtual environment:
 
 ```bash
 python -m venv ~/.local/share/rookhold
 ~/.local/share/rookhold/bin/python -m pip install --no-deps \
-  ./rookhold_sdk-0.7.0-py3-none-any.whl
+  ./rookhold_sdk-0.7.1-py3-none-any.whl
 ```
 
 On Windows, the commands are under
@@ -99,9 +99,12 @@ must cross Rookhold.
 
 ## Design provenance
 
-The compact logo, posture summary, command prompt, restrained semantic colors,
-and progressive output hierarchy were informed by the MIT-licensed
+The compact logo, posture summary, command prompt, and progressive output
+hierarchy were informed by the MIT-licensed
 [OpenCode](https://github.com/anomalyco/opencode) and its OpenTUI terminal
-experience. Rookhold does not vendor OpenCode's agent/session runtime or source
-tree; its terminal remains a small client over Rookhold's own API and MCP
-contracts.
+experience. The black, off-white, and electric-blue palette takes visual cues
+from the official [Hermes Agent](https://hermes-agent.nousresearch.com/) identity;
+Rookhold lifts the blue for readable text on black terminals and reserves
+green, amber, and red for real execution or security state. Rookhold does not
+vendor either product's runtime or source tree: the terminal remains a small
+client over Rookhold's own API and MCP contracts.

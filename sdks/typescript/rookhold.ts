@@ -804,8 +804,8 @@ export class Rookhold {
             Accept: "application/json",
             Authorization: `Bearer ${this.#apiKey}`,
             ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-            "X-Rookhold-Client": "typescript/0.7.0",
-            "X-Coop-Client": "typescript/0.7.0",
+            "X-Rookhold-Client": "typescript/0.7.1",
+            "X-Coop-Client": "typescript/0.7.1",
             ...policy.headers,
           },
           ...(serializedBody !== undefined ? { body: serializedBody } : {}),
@@ -911,8 +911,8 @@ export class Rookhold {
           headers: {
             Accept: accept,
             Authorization: `Bearer ${this.#apiKey}`,
-            "X-Rookhold-Client": "typescript/0.7.0",
-            "X-Coop-Client": "typescript/0.7.0",
+            "X-Rookhold-Client": "typescript/0.7.1",
+            "X-Coop-Client": "typescript/0.7.1",
           },
         });
       } catch (cause) {

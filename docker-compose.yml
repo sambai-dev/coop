@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        VERSION: "0.7.0"
+        VERSION: "0.7.1"
         VCS_REF: "${ROOKHOLD_GIT_REVISION:-${COOP_GIT_REVISION:-local}}"
     restart: unless-stopped
     stop_grace_period: 45s

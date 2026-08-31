@@ -1,6 +1,6 @@
 {
   "name": "rookhold-sdk",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Typed browser and Node.js client for the Rookhold execution gateway",
   "type": "module",
   "sideEffects": false,

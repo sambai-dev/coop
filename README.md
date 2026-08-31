@@ -52,17 +52,17 @@ understanding of Rookhold's internals.
 
 ### 1. Download the app
 
-Open the [v0.7.0 release](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.0),
+Open the [v0.7.1 release](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1),
 then choose the archive for your computer:
 
 | Your computer | Download |
 |---|---|
-| Windows, 64-bit | [`rookhold-x86_64-pc-windows-msvc.zip`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.0/rookhold-x86_64-pc-windows-msvc.zip) |
-| Mac with Apple silicon | [`rookhold-aarch64-apple-darwin.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.0/rookhold-aarch64-apple-darwin.tar.gz) |
-| Linux x86_64 | [`rookhold-x86_64-unknown-linux-musl.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.0/rookhold-x86_64-unknown-linux-musl.tar.gz) |
+| Windows, 64-bit | [`rookhold-x86_64-pc-windows-msvc.zip`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-x86_64-pc-windows-msvc.zip) |
+| Mac with Apple silicon | [`rookhold-aarch64-apple-darwin.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-aarch64-apple-darwin.tar.gz) |
+| Linux x86_64 | [`rookhold-x86_64-unknown-linux-musl.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-x86_64-unknown-linux-musl.tar.gz) |
 
 Extract the archive. For the terminal client or MCP adapter, also download
-`rookhold_sdk-0.7.0-py3-none-any.whl` from the same release. Rookhold
+`rookhold_sdk-0.7.1-py3-none-any.whl` from the same release. Rookhold
 automatically shows only the runtimes that work on your machine.
 
 ### 2. Start Rookhold
@@ -94,7 +94,7 @@ client.
 Windows PowerShell:
 
 ```powershell
-python -m pip install --no-deps .\rookhold_sdk-0.7.0-py3-none-any.whl
+python -m pip install --no-deps .\rookhold_sdk-0.7.1-py3-none-any.whl
 $env:ROOKHOLD_BASE_URL = "http://127.0.0.1:7300"
 $env:ROOKHOLD_API_KEY = "rookhold-dev-key"
 rookhold-cli
@@ -103,7 +103,7 @@ rookhold-cli
 macOS or Linux:
 
 ```bash
-python -m pip install --no-deps ./rookhold_sdk-0.7.0-py3-none-any.whl
+python -m pip install --no-deps ./rookhold_sdk-0.7.1-py3-none-any.whl
 ROOKHOLD_BASE_URL=http://127.0.0.1:7300 \
 ROOKHOLD_API_KEY=rookhold-dev-key \
   rookhold-cli
@@ -178,7 +178,7 @@ complete every deployment check.
 > accepting untrusted jobs.
 
 > [!NOTE]
-> **Current release:** [v0.7.0](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.0).
+> **Current release:** [v0.7.1](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1).
 > Its exact eight-asset set includes checksums, a combined artifact-scoped SPDX
 > SBOM, GitHub SBOM/provenance attestations, and the offline `rookhold-verify`
 > verifier inside each platform archive. Older release lines are unsupported
@@ -454,7 +454,7 @@ wait returns the job ID instead of losing ownership of the still-running job.
    ```bash
    python -m venv ~/.local/share/rookhold-mcp
    ~/.local/share/rookhold-mcp/bin/python -m pip install --no-deps \
-     ./rookhold_sdk-0.7.0-py3-none-any.whl
+     ./rookhold_sdk-0.7.1-py3-none-any.whl
    ```
 
 3. Give the harness process—not the model—the connection and policy settings:
