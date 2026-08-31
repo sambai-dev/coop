@@ -70,7 +70,7 @@ class ReleaseArtifactsTests(unittest.TestCase):
             {
                 "rookhold-cli-aarch64-apple-darwin",
                 "rookhold-cli-x86_64-pc-windows-msvc.exe",
-                "rookhold-cli-x86_64-unknown-linux-musl",
+                "rookhold-cli-x86_64-unknown-linux-gnu",
             }
             <= payloads
         )
@@ -108,7 +108,7 @@ class ReleaseArtifactsTests(unittest.TestCase):
                 ),
                 "rookhold-x86_64-unknown-linux-musl": (
                     "rookhold-x86_64-unknown-linux-musl.tar.gz",
-                    "rookhold-cli-x86_64-unknown-linux-musl",
+                    "rookhold-cli-x86_64-unknown-linux-gnu",
                 ),
             }
             for container, assets in containers.items():

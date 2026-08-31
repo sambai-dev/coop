@@ -31,7 +31,7 @@ def payload_names(version: str) -> tuple[str, ...]:
         "rookhold-aarch64-apple-darwin.tar.gz",
         "rookhold-cli-aarch64-apple-darwin",
         "rookhold-cli-x86_64-pc-windows-msvc.exe",
-        "rookhold-cli-x86_64-unknown-linux-musl",
+        "rookhold-cli-x86_64-unknown-linux-gnu",
         "rookhold-sdk-" + version + ".tgz",
         "rookhold-x86_64-pc-windows-msvc.zip",
         "rookhold-x86_64-unknown-linux-musl.tar.gz",
@@ -220,7 +220,7 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
     if asset in {
         "rookhold-cli-aarch64-apple-darwin",
         "rookhold-cli-x86_64-pc-windows-msvc.exe",
-        "rookhold-cli-x86_64-unknown-linux-musl",
+        "rookhold-cli-x86_64-unknown-linux-gnu",
     }:
         return (asset,)
     if asset == "rookhold-x86_64-unknown-linux-musl.tar.gz":
@@ -376,7 +376,7 @@ def assemble(downloads: Path, dist: Path, version: str) -> None:
         ),
         "rookhold-x86_64-unknown-linux-musl": (
             "rookhold-x86_64-unknown-linux-musl.tar.gz",
-            "rookhold-cli-x86_64-unknown-linux-musl",
+            "rookhold-cli-x86_64-unknown-linux-gnu",
         ),
     }
     if not downloads.is_dir() or downloads.is_symlink():
