@@ -44,9 +44,8 @@ Keep the name Rookhold and its plainspoken, technically honest voice. Security p
 - Product and operating contract: `README.md`, `SECURITY.md`, and `docs/`.
 - Embedded operator surface and behavior: `crates/coop-server/src/dashboard.html`.
 - API, CSP, and dashboard contract tests: `crates/coop-server/src/routes.rs`.
-- Current-state captures: `.impeccable/audit/`.
-- Reference research: Mobbin operator products plus the official Hermes Agent session/dashboard surfaces and OpenCode's transcript-first TUI, gathered on 2026-08-30.
-- Selected v0.5 direction: the approved Chalk-and-Carbon Execution Desk comp in `.impeccable/mocks/chalk-carbon-execution-desk.png` combines a docked Compose/History workflow, dominant chronological run transcript, and contextual Result & record sheet.
+- Canonical visual system and responsive rules: `DESIGN.md`.
+- Current release captures: `docs/assets/console-v0.6.png` and `docs/assets/rookhold-cli-mcp-demo.gif`.
 - No customer logos, testimonials, usage claims, or external brand assets are available and none may be fabricated.
 
 ## Product Principles

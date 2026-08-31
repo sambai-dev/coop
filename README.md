@@ -566,10 +566,14 @@ development backend retains the service account's host networking and reports
 | `crates/coop-server` | API, fair scheduler, identity, observability, signer, dashboard, and OpenAPI |
 | `sdks` | Python and TypeScript clients |
 | `integrations` | MCP templates for Claude Code, OpenCode, Hermes, OpenClaw, and generic hosts |
-| `hostile-jobs` | adversarial containment probes |
+| `crates/coop-server/tests/hostile.rs` | adversarial containment probes |
 | `docs` | architecture, boundary, API, deployment, and operations |
 | `PRODUCT.md` | durable users, purpose, positioning, and product constraints |
 | `DESIGN.md` | operator-console tokens, responsive rules, and component language |
+
+The `coop-*` crate and compatibility filenames are intentional durable internal,
+wire, and evidence identities retained across the public rename; new user-facing
+interfaces use Rookhold names.
 
 ## Verification
 
