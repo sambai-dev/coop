@@ -614,6 +614,7 @@ A successful unit test run on macOS, Windows, or another Linux architecture is n
 - [Operations, backup, and restore](docs/operations.md)
 - [Upgrading](docs/upgrading.md)
 - [Releasing](docs/releasing.md)
+- [Contribution lifecycle and exact-head evidence](docs/contribution-lifecycle.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Security policy](SECURITY.md)
 - [Security review record](AUDIT.md)
@@ -623,7 +624,7 @@ Runnable starting templates for systemd, its environment file, and Caddy live un
 
 ## Contributing
 
-Issues and focused pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for development checks, hostile-suite requirements, security reporting, and the design principles expected in security-sensitive changes.
+Issues and focused pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the [contribution lifecycle](docs/contribution-lifecycle.md) for declared scope, RED/adversarial evidence, exact-head validation, hostile-suite requirements, and precise implementation/review/integration status.
 
 ## Project direction
 

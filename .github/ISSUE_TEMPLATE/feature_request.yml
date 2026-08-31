@@ -19,6 +19,20 @@ body:
     validations:
       required: true
   - type: textarea
+    id: invariant
+    attributes:
+      label: Desired invariant
+      description: What contract should always hold after this change, including boundary, retry, or fallback behavior?
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals and remaining work
+      description: What related behavior is intentionally outside this request, and is the proposed scope independently useful?
+    validations:
+      required: true
+  - type: textarea
     id: boundaries
     attributes:
       label: Safety and compatibility impact
