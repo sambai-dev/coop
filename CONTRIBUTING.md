@@ -64,6 +64,21 @@ Before requesting review, run the applicable checks above plus `git diff --check
 
 If a commit was genuinely produced by more than one person, use GitHub's standard `Co-authored-by:` trailer. Do not add attribution for review, tooling, or work the named person did not perform.
 
+## Automated review
+
+CodeRabbit automatically reviews eligible non-draft pull requests targeting
+`main` using the version-controlled [`.coderabbit.yaml`](.coderabbit.yaml).
+Titles containing `WIP` or `[skip review]` are excluded, and automatic reviews
+pause after ten reviewed commits. Its comments and status supplement the
+required CI and maintainer review; they do not certify technical completion or
+replace the exact-head evidence above.
+
+After addressing new commits or review findings, comment `@coderabbitai review`
+on the pull request to request a fresh review. Evaluate each finding against the
+declared scope and root invariant, resolve valid defects with regression
+coverage, and explain rejected suggestions rather than changing reviewed code
+only to silence automation.
+
 ## Status language
 
 Use these terms precisely:
