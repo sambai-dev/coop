@@ -2,15 +2,15 @@
 
 Rookhold ships small reference clients under `sdks/`. They intentionally mirror the HTTP API and are suitable for embedding in agent tool loops. The OpenAPI document remains the canonical contract for generated clients.
 
-The v0.7 release workflow tests SDK source and installs both the built Python wheel and source distribution before including them, plus the npm package tarball, in the checksummed, attested GitHub release. It does not publish PyPI or npm registries. Use an exact GitHub release asset or the source-checkout paths below until a separately authenticated registry release is announced.
+The v0.8 release workflow tests SDK source, installs the built Python wheel and source distribution, packs the TypeScript client, and publishes the exact gated artifacts to PyPI and npm with GitHub trusted publishing. A final clean-environment job installs `rookhold==0.8.0` and `rookhold@0.8.0` from the public registries.
 
-To install the v0.7.1 release, activate the intended Python virtual environment and download the exact release assets into an otherwise empty working directory. This example verifies both the checksum manifest and GitHub provenance before installation:
+To install the v0.8.0 release, activate the intended Python virtual environment and download the exact release assets into an otherwise empty working directory. This example verifies both the checksum manifest and GitHub provenance before installation:
 
 ```bash
 set -euo pipefail
-version=0.7.1
-python_asset="rookhold_sdk-${version}-py3-none-any.whl"
-typescript_asset="rookhold-sdk-${version}.tgz"
+version=0.8.0
+python_asset="rookhold-${version}-py3-none-any.whl"
+typescript_asset="rookhold-${version}.tgz"
 sdk_asset_dir="$PWD"
 gh release download "v${version}" --repo sambai-dev/rookhold \
   --pattern "$python_asset" \
@@ -39,7 +39,7 @@ python -m pip install --no-deps "./$python_asset"
 npm install "${sdk_asset_dir}/${typescript_asset}"
 ```
 
-The release also includes `rookhold_sdk-0.7.1.tar.gz` for consumers that require a Python source distribution. On macOS or Windows, use the platform checksum commands shown in [deployment](deployment.md) in place of `sha256sum`; keep the same release-asset and constrained workflow-provenance verification.
+The release also includes `rookhold-0.8.0.tar.gz` for consumers that require a Python source distribution. On macOS or Windows, use the platform checksum commands shown in [deployment](deployment.md) in place of `sha256sum`; keep the same release-asset and constrained workflow-provenance verification.
 
 ## Python
 
@@ -125,7 +125,7 @@ authenticates the claim and exact subject, not a successful execution outcome.
 Build and test the TypeScript package with `npm ci && npm test && npm run typecheck` under `sdks/typescript`; `npm pack` then creates an installable tarball for a consuming project. It uses platform `fetch` and `WebSocket`:
 
 ```ts
-import { Rookhold } from "rookhold-sdk";
+import { Rookhold } from "rookhold";
 
 const client = new Rookhold("http://127.0.0.1:7300", "rookhold-dev-key");
 const job = await client.submit("node", "console.log(6 * 7)", {
@@ -166,7 +166,7 @@ rejected the first request.
 
 The clients follow the additive v0.4 routes while retaining documented legacy
 fallbacks. Python continues to export `Coop` and `CoopError` from `coop`; the
-TypeScript package provides the same aliases from `rookhold-sdk/coop`. The v1
+TypeScript package provides the same aliases from `rookhold/coop`. The v1
 `coop://` subject and `application/vnd.coop...` media type in verification
 examples are intentional evidence identities. Before upgrading either side
 independently, run its tests against the target server and compare

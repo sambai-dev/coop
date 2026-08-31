@@ -274,6 +274,7 @@ impl GvisorProvider {
         }
         let rootfs =
             validate_rootfs(&self.rootfs, &ctx.workdir).map_err(RunFailure::before_ready)?;
+        crate::ensure_job_artifact_dirs(&ctx.workdir).map_err(RunFailure::before_ready)?;
         let interpreter =
             crate::resolve_interpreter(&ctx.language, ctx.interpreter_override.as_deref())
                 .and_then(|configured| resolve_rootfs_interpreter(&rootfs, &configured))
@@ -285,6 +286,8 @@ impl GvisorProvider {
         let bundle = runtime_dir.join("bundle");
         let state_root = runtime_dir.join("state");
         let payload = runtime_dir.join("payload");
+        let input = ctx.workdir.join("input");
+        let output = ctx.workdir.join("output");
         create_private_dir(&runtime_dir).map_err(RunFailure::before_ready)?;
         create_private_dir(&bundle).map_err(RunFailure::before_ready)?;
         create_private_dir(&state_root).map_err(RunFailure::before_ready)?;
@@ -304,6 +307,8 @@ impl GvisorProvider {
         let spec = build_spec(
             &rootfs,
             &payload,
+            &input,
+            &output,
             &cgroup_oci_path,
             &ctx.limits,
             self.uid,
@@ -1301,6 +1306,8 @@ fn provider_job_directories(jobs_root: &Path) -> io::Result<Vec<fs::DirEntry>> {
 fn build_spec(
     rootfs: &Path,
     payload: &Path,
+    input: &Path,
+    output: &Path,
     cgroup_path: &str,
     limits: &Limits,
     uid: u32,
@@ -1337,7 +1344,7 @@ fn build_spec(
                 "TMPDIR=/tmp",
                 "LANG=C.UTF-8",
             ],
-            "cwd": "/tmp",
+            "cwd": "/",
             "capabilities": {
                 "bounding": [], "effective": [], "inheritable": [], "permitted": [], "ambient": []
             },
@@ -1358,7 +1365,9 @@ fn build_spec(
             { "destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid", "noexec", "nodev", "ro"] },
             { "destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec", "nodev", "mode=1777", format!("size={tmp_size}")] },
             { "destination": "/var/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec", "nodev", "mode=1777", format!("size={tmp_size}")] },
-            { "destination": "/work", "type": "bind", "source": payload, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"] }
+            { "destination": "/work", "type": "bind", "source": payload, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"] },
+            { "destination": "/input", "type": "bind", "source": input, "options": ["rbind", "ro", "nosuid", "nodev", "noexec"] },
+            { "destination": "/output", "type": "bind", "source": output, "options": ["rbind", "rw", "nosuid", "nodev", "noexec"] }
         ],
         "linux": {
             "namespaces": [
@@ -1545,7 +1554,9 @@ fn validate_rootfs_root(path: &Path) -> io::Result<PathBuf> {
             "gVisor requires a dedicated private rootfs",
         ));
     }
-    for required in ["tmp", "var/tmp", "proc", "dev", "sys", "work"] {
+    for required in [
+        "tmp", "var/tmp", "proc", "dev", "sys", "work", "input", "output",
+    ] {
         let target = canonical.join(required);
         let metadata = fs::symlink_metadata(&target)?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -1887,9 +1898,13 @@ mod tests {
     fn oci_spec_is_fixed_deny_by_default_and_resource_bound() {
         let root = Path::new("/opt/coop/rootfs");
         let payload = Path::new("/var/lib/coop/jobs/job-a/.coop-gvisor/payload");
+        let input = Path::new("/var/lib/coop/jobs/job-a/input");
+        let output = Path::new("/var/lib/coop/jobs/job-a/output");
         let spec = build_spec(
             root,
             payload,
+            input,
+            output,
             "/system.slice/coop.service/coop-jobs/job-a",
             &Limits::default(),
             65_534,

@@ -14,7 +14,7 @@ execution boundary by itself.
 ## Download the standalone apps
 
 The normal consumer path is the platform archive on the
-[v0.7.1 release](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1).
+[v0.8.0 release](https://github.com/sambai-dev/rookhold/releases/tag/v0.8.0).
 Each Windows, Apple-silicon macOS, and Linux x86_64 archive contains both
 `rookhold-cli` and `rookhold-mcp` as self-contained executables. Extract the
 archive and run them directly; Python and `pip` are not required.
@@ -36,14 +36,14 @@ On Windows, use `rookhold-cli.exe` and `rookhold-mcp.exe`.
 ## Install the Python package for development
 
 SDK authors who specifically want importable Python modules can download the
-exact `rookhold_sdk-0.7.1-py3-none-any.whl` release asset and
+exact `rookhold-0.8.0-py3-none-any.whl` release asset and
 verify it using [the SDK release procedure](sdks.md). Install it into an
 operator-owned virtual environment:
 
 ```bash
 python -m venv ~/.local/share/rookhold
 ~/.local/share/rookhold/bin/python -m pip install --no-deps \
-  ./rookhold_sdk-0.7.1-py3-none-any.whl
+  ./rookhold-0.8.0-py3-none-any.whl
 ```
 
 On Windows, the commands are under
@@ -108,7 +108,7 @@ Register the same standalone CLI file as a local stdio MCP server with the
 
 - [Claude Code template](../integrations/claude-code/mcp.json)
 - [OpenCode v2 template](../integrations/opencode/opencode.snippet.json)
-- [all supported host patterns](../integrations/README.md)
+- [all supported host patterns](https://github.com/sambai-dev/rookhold/blob/main/integrations/README.md)
 
 This lets the host keep its own polished conversational TUI while Rookhold
 remains the separate policy-controlled executor. The host may prefix tool names

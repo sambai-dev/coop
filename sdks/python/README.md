@@ -4,28 +4,30 @@ A typed synchronous client and stdio MCP adapter with no required dependencies.
 Install the optional stream extra for a native WebSocket; otherwise `stream()`
 transparently uses cursor replay.
 
-Install from a source checkout (available now):
+Install from PyPI:
 
 ```bash
-git clone https://github.com/sambai-dev/rookhold.git
-python -m pip install "./rookhold/sdks/python[stream]"
+python -m pip install "rookhold[stream]"
 ```
 
-The PyPI package is not published yet. After it is published, install it with:
+The common path is one call:
 
-```bash
-python -m pip install "rookhold-sdk[stream]"
+```python
+from rookhold import Rookhold
+
+result = Rookhold.from_env().run("python", "print(6 * 7)")
+print(result.raise_for_status().stdout)
 ```
 
-The exact v0.7.1 GitHub release wheel is
-`rookhold_sdk-0.7.1-py3-none-any.whl`; follow the
+The exact v0.8.0 GitHub release wheel is
+`rookhold-0.8.0-py3-none-any.whl`; follow the
 [checksum, attestation, and installation commands](../../docs/sdks.md) rather
 than using a moving release URL.
 
 Installation provides two commands:
 
 - `rookhold-cli` is an interactive human/operator terminal with one-shot
-  subcommands for runs, jobs, results, events, cancellation, posture, and MCP
+  subcommands for runs, jobs, results, events, cancellation, isolation state, and MCP
   discovery.
 - `rookhold-mcp` is the stdio server launched by Claude Code, OpenCode, Codex,
   Hermes, OpenClaw, and other MCP hosts. It exposes run, result, evidence, and

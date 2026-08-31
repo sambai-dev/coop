@@ -4,12 +4,12 @@ Thanks for helping make agent code execution safer and easier to audit.
 
 ## Before you start
 
-- Use [GitHub Issues](https://github.com/sambai-dev/rookhold/issues) for reproducible bugs and scoped feature requests.
+- Use [GitHub Discussions](https://github.com/sambai-dev/rookhold/discussions) for questions and showcases. Use [GitHub Issues](https://github.com/sambai-dev/rookhold/issues) for reproducible bugs and scoped feature requests.
 - For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
 - For large changes, open an issue first so the approach, declared scope, and containment tradeoffs can be agreed before implementation.
-- Read the [contribution lifecycle](docs/contribution-lifecycle.md) before calling a change complete.
+- Identify the contribution tier below before choosing checks. The full security lifecycle applies only to Tier C.
 
-Good contribution areas include sandbox hardening, hostile-job coverage, SDK ergonomics, observability, replay tooling, deployment documentation, and narrowly scoped items from the README's project direction.
+Good first contributions include recipes, starter applications, MCP configurations, runtime-pack proposals, SDK ergonomics, and documentation. Core containment work is welcome but deliberately requires deeper evidence.
 
 ## Local development
 
@@ -37,7 +37,29 @@ cargo run -p coop-server
 
 The real containment suite requires a supported Linux x86_64 kernel, cgroup v2, namespaces, the matching sandbox helper, a trusted private rootfs, and elevated privileges. Follow the complete setup and command in the [README](README.md#verification). Do not run the hostile-job suite on a workstation that contains important unsaved work. A dedicated Linux VM is preferred.
 
-## Definition of technically done
+## Contribution tiers
+
+### Tier A — docs, examples, and integrations
+
+Run the formatter or linter relevant to the files and execute or validate the
+example or configuration you changed. A maintainer review is required. RED
+reproduction, hostile jobs, and exact-head containment evidence are not
+required for copy, recipes, starter apps, diagrams, package-manager manifests,
+or MCP host configuration.
+
+### Tier B — SDK, CLI, and public API
+
+Add unit and integration coverage, assess backward compatibility, update the
+changelog when behavior changes, and run a clean wheel, source-distribution, or
+npm-package install as applicable. Public examples must keep working.
+
+### Tier C — executor, authentication, storage, receipts, and isolation
+
+Read the [contribution lifecycle](docs/contribution-lifecycle.md). Keep the full
+security standard below: RED reproduction, adversarial cases, exact-head
+evidence, hostile-job coverage, platform verification, and rollback analysis.
+
+## Tier C definition of technically done
 
 A mergeable branch or green focused test is not sufficient. Technical completion requires all applicable conditions below.
 
@@ -50,7 +72,7 @@ A mergeable branch or green focused test is not sufficient. Technical completion
 
 ## Pull requests
 
-The pull request template is enforced in CI. Complete every section with concrete evidence:
+State the contribution tier. Complete the sections applicable to that tier with concrete evidence. Tier C changes must include:
 
 - declared scope and non-goals;
 - the root invariant;
@@ -60,7 +82,7 @@ The pull request template is enforced in CI. Complete every section with concret
 - safety, compatibility, and rollback implications; and
 - separate implementation, validation, review, and integration states.
 
-Before requesting review, run the applicable checks above plus `git diff --check`. Documentation-only changes run the checks relevant to their files, but must still declare scope and exact-head evidence.
+Before requesting review, run the applicable tier checks plus `git diff --check`. Tier A changes need a clear scope and relevant validation, not security-core ceremony.
 
 If a commit was genuinely produced by more than one person, use GitHub's standard `Co-authored-by:` trailer. Do not add attribution for review, tooling, or work the named person did not perform.
 

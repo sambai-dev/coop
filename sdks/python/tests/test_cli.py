@@ -1,9 +1,18 @@
 import io
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from rookhold_cli import CliConfig, Palette, RookholdCli, _compatible_env, main
+from rookhold_cli import (
+    CliConfig,
+    Palette,
+    RookholdCli,
+    _compatible_env,
+    _setup_host,
+    main,
+)
 
 
 class FakeRookhold:
@@ -23,7 +32,7 @@ class FakeRookhold:
 
     def capabilities(self):
         return {
-            "version": "0.7.1",
+            "version": "0.8.0",
             "languages": ["python", "node", "bash"],
             "execution": {
                 "backend": "off",
@@ -130,6 +139,43 @@ def config() -> CliConfig:
 
 
 class RookholdCliTests(unittest.TestCase):
+    def test_check_uses_plain_pass_warn_language_and_tests_mcp(self):
+        output = io.StringIO()
+        cli = RookholdCli(
+            config(),
+            client=FakeRookhold(),
+            output_stream=output,  # type: ignore[arg-type]
+        )
+        value = cli.check()
+        self.assertEqual(value["isolation"], "none")
+        rendered = output.getvalue()
+        self.assertIn("OK    service reachable", rendered)
+        self.assertIn("WARN    isolation none", rendered)
+        self.assertIn("MCP connection succeeded; 4 tools exposed", rendered)
+
+    def test_setup_previews_writes_and_backs_up_without_copying_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".mcp.json"
+            target.write_text('{"mcpServers":{"other":{"command":"other"}}}\n')
+            output = io.StringIO()
+            configured = _setup_host(
+                "claude-code",
+                target,
+                yes=True,
+                input_stream=io.StringIO(),
+                output_stream=output,
+            )
+            self.assertEqual(configured, target.resolve())
+            value = json.loads(target.read_text())
+            self.assertEqual(value["mcpServers"]["other"]["command"], "other")
+            self.assertEqual(
+                value["mcpServers"]["rookhold"],
+                {"command": "rookhold-cli", "args": ["mcp-server"]},
+            )
+            self.assertNotIn("secret-never-print", target.read_text())
+            self.assertEqual(len(list(target.parent.glob(".mcp.json.*.bak"))), 1)
+            self.assertIn('+    "rookhold"', output.getvalue())
+
     def test_terminal_palette_uses_accessible_electric_blue_and_semantic_roles(self):
         colors = Palette(True)
         self.assertEqual(colors.accent("prompt"), "\x1b[38;2;121;160;255mprompt\x1b[0m")
@@ -142,7 +188,7 @@ class RookholdCliTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught, patch("sys.stdout", output):
             main(["--version"])
         self.assertEqual(caught.exception.code, 0)
-        self.assertEqual(output.getvalue(), "rookhold-cli 0.7.1\n")
+        self.assertEqual(output.getvalue(), "rookhold-cli 0.8.0\n")
 
     def test_same_cli_executable_can_launch_the_mcp_server(self):
         with patch("rookhold_cli.mcp_main") as mcp:

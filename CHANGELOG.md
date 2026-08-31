@@ -2,6 +2,52 @@
 
 All notable changes are documented here. Rookhold follows semantic versioning while pre-1.0; minor versions can contain API and deployment changes.
 
+## 0.8.0 — 2026-09-01
+
+### Why this matters
+
+Rookhold now starts with the developer outcome: install one public package or
+run one command, submit a bounded job in one method call, and keep a receipt.
+Short real jobs can also receive bounded input files and return explicitly
+named, hashed output artifacts without gaining a persistent workspace.
+
+### Try it
+
+```bash
+rookhold run python 'while True: pass' --wall-seconds 2
+pip install rookhold
+npm install rookhold
+```
+
+Python and TypeScript now provide `from_env`/`fromEnv`, `run`, structured JSON
+helpers, normalized result objects, receipt and isolation fields, and a direct
+failure check. The CLI can manage a temporary trusted-code service, save each
+receipt, test a configured installation with `rookhold check`, and safely
+preview and back up MCP host configuration changes.
+
+### Compatibility
+
+- The REST additions are optional fields; existing submit, event, result, and
+  cancellation methods remain.
+- Python remains supported on 3.9–3.14 and TypeScript on Node 18+.
+- The public package name is now `rookhold` on both PyPI and npm. The Python
+  import remains `rookhold`; TypeScript applications should replace
+  `rookhold-sdk` imports with `rookhold`.
+- Internal `coop-*` crate names and durable v1 evidence identities remain to
+  avoid a risky format rename.
+
+### What changed internally
+
+- Added safe `input/` and `output/` mounts to subprocess, namespace, and gVisor
+  executors with path, count, per-file, and total-byte bounds.
+- Added versioned Bookworm runtime-pack names and bound them to existing
+  interpreter, rootfs, runtime, and OCI configuration digests in receipts.
+- Added public-package trusted publishing, clean registry smoke tests, weekly
+  compatibility checks, executable recipes, Next.js and FastAPI starters, a
+  VitePress documentation site, and GitHub Pages deployment.
+- Tiered contribution checks so docs and recipes no longer inherit the full
+  security-core evidence process.
+
 ## 0.7.1 — 2026-08-31
 
 ### Hermes-inspired terminal palette

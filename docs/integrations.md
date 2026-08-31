@@ -13,11 +13,20 @@ The single-file `rookhold-cli` download starts its dependency-free stdio server
 with the `mcp-server` argument. It serves stateless MCP 2026 discovery and
 opt-in Tasks alongside the legacy initialize flow, with bounded concurrent
 requests and cancellation. The Python package remains an optional SDK path.
-Follow the runnable templates and operator-policy guidance in
-[`integrations/`](../integrations/README.md).
-That directory includes Claude Code's stdio `.mcp.json` form and OpenCode v2's
-`mcp.servers` local-command form. Both launch the same adapter; neither host
-receives the Rookhold key as a tool argument.
+
+Rookhold release-checks Claude Code, OpenCode, and Hermes. Configure one with a
+preview, confirmation, timestamped backup, and connection check:
+
+```bash
+rookhold setup claude-code
+rookhold setup opencode
+rookhold setup hermes
+```
+
+The runnable templates and operator-policy guidance live in
+[`integrations/`](https://github.com/sambai-dev/rookhold/tree/main/integrations).
+The host inherits `ROOKHOLD_BASE_URL` and `ROOKHOLD_API_KEY`; setup never copies
+the secret value into the host file.
 
 ## Choosing Rookhold or a harness sandbox
 
@@ -88,12 +97,11 @@ detail: availability, the bound tenant, key ID, content digests and sizes,
 media type, and the two tenant-scoped download paths. The adapter deliberately
 does not embed the DSSE envelope or result artifact in MCP output, and it does
 not label signatures as verified. A trusted host can download the exact files
-through an SDK, retain
-them with the parent trace, and invoke `rookhold-verify verify` offline using an
-independently pinned operator public key. Treat the public-key API as discovery,
-not trust bootstrap; a successful verification still requires the host to
-provide its expected tenant and evaluate the authenticated `outcome` and
-`event_chain_complete` fields.
+through an SDK, retain them with the parent trace, and invoke
+`rookhold-verify verify` offline using an independently pinned operator public
+key. Treat the public-key API as discovery, not trust bootstrap; a successful
+verification still requires the host to provide its expected tenant and
+evaluate the authenticated `outcome` and `event_chain_complete` fields.
 
 ## Production checklist
 
@@ -106,7 +114,7 @@ provide its expected tenant and evaluate the authenticated `outcome` and
 - restrict `ROOKHOLD_MCP_ALLOWED_LANGUAGES` and adapter ceilings
 - set the MCP host timeout above the intended Rookhold wait budget
 - disable alternate execution tools when Rookhold is mandatory
-- probe the MCP server, then run a canary through the actual harness
+- run `rookhold check`, then run a canary through the actual harness
 - retain the job ID in the parent agent trace and inspect the terminal
   `isolation_class`, receipt, and attestation metadata; download and verify the
   exact signed files when portable evidence is required

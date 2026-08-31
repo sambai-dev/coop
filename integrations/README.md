@@ -121,9 +121,9 @@ through OpenCode's default Code Mode.
 2. Merge [`openclaw/openclaw.snippet.json5`](openclaw/openclaw.snippet.json5)
    into `~/.openclaw/openclaw.json`, using the absolute `rookhold-cli` path when
    required.
-3. Run `openclaw mcp doctor rookhold --probe`, restart the Gateway, and inspect the
-   effective tool policy. Sandboxed OpenClaw sessions need `bundle-mcp` (or the
-   exact projected Rookhold tools) in the sandbox allowlist.
+3. Use OpenClaw's MCP connection test for `rookhold`, restart the Gateway, and
+   inspect the effective tool policy. Sandboxed OpenClaw sessions need
+   `bundle-mcp` (or the exact projected Rookhold tools) in the sandbox allowlist.
 4. Deny `exec`, `process`, and provider-backed code execution for agents that
    must use Rookhold. OpenClaw's sandbox and tool policy are separate controls; an
    MCP registration alone does not replace other execution routes.

@@ -83,7 +83,8 @@ Output is bounded by both record and byte policies. The executor records truncat
 Each API key maps to one tenant. Tenant ownership is checked on job detail, result, cancel, event history, and stream access. Foreign job IDs should be indistinguishable from missing IDs.
 
 The server process, local signing key, SQLite file, reviewed runtime/private
-rootfs, and outer host remain trusted. Submitted source, stdin, interpreter
+rootfs, and outer host remain trusted. Submitted source, stdin, bounded input
+files, requested output files, interpreter
 behavior, and descendants are untrusted. A gVisor job receives a separate
 application-kernel workload; a namespace job remains shared-kernel. Neither
 may receive the database, keys, sockets, sibling staging, or outer host root.
@@ -94,7 +95,7 @@ See [security-boundary.md](security-boundary.md) for the complete trust-tier sta
 
 ## Scale characteristics
 
-v0.7 remains a single-node design:
+v0.8 remains a single-node design:
 
 - atomic global/per-tenant queued leases and fair tenant dispatch
 - a configured worker pool
@@ -105,10 +106,10 @@ v0.7 remains a single-node design:
 
 Running multiple Rookhold servers against the same SQLite file is unsupported. A multi-node design requires a durable queue, distributed admission control, a network database, and an external stream bus.
 
-## Non-goals in v0.7
+## Non-goals in v0.8
 
 - persistent or resumable sandboxes
-- file upload/download or artifact stores
+- persistent file or artifact stores beyond bounded per-job input/output files
 - arbitrary container images
 - PTYs and interactive shells
 - exposed ports and inbound networking

@@ -1,6 +1,6 @@
 {
-  "name": "rookhold-sdk",
-  "version": "0.7.1",
+  "name": "rookhold",
+  "version": "0.8.0",
   "description": "Typed browser and Node.js client for the Rookhold execution gateway",
   "type": "module",
   "sideEffects": false,
@@ -51,7 +51,7 @@
     "directory": "sdks/typescript"
   },
   "bugs": "https://github.com/sambai-dev/rookhold/issues",
-  "homepage": "https://github.com/sambai-dev/rookhold#readme",
+  "homepage": "https://sambai-dev.github.io/rookhold/",
   "devDependencies": {
     "typescript": "^7.0.2"
   }

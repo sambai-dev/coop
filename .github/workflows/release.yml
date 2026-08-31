@@ -126,8 +126,8 @@ jobs:
           set -euo pipefail
           rm -rf sdk-dist
           python -m build --wheel --sdist --outdir sdk-dist ./sdks/python
-          wheel=$(find sdk-dist -maxdepth 1 -type f -name 'rookhold_sdk-*.whl')
-          sdist=$(find sdk-dist -maxdepth 1 -type f -name 'rookhold_sdk-*.tar.gz')
+          wheel=$(find sdk-dist -maxdepth 1 -type f -name 'rookhold-*.whl')
+          sdist=$(find sdk-dist -maxdepth 1 -type f -name 'rookhold-*.tar.gz')
           test "$(printf '%s\n' "$wheel" | grep -c .)" -eq 1
           test "$(printf '%s\n' "$sdist" | grep -c .)" -eq 1
           python -m twine check "$wheel" "$sdist"
@@ -137,7 +137,7 @@ jobs:
             target="sdks/python/.verify-dist/${kind}-install"
             rm -rf "$target"
             python -m pip install --no-deps --target "$target" "$artifact"
-            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp, rookhold, rookhold_cli, rookhold_mcp; assert rookhold.__version__ == '0.7.1'; assert rookhold_mcp.__version__ == rookhold.__version__; assert coop.Coop is rookhold.Rookhold; assert coop_mcp.CoopMcpServer is rookhold_mcp.RookholdMcpServer; assert callable(rookhold_cli.main); assert Path(rookhold.__file__).with_name('py.typed').is_file(); assert Path(coop.__file__).with_name('py.typed').is_file()"
+            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp, rookhold, rookhold_cli, rookhold_mcp; assert rookhold.__version__ == '0.8.0'; assert rookhold_mcp.__version__ == rookhold.__version__; assert coop.Coop is rookhold.Rookhold; assert coop_mcp.CoopMcpServer is rookhold_mcp.RookholdMcpServer; assert callable(rookhold_cli.main); assert Path(rookhold.__file__).with_name('py.typed').is_file(); assert Path(coop.__file__).with_name('py.typed').is_file()"
             PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v
           done
       - name: Build npm package tarball
@@ -590,9 +590,9 @@ jobs:
             dist/rookhold-cli-x86_64-unknown-linux-gnu
             dist/rookhold-cli-aarch64-apple-darwin
             dist/rookhold-cli-x86_64-pc-windows-msvc.exe
-            dist/rookhold_sdk-${{ needs.preflight.outputs.version }}-py3-none-any.whl
-            dist/rookhold_sdk-${{ needs.preflight.outputs.version }}.tar.gz
-            dist/rookhold-sdk-${{ needs.preflight.outputs.version }}.tgz
+            dist/rookhold-${{ needs.preflight.outputs.version }}-py3-none-any.whl
+            dist/rookhold-${{ needs.preflight.outputs.version }}.tar.gz
+            dist/rookhold-${{ needs.preflight.outputs.version }}.tgz
             dist/rookhold-${{ needs.preflight.outputs.version }}.spdx.json
             dist/SHA256SUMS
           fail_on_unmatched_files: true
@@ -618,3 +618,70 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest --verify-tag
+
+  publish-registries:
+    name: publish public SDK packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [preflight, publish]
+    environment:
+      name: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download the exact gated SDK packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rookhold-sdks
+          path: sdk-dist
+      - name: Select only Python distribution files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir pypi-dist
+          cp "sdk-dist/rookhold-${{ needs.preflight.outputs.version }}-py3-none-any.whl" pypi-dist/
+          cp "sdk-dist/rookhold-${{ needs.preflight.outputs.version }}.tar.gz" pypi-dist/
+      - name: Publish to PyPI with GitHub trusted publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: pypi-dist
+          attestations: true
+      - name: Set up Node for npm trusted publishing
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - name: Publish to npm with provenance
+        run: >-
+          npm publish
+          "sdk-dist/rookhold-${{ needs.preflight.outputs.version }}.tgz"
+          --access public --provenance
+
+  registry-smoke:
+    name: clean public-package install
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [preflight, publish-registries]
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install and import the exact PyPI release in a clean environment
+        run: |
+          python -m venv clean-python
+          clean-python/bin/python -m pip install "rookhold==${{ needs.preflight.outputs.version }}"
+          clean-python/bin/python -c "from rookhold import Rookhold, RunResult; assert callable(Rookhold.from_env); assert RunResult.__name__ == 'RunResult'"
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Install and import the exact npm release in a clean project
+        shell: bash
+        run: |
+          mkdir clean-node
+          cd clean-node
+          npm init -y
+          npm install "rookhold@${{ needs.preflight.outputs.version }}"
+          node --input-type=module -e "import { Rookhold, RunResult } from 'rookhold'; if (typeof Rookhold.fromEnv !== 'function' || typeof RunResult !== 'function') process.exit(1)"

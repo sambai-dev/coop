@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[2]
 RELEASE = runpy.run_path(str(ROOT / "scripts" / "release-artifacts.py"))
-VERSION = "0.7.1"
+VERSION = "0.8.0"
 
 
 def archive_entries(asset: str) -> dict[str, bytes | None]:
@@ -94,9 +94,9 @@ class ReleaseArtifactsTests(unittest.TestCase):
             downloads = root / "downloads"
             containers = {
                 "rookhold-sdks": (
-                    f"rookhold-sdk-{VERSION}.tgz",
-                    f"rookhold_sdk-{VERSION}-py3-none-any.whl",
-                    f"rookhold_sdk-{VERSION}.tar.gz",
+                    f"rookhold-{VERSION}.tgz",
+                    f"rookhold-{VERSION}-py3-none-any.whl",
+                    f"rookhold-{VERSION}.tar.gz",
                 ),
                 "rookhold-aarch64-apple-darwin": (
                     "rookhold-aarch64-apple-darwin.tar.gz",

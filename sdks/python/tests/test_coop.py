@@ -2,15 +2,18 @@ import hashlib
 import http.client
 import io
 import json
+import os
 import unittest
 import urllib.error
 import urllib.parse
+from unittest import mock
 
 from coop import Coop, CoopError
 from rookhold import (
     Limits,
     Rookhold,
     RookholdError,
+    RookholdExecutionError,
     _SameOriginRedirect,
     isolation_satisfies,
 )
@@ -78,6 +81,126 @@ class Socket:
 
 
 class CoopTests(unittest.TestCase):
+    def test_from_env_uses_rookhold_names_and_rejects_conflicts(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ROOKHOLD_BASE_URL": "https://rookhold.test",
+                "ROOKHOLD_API_KEY": "secret",
+            },
+            clear=True,
+        ):
+            client = Rookhold.from_env(opener=QueueOpener())
+        self.assertEqual(client.base_url, "https://rookhold.test")
+        self.assertEqual(client.api_key, "secret")
+
+        with mock.patch.dict(
+            os.environ,
+            {"ROOKHOLD_API_KEY": "new", "COOP_API_KEY": "old"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "conflicts"):
+                Rookhold.from_env(opener=QueueOpener())
+
+    def test_run_returns_normalized_receipt_first_result(self):
+        opener = QueueOpener(
+            Response(
+                {
+                    "job_id": "job-run",
+                    "status": "queued",
+                    "stream_url": "/s",
+                    "replay_url": "/r",
+                },
+                status=201,
+                headers={"Idempotency-Replayed": "false"},
+            ),
+            {
+                "job_id": "job-run",
+                "status": "succeeded",
+                "exit_code": 0,
+                "duration_ms": 84,
+                "stdout": "42",
+                "stderr": "",
+                "truncated": False,
+                "violations": [],
+            },
+            {
+                "job_id": "job-run",
+                "status": "succeeded",
+                "execution_policy": {"isolation_class": "gvisor-application-kernel"},
+                "receipt": {
+                    "job_id": "job-run",
+                    "outcome": "succeeded",
+                    "isolation_class": "gvisor-application-kernel",
+                },
+            },
+        )
+        result = Rookhold("https://example.test", "secret", opener=opener).run(
+            "python", "print(6 * 7)"
+        )
+        self.assertEqual(result.stdout, "42")
+        self.assertEqual(result.job_id, "job-run")
+        self.assertEqual(result.duration, 0.084)
+        self.assertEqual(result.isolation, "gvisor-application-kernel")
+        self.assertIs(result.raise_for_status(), result)
+        request = json.loads(opener.requests[0].data)
+        self.assertEqual(request["language"], "python")
+        self.assertIn("Idempotency-key", dict(opener.requests[0].headers))
+
+    def test_run_json_serializes_input_and_rejects_failed_execution(self):
+        success = QueueOpener(
+            Response(
+                {
+                    "job_id": "json-run",
+                    "status": "queued",
+                    "stream_url": "/s",
+                    "replay_url": "/r",
+                },
+                status=201,
+                headers={"Idempotency-Replayed": "false"},
+            ),
+            {
+                "job_id": "json-run",
+                "status": "succeeded",
+                "exit_code": 0,
+                "duration_ms": 1,
+                "stdout": '{"sum":6}',
+                "stderr": "",
+                "truncated": False,
+                "violations": [],
+            },
+            {
+                "job_id": "json-run",
+                "status": "succeeded",
+                "execution_policy": {"isolation_class": "none"},
+                "receipt": None,
+            },
+        )
+        result = Rookhold("https://example.test", "secret", opener=success).run_json(
+            "python", "pass", input={"numbers": [1, 2, 3]}
+        )
+        self.assertEqual(result.json_value, {"sum": 6})
+        self.assertEqual(
+            json.loads(success.requests[0].data)["stdin"],
+            '{"numbers":[1,2,3]}',
+        )
+
+        failed = result.__class__(
+            stdout="",
+            stderr="boom",
+            exit_code=1,
+            duration_ms=1,
+            job_id="failed",
+            status="failed",
+            truncated=False,
+            violations=[],
+            artifacts=[],
+            receipt=None,
+            isolation="none",
+        )
+        with self.assertRaises(RookholdExecutionError):
+            failed.raise_for_status()
+
     def test_isolation_satisfaction_matches_the_server_lattice(self):
         self.assertTrue(
             isolation_satisfies("gvisor-application-kernel", "linux-shared-kernel")
@@ -169,6 +292,23 @@ class CoopTests(unittest.TestCase):
         self.assertEqual(
             body["requirements"], {"minimum_isolation": "linux-shared-kernel"}
         )
+
+    def test_submit_serializes_bounded_files_outputs_and_runtime_pack(self):
+        opener = QueueOpener(
+            {"job_id": "j", "status": "queued", "stream_url": "/s", "replay_url": "/r"}
+        )
+        client = Rookhold("https://example.test", "secret", opener=opener)
+        client.submit(
+            "python",
+            "pass",
+            files=[{"path": "input/data.txt", "content_base64": "aGVsbG8="}],
+            outputs=["output/result.txt"],
+            runtime="python:bookworm-20260826-stdlib",
+        )
+        body = json.loads(opener.requests[0].data)
+        self.assertEqual(body["files"][0]["path"], "input/data.txt")
+        self.assertEqual(body["outputs"], ["output/result.txt"])
+        self.assertEqual(body["runtime"], "python:bookworm-20260826-stdlib")
 
     def test_submit_accepts_empty_requirements_as_the_server_default(self):
         opener = QueueOpener(

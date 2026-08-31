@@ -45,7 +45,7 @@ def toml_string(relative: str, section: str, key: str) -> str:
 
 def check_versions() -> str:
     version = toml_string("Cargo.toml", "workspace.package", "version")
-    require(version == "0.7.1", f"unexpected workspace release version: {version}")
+    require(version == "0.8.0", f"unexpected workspace release version: {version}")
 
     toolchain = toml_string("rust-toolchain.toml", "toolchain", "channel")
     rust_version = toml_string("Cargo.toml", "workspace.package", "rust-version")
@@ -163,7 +163,7 @@ def check_versions() -> str:
     )
     python_lock = read("sdks/python/uv.lock")
     locked_python_project = re.search(
-        r'\[\[package\]\]\s+name = "rookhold-sdk"\s+version = "([^"]+)"',
+        r'\[\[package\]\]\s+name = "rookhold"\s+version = "([^"]+)"',
         python_lock,
     )
     require(
@@ -263,15 +263,15 @@ def check_versions() -> str:
         "docs/sdks.md": [
             f"v{version} release",
             f"version={version}",
-            f"rookhold_sdk-{version}.tar.gz",
+            f"rookhold-{version}.tar.gz",
         ],
         "sdks/python/README.md": [
             f"v{version}",
-            f"rookhold_sdk-{version}-py3-none-any.whl",
+            f"rookhold-{version}-py3-none-any.whl",
         ],
         "sdks/typescript/README.md": [
             f"v{version}",
-            f"rookhold-sdk-{version}.tgz",
+            f"rookhold-{version}.tgz",
         ],
         ".github/ISSUE_TEMPLATE/bug_report.yml": [f"v{version} or a commit SHA"],
     }
@@ -431,8 +431,8 @@ def check_pins_and_packaging() -> int:
             'PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v',
             "import coop, coop_mcp, rookhold, rookhold_cli, rookhold_mcp",
             "coop_mcp.py",
-            "-name 'rookhold_sdk-*.whl'",
-            "-name 'rookhold_sdk-*.tar.gz'",
+            "-name 'rookhold-*.whl'",
+            "-name 'rookhold-*.tar.gz'",
         ]:
             require(
                 invariant in workflow_source,
@@ -808,7 +808,10 @@ def check_transport_guards() -> None:
 def check_contribution_contract() -> None:
     contributing = read("CONTRIBUTING.md")
     for claim in [
-        "Definition of technically done",
+        "Tier A — docs, examples, and integrations",
+        "Tier B — SDK, CLI, and public API",
+        "Tier C — executor, authentication, storage, receipts, and isolation",
+        "Tier C definition of technically done",
         "The regression proves RED",
         "Adversarial cases are considered",
         "The final exact diff is rescanned",
@@ -823,11 +826,12 @@ def check_contribution_contract() -> None:
 
     template = read(".github/PULL_REQUEST_TEMPLATE.md")
     for heading in [
+        "## Contribution tier",
         "## Declared scope",
         "## Root invariant",
         "## Reproduction and RED evidence",
         "## Adversarial coverage",
-        "## Validation on final head",
+        "## Validation",
         "## Non-goals and remaining work",
         "## Completion state",
     ]:
@@ -853,6 +857,27 @@ def check_hostile_count() -> int:
     return count
 
 
+def check_plain_user_language() -> None:
+    forbidden = "doc" + "tor"
+    surfaces = [
+        ROOT / "README.md",
+        ROOT / "PRODUCT.md",
+        ROOT / "CONTRIBUTING.md",
+        ROOT / "sdks" / "python" / "rookhold_cli.py",
+        *(ROOT / "docs").glob("**/*.md"),
+        *(ROOT / "integrations").glob("**/*"),
+        *(ROOT / "examples").glob("**/*"),
+        *(ROOT / "templates").glob("**/*"),
+    ]
+    for path in surfaces:
+        if (
+            path.is_file()
+            and path.suffix.casefold() in {".md", ".py", ".ts", ".tsx", ".json", ".yaml", ".yml"}
+            and forbidden in path.read_text(encoding="utf-8").casefold()
+        ):
+            raise AssertionError(f"user-facing language includes a forbidden term: {path}")
+
+
 def main() -> int:
     try:
         version = check_versions()
@@ -861,6 +886,7 @@ def main() -> int:
         check_documented_boundary()
         check_transport_guards()
         check_contribution_contract()
+        check_plain_user_language()
         hostile = check_hostile_count()
     except (AssertionError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"release-surface check failed: {error}", file=sys.stderr)

@@ -880,6 +880,27 @@ pub fn owner_only_dir(path: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn ensure_job_artifact_dirs(workdir: &Path) -> io::Result<()> {
+    for name in ["input", "output"] {
+        let path = workdir.join(name);
+        match std::fs::create_dir(&path) {
+            Ok(()) => owner_only_dir(&path)?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(&path)?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "job artifact path must be a real directory",
+                    ));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 /// N-1: job source files contain another tenant's code. Mode 0600 restricts
 /// them to the server account; sandboxed jobs get a sanitized staging copy
 /// instead of host-path access (see `linux_sandbox`). No-op off unix.

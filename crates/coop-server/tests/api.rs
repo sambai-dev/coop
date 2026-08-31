@@ -2885,6 +2885,123 @@ async fn result_endpoint_folds_output_into_one_response() {
 }
 
 #[tokio::test]
+async fn bounded_files_are_materialized_collected_and_hashed_in_the_receipt() {
+    if !python_available() {
+        eprintln!("skipping: no python interpreter on PATH");
+        return;
+    }
+    let app = spawn_app().await;
+    let payload = serde_json::json!({
+        "language": "python",
+        "code": "from pathlib import Path\nvalue=Path('input/data.txt').read_text()\nPath('output/result.txt').write_text(value.upper())\nprint('done')",
+        "files": [{
+            "path": "input/data.txt",
+            "content_base64": BASE64_STANDARD.encode(b"hello"),
+        }],
+        "outputs": ["output/result.txt"],
+    })
+    .to_string();
+    let (status, body) = send(
+        &app,
+        request("POST", "/v1/jobs", Some("test-key"), Some(payload)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let job_id = body["job_id"].as_str().unwrap();
+    let (status, result) = send(
+        &app,
+        request(
+            "GET",
+            &format!("/v1/jobs/{job_id}/result?wait_seconds=30"),
+            Some("test-key"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["status"], "succeeded", "{result}");
+    assert_eq!(result["artifacts"][0]["path"], "output/result.txt");
+    assert_eq!(result["artifacts"][0]["content_base64"], "SEVMTE8=");
+    assert_eq!(result["artifacts"][0]["size_bytes"], 5);
+    assert_eq!(
+        result["artifacts"][0]["sha256"],
+        "3733cd977ff8eb18b987357e22ced99f46097f31ecb239e878ae63760e83e4d5"
+    );
+    let (status, detail) = send(
+        &app,
+        request("GET", &format!("/v1/jobs/{job_id}"), Some("test-key"), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["receipt"]["input_files"][0]["path"],
+        "input/data.txt"
+    );
+    assert_eq!(
+        detail["receipt"]["artifacts"][0]["path"],
+        "output/result.txt"
+    );
+    assert!(detail["receipt"]["artifacts"][0]["content_base64"].is_null());
+}
+
+#[tokio::test]
+async fn bounded_file_paths_reject_traversal_before_acceptance() {
+    let app = spawn_app().await;
+    let payload = serde_json::json!({
+        "language": "python",
+        "code": "print('never runs')",
+        "files": [{"path": "input/../secret", "content_base64": "eA=="}],
+    })
+    .to_string();
+    let (status, body) = send(
+        &app,
+        request("POST", "/v1/jobs", Some("test-key"), Some(payload)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_input_path");
+}
+
+#[tokio::test]
+async fn missing_requested_output_cannot_leave_a_successful_job() {
+    if !python_available() {
+        eprintln!("skipping: no python interpreter on PATH");
+        return;
+    }
+    let app = spawn_app().await;
+    let payload = serde_json::json!({
+        "language": "python",
+        "code": "print('forgot the file')",
+        "outputs": ["output/result.txt"],
+    })
+    .to_string();
+    let (status, submitted) = send(
+        &app,
+        request("POST", "/v1/jobs", Some("test-key"), Some(payload)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{submitted}");
+    let job_id = submitted["job_id"].as_str().unwrap();
+    let (status, result) = send(
+        &app,
+        request(
+            "GET",
+            &format!("/v1/jobs/{job_id}/result?wait_seconds=30"),
+            Some("test-key"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["status"], "error", "{result}");
+    assert!(result["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value["rule"] == "artifact_collection_failed"));
+}
+
+#[tokio::test]
 async fn result_is_tenant_scoped_and_404_for_unknown_jobs() {
     let app = spawn_app().await;
     let job_id = submit_python(&app, "print('scoped')").await;

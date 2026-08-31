@@ -7,6 +7,11 @@
 /.coop-dev
 /.coop-runtime
 /.tmp
+/.tmp-local
+/.rookhold
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+templates/**/.next/
 node_modules/
 __pycache__/
 *.pyc

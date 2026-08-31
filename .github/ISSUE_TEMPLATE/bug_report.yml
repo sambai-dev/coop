@@ -46,7 +46,7 @@ body:
     id: version
     attributes:
       label: Rookhold version or commit
-      placeholder: v0.7.1 or a commit SHA
+      placeholder: v0.8.0 or a commit SHA
     validations:
       required: true
   - type: input

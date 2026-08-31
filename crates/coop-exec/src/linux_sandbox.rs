@@ -71,6 +71,8 @@ struct SandboxPlan {
     rootfs: PathBuf,
     mount_point: PathBuf,
     payload_dir: PathBuf,
+    input_dir: PathBuf,
+    output_dir: PathBuf,
     program: String,
     source: String,
     stdin_present: bool,
@@ -326,11 +328,14 @@ pub(crate) async fn run_observed(
             .ok_or_else(|| io::Error::other("namespace sandbox requires ROOKHOLD_ROOTFS"))?,
         &ctx.workdir,
     )?;
+    crate::ensure_job_artifact_dirs(&ctx.workdir)?;
     let helper = validate_helper(resolve_helper(ctx.helper_path.as_deref())?)?;
     let interpreter = resolve_interpreter(&ctx.language, ctx.interpreter_override.as_deref())?;
     let program = resolve_rootfs_interpreter(&rootfs, &interpreter)?;
 
     let payload_dir = ctx.workdir.join("payload");
+    let input_dir = ctx.workdir.join("input");
+    let output_dir = ctx.workdir.join("output");
     let mount_point = ctx.workdir.join("root");
     prepare_payload(&payload_dir, &ctx)?;
     fs::create_dir(&mount_point).map_err(|error| {
@@ -364,6 +369,8 @@ pub(crate) async fn run_observed(
         rootfs,
         mount_point,
         payload_dir,
+        input_dir,
+        output_dir,
         program,
         source,
         stdin_present: ctx.stdin.is_some(),
@@ -1007,7 +1014,15 @@ pub(crate) fn validate_rootfs(rootfs: &Path, workdir: &Path) -> io::Result<PathB
             "ROOKHOLD_ROOTFS and the job workdir must not overlap",
         ));
     }
-    for required in [".pivot_old", "tmp", "proc", "dev", "work"] {
+    for required in [
+        ".pivot_old",
+        "tmp",
+        "proc",
+        "dev",
+        "work",
+        "input",
+        "output",
+    ] {
         let path = rootfs.join(required);
         let required_metadata = fs::symlink_metadata(&path).map_err(|_| {
             io::Error::new(
@@ -1768,6 +1783,8 @@ fn read_plan() -> io::Result<SandboxPlan> {
         || !plan.rootfs.is_absolute()
         || !plan.mount_point.is_absolute()
         || !plan.payload_dir.is_absolute()
+        || !plan.input_dir.is_absolute()
+        || !plan.output_dir.is_absolute()
         || !plan.program.starts_with('/')
         || !plan.source.starts_with("/work/")
     {
@@ -1853,6 +1870,30 @@ fn helper_setup_namespaces_and_rootfs(plan: &SandboxPlan) -> io::Result<()> {
             | libc::MS_NOSUID
             | libc::MS_NODEV
             | libc::MS_NOEXEC,
+        None,
+    )?;
+
+    let input = plan.mount_point.join("input");
+    mount_raw(Some(&plan.input_dir), &input, None, libc::MS_BIND, None)?;
+    mount_raw(
+        Some(&plan.input_dir),
+        &input,
+        None,
+        libc::MS_BIND
+            | libc::MS_REMOUNT
+            | libc::MS_RDONLY
+            | libc::MS_NOSUID
+            | libc::MS_NODEV
+            | libc::MS_NOEXEC,
+        None,
+    )?;
+    let output = plan.mount_point.join("output");
+    mount_raw(Some(&plan.output_dir), &output, None, libc::MS_BIND, None)?;
+    mount_raw(
+        Some(&plan.output_dir),
+        &output,
+        None,
+        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
         None,
     )?;
 
@@ -2022,7 +2063,7 @@ fn workload_exec(plan: &SandboxPlan, exec_read: StdUnixStream, exec_write: StdUn
     if let Err(error) = dup2(stdin.as_raw_fd(), 0).map_err(io::Error::other) {
         fail(STAGE_STDIN, error);
     }
-    if let Err(error) = chdir("/tmp").map_err(io::Error::other) {
+    if let Err(error) = chdir("/").map_err(io::Error::other) {
         fail(STAGE_ROOTFS, error);
     }
     if let Err(error) = drop_workload_privileges() {

@@ -9,31 +9,31 @@ permissive CORS headers; a cross-origin frontend needs an explicitly
 allowlisted reverse-proxy policy, and its bearer key will be available to that
 frontend's JavaScript.
 
-Install from a source checkout (available now):
+Install from npm:
 
 ```bash
-git clone https://github.com/sambai-dev/rookhold.git
-cd rookhold/sdks/typescript
-npm ci
-npm run build
-npm pack
-# Then, from your application:
-npm install /path/to/rookhold/sdks/typescript/rookhold-sdk-0.7.1.tgz
+npm install rookhold
 ```
 
-The npm package is not published yet. After it is published, install it with:
+The common path is one call:
 
-```bash
-npm install rookhold-sdk
+```ts
+import { Rookhold } from "rookhold";
+
+const result = await Rookhold.fromEnv().run({
+  language: "python",
+  code: "print(6 * 7)",
+});
+console.log(result.raiseForStatus().stdout);
 ```
 
-The exact v0.7.1 GitHub release package is
-`rookhold-sdk-0.7.1.tgz`; follow the
+The exact v0.8.0 GitHub release package is
+`rookhold-0.8.0.tgz`; follow the
 [checksum, attestation, and installation commands](../../docs/sdks.md) rather
 than using a moving release URL.
 
 ```ts
-import { Rookhold } from "rookhold-sdk";
+import { Rookhold } from "rookhold";
 
 const client = new Rookhold("http://127.0.0.1:7300", "tenant-api-key");
 const job = await client.submit("node", "console.log(6 * 7)", {
@@ -146,5 +146,5 @@ The deprecated callback `stream(jobId, onEvent, key)` form is rejected so a
 credential cannot silently enter a URL. For a trusted v0.1 server, use the
 explicit `{ allowLegacyQueryKey: true, legacyApiKey: key }` options object.
 
-Existing imports can migrate in stages: `rookhold-sdk/coop` exports `Coop`,
+Existing imports can migrate in stages: `rookhold/coop` exports `Coop`,
 `CoopError`, and the legacy event type names as aliases of the Rookhold API.

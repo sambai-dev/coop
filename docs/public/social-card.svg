@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#fdfeff"/>
+  <rect x="0" y="0" width="1200" height="54" fill="#12171e"/>
+  <rect x="64" y="96" width="1072" height="438" fill="#12171e"/>
+  <rect x="64" y="96" width="8" height="438" fill="#1e55e6"/>
+  <path fill="#79a0ff" d="M100 125h24v30h18v-30h24v30h18v-30h24v54l-18 18v64h18v24H100v-24h18v-64l-18-18v-54Zm42 72v64h24v-64h-24Z"/>
+  <text x="238" y="182" fill="#e7ebf1" font-family="Arial, sans-serif" font-size="66" font-weight="700">Rookhold Sandbox</text>
+  <text x="100" y="356" fill="#e7ebf1" font-family="Arial, sans-serif" font-size="44">Short jobs. Hard limits.</text>
+  <text x="100" y="418" fill="#79a0ff" font-family="Consolas, monospace" font-size="44">A receipt for what happened.</text>
+  <text x="100" y="496" fill="#9da7b5" font-family="Consolas, monospace" font-size="22">python · node · bash · self-hosted</text>
+  <text x="64" y="582" fill="#5e6675" font-family="Arial, sans-serif" font-size="24">github.com/sambai-dev/rookhold</text>
+</svg>

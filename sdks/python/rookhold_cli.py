@@ -8,11 +8,15 @@ the bearer key to model-visible arguments.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import shlex
+import shutil
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, TextIO, cast
 
 from rookhold import IsolationClass, Rookhold, RookholdError, __version__
@@ -329,6 +333,47 @@ class RookholdCli:
             )
         return names
 
+    def check(self) -> Mapping[str, Any]:
+        """Test the configured service and print direct pass/warn/fail results."""
+
+        self.connect()
+        execution = self._execution()
+        languages = [
+            value
+            for value in _as_list((self.server_capabilities or {}).get("languages"))
+            if isinstance(value, str)
+        ]
+        tools = self._mcp_tool_names()
+        isolation = str(execution.get("isolation_class", "unknown"))
+        value: Dict[str, Any] = {
+            "binary": shutil.which("rookhold-cli") or sys.executable,
+            "server": self.config.base_url,
+            "tenant": (self.identity or {}).get("tenant"),
+            "languages": languages,
+            "isolation": isolation,
+            "network": execution.get("networking", "unknown"),
+            "mcp_tools": tools,
+        }
+        if self.config.json_output:
+            self._print_json(value)
+            return value
+        self._write("OK    Rookhold command found")
+        self._write(f"OK    service reachable at {self.config.base_url}")
+        self._write(f"OK    credential accepted for tenant {value['tenant']}")
+        for language in LANGUAGES:
+            available = language in languages
+            self._write(
+                f"{'OK' if available else 'WARN'}    {language} runtime "
+                f"{'available' if available else 'not available'}"
+            )
+        self._write(
+            f"{'WARN' if isolation == 'none' else 'OK'}    isolation {isolation}"
+        )
+        self._write(f"OK    MCP connection succeeded; {len(tools)} tools exposed")
+        if isolation == "none":
+            self._write("WARN  this service does not contain untrusted code")
+        return value
+
     def jobs(self, limit: int = 10) -> Mapping[str, Any]:
         page = cast(Mapping[str, Any], self.client.list(limit=limit))
         if self.config.json_output:
@@ -562,8 +607,125 @@ def _parser() -> argparse.ArgumentParser:
     cancel.add_argument("job_id")
     commands.add_parser("posture", help="show observed server posture")
     commands.add_parser("mcp", help="inspect the live rookhold-mcp tools")
+    commands.add_parser(
+        "check",
+        help="test the service, credential, runtimes, isolation, and MCP connection",
+    )
+    setup = commands.add_parser("setup", help="configure one supported MCP host")
+    setup.add_argument(
+        "host", choices=("claude-code", "hermes", "opencode", "generic-mcp")
+    )
+    setup.add_argument("--config", type=Path)
+    setup.add_argument("--yes", action="store_true")
     commands.add_parser("mcp-server", help="serve the Rookhold MCP adapter over stdio")
     return parser
+
+
+def _host_config_path(host: str) -> Path:
+    if host == "claude-code":
+        return Path.cwd() / ".mcp.json"
+    if host == "opencode":
+        return Path.cwd() / "opencode.json"
+    if host == "generic-mcp":
+        return Path.cwd() / "mcp.json"
+    return Path.home() / ".hermes" / "config.yaml"
+
+
+def _mcp_entry() -> Dict[str, Any]:
+    return {"command": "rookhold-cli", "args": ["mcp-server"]}
+
+
+def _render_json_setup(path: Path, host: str) -> str:
+    value: Dict[str, Any]
+    if path.exists():
+        try:
+            raw: Any = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"cannot safely update {path}: {exc}") from exc
+        if not isinstance(raw, dict):
+            raise ValueError(f"cannot safely update {path}: root must be an object")
+        value = cast(Dict[str, Any], raw)
+    else:
+        value = {}
+    if host == "opencode":
+        mcp = value.setdefault("mcp", {})
+        if not isinstance(mcp, dict):
+            raise ValueError(f"cannot safely update {path}: mcp must be an object")
+        mcp["rookhold"] = {
+            "type": "local",
+            "command": ["rookhold-cli", "mcp-server"],
+            "enabled": True,
+        }
+    else:
+        servers = value.setdefault("mcpServers", {})
+        if not isinstance(servers, dict):
+            raise ValueError(
+                f"cannot safely update {path}: mcpServers must be an object"
+            )
+        servers["rookhold"] = _mcp_entry()
+    return json.dumps(value, indent=2, ensure_ascii=False) + "\n"
+
+
+def _render_hermes_setup(path: Path) -> str:
+    current = path.read_text(encoding="utf-8") if path.exists() else ""
+    marker = "# Rookhold MCP connection"
+    if marker in current:
+        return current
+    entry = (
+        f"  {marker}\n"
+        + "  rookhold:\n"
+        + "    command: rookhold-cli\n"
+        + "    args: [mcp-server]\n"
+    )
+    if "mcp_servers:\n" in current:
+        return current.replace("mcp_servers:\n", "mcp_servers:\n" + entry, 1)
+    if current and not current.endswith("\n"):
+        current += "\n"
+    return current + "\nmcp_servers:\n" + entry
+
+
+def _setup_host(
+    host: str,
+    path: Optional[Path],
+    *,
+    yes: bool,
+    input_stream: TextIO,
+    output_stream: TextIO,
+) -> Path:
+    target = (path or _host_config_path(host)).expanduser().resolve()
+    previous = target.read_text(encoding="utf-8") if target.exists() else ""
+    updated = (
+        _render_hermes_setup(target)
+        if host == "hermes"
+        else _render_json_setup(target, host)
+    )
+    if updated == previous:
+        output_stream.write(f"Rookhold is already configured in {target}\n")
+        return target
+    diff = difflib.unified_diff(
+        previous.splitlines(),
+        updated.splitlines(),
+        fromfile=str(target),
+        tofile=str(target),
+        lineterm="",
+    )
+    output_stream.write("\n".join(diff) + "\n")
+    output_stream.flush()
+    if not yes:
+        output_stream.write("Write this change? [y/N] ")
+        output_stream.flush()
+        if input_stream.readline().strip().lower() not in {"y", "yes"}:
+            raise RuntimeError("setup cancelled; no file was changed")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup = target.with_name(f"{target.name}.{timestamp}.bak")
+        shutil.copy2(target, backup)
+        output_stream.write(f"Backup saved to {backup}\n")
+    target.write_text(updated, encoding="utf-8")
+    output_stream.write(f"Configured Rookhold in {target}\n")
+    output_stream.flush()
+    return target
 
 
 def _config(args: argparse.Namespace, output: TextIO) -> CliConfig:
@@ -610,6 +772,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             cli.posture()
         elif command == "mcp":
             cli.mcp_tools()
+        elif command == "check":
+            cli.check()
+        elif command == "setup":
+            _setup_host(
+                args.host,
+                args.config,
+                yes=args.yes,
+                input_stream=sys.stdin,
+                output_stream=sys.stdout,
+            )
+            cli.check()
         return 0
     except (RookholdError, RuntimeError, TimeoutError, TypeError, ValueError) as exc:
         key = getattr(locals().get("args"), "api_key", "")

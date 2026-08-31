@@ -8,15 +8,19 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Version};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
+use base64::Engine as _;
 use coop_store::{AttestationMetadata, JobCursor, JobRow, JobSummary, ListJobsQuery};
 use coop_types::{
     EffectiveJobSpec, IsolationClass, JobSpec, JobStatus, LimitEnforcement, CPU_MAX_SECONDS,
-    FILE_MAX_MB, PIDS_MAX, SUPPORTED_LANGUAGES, WALL_MAX_SECONDS,
+    FILE_MAX_MB, MAX_INPUT_BYTES, MAX_INPUT_FILES, MAX_INPUT_FILE_BYTES, MAX_OUTPUT_BYTES,
+    MAX_OUTPUT_FILES, MAX_OUTPUT_FILE_BYTES, PIDS_MAX, RUNTIME_PACKS, SUPPORTED_LANGUAGES,
+    WALL_MAX_SECONDS,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::future::Future;
 use std::sync::Arc;
@@ -172,6 +176,7 @@ pub struct CapabilitiesResponse {
     pub limits: LimitCapabilities,
     pub features: FeatureCapabilities,
     pub attestations: AttestationCapabilities,
+    pub runtime_packs: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -216,6 +221,12 @@ pub struct LimitCapabilities {
     pub output_record_bytes_max: usize,
     pub code_bytes_max: usize,
     pub stdin_bytes_max: usize,
+    pub input_files_max: usize,
+    pub input_file_bytes_max: usize,
+    pub input_bytes_max: usize,
+    pub output_files_max: usize,
+    pub output_file_bytes_max: usize,
+    pub output_bytes_max: usize,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -324,6 +335,15 @@ pub struct ResultView {
     pub truncated: bool,
     #[schema(value_type = Vec<Object>)]
     pub violations: Vec<serde_json::Value>,
+    pub artifacts: Vec<ArtifactView>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ArtifactView {
+    pub path: String,
+    pub content_base64: String,
+    pub size_bytes: usize,
+    pub sha256: String,
 }
 
 /// True when the job exists AND belongs to `tenant`. Foreign jobs are
@@ -341,10 +361,11 @@ const RESULT_DEFAULT_WAIT_SECONDS: u64 = 60;
 const RESULT_MAX_WAIT_SECONDS: u64 = 300;
 const MAX_CODE_BYTES: usize = 1_048_576;
 const MAX_STDIN_BYTES: usize = 1_048_576;
-// JSON escaping can expand each decoded byte to a six-byte `\uXXXX` sequence.
-// Keep the encoded request bounded while allowing two valid decoded 1 MiB
-// fields plus envelope overhead.
-const MAX_REQUEST_BODY_BYTES: usize = 16 * 1_048_576;
+// JSON escaping can expand code and stdin bytes to six-byte `\uXXXX`
+// sequences. Base64 adds four bytes for each three decoded input-file bytes.
+// Keep the encoded request bounded while allowing every decoded field to reach
+// its independent limit in one valid request plus envelope overhead.
+const MAX_REQUEST_BODY_BYTES: usize = 24 * 1_048_576;
 const SUBMIT_BODY_READ_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_INBOUND_STREAM_MESSAGE_BYTES: usize = 1_024;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
@@ -1344,6 +1365,106 @@ pub async fn submit(
             false,
         );
     }
+    if spec.files.len() > MAX_INPUT_FILES {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_many_input_files",
+            format!("files exceeds the {MAX_INPUT_FILES} file limit"),
+            false,
+        );
+    }
+    let mut input_paths = HashSet::with_capacity(spec.files.len());
+    let mut input_bytes = 0_usize;
+    for file in &spec.files {
+        if !coop_types::validate_artifact_path(&file.path, "input") {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input_path",
+                "input file paths must be safe relative paths under input/",
+                false,
+            );
+        }
+        if !input_paths.insert(file.path.as_str()) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "duplicate_input_path",
+                "input file paths must be unique",
+                false,
+            );
+        }
+        let decoded = match base64::engine::general_purpose::STANDARD.decode(&file.content_base64) {
+            Ok(decoded) => decoded,
+            Err(_) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_input_base64",
+                    "input file content_base64 must be valid standard base64",
+                    false,
+                )
+            }
+        };
+        if decoded.len() > MAX_INPUT_FILE_BYTES {
+            return api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "input_file_too_large",
+                format!("one input file exceeds {MAX_INPUT_FILE_BYTES} bytes"),
+                false,
+            );
+        }
+        input_bytes = input_bytes.saturating_add(decoded.len());
+        if input_bytes > MAX_INPUT_BYTES {
+            return api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "input_files_too_large",
+                format!("decoded input files exceed {MAX_INPUT_BYTES} total bytes"),
+                false,
+            );
+        }
+    }
+    if spec.outputs.len() > MAX_OUTPUT_FILES {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_many_output_files",
+            format!("outputs exceeds the {MAX_OUTPUT_FILES} file limit"),
+            false,
+        );
+    }
+    let mut output_paths = HashSet::with_capacity(spec.outputs.len());
+    for path in &spec.outputs {
+        if !coop_types::validate_artifact_path(path, "output") {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_output_path",
+                "output file paths must be safe relative paths under output/",
+                false,
+            );
+        }
+        if !output_paths.insert(path.as_str()) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "duplicate_output_path",
+                "output file paths must be unique",
+                false,
+            );
+        }
+    }
+    if !coop_types::validate_runtime_pack(&spec.language, spec.runtime.as_deref()) {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "runtime_pack_unavailable",
+            "the requested runtime pack is not available for this language",
+            false,
+        );
+    }
+    if spec.runtime.is_some() && state.execution_provider.isolation_class() == IsolationClass::None
+    {
+        return api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "runtime_pack_requires_isolation",
+            "named runtime packs require a Linux isolated execution provider",
+            false,
+        );
+    }
     if spec.limits.allow_network {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1703,6 +1824,24 @@ fn job_detail(
                     .map(serde_json::from_value::<Option<IsolationClass>>)
                     .transpose()?
                     .flatten();
+                let files = value
+                    .get("files")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .unwrap_or_else(|| requested_spec.files.clone());
+                let outputs = value
+                    .get("outputs")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .unwrap_or_else(|| requested_spec.outputs.clone());
+                let runtime = value
+                    .get("runtime")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .unwrap_or_else(|| requested_spec.runtime.clone());
                 Ok(EffectiveJobSpec {
                     language: requested_spec.language.clone(),
                     code: requested_spec.code.clone(),
@@ -1710,6 +1849,9 @@ fn job_detail(
                     limits,
                     requirements,
                     isolation_class,
+                    files,
+                    outputs,
+                    runtime,
                 })
             } else {
                 serde_json::from_value(value)
@@ -2515,6 +2657,7 @@ fn fold_result(row: &JobSummary, events: &[coop_store::EventRow]) -> ResultView 
     let mut stderr = Vec::new();
     let mut truncated = false;
     let mut violations = Vec::new();
+    let mut artifacts = Vec::new();
     for event in events {
         match event.kind.as_str() {
             "stdout" | "stderr" => {
@@ -2528,6 +2671,23 @@ fn fold_result(row: &JobSummary, events: &[coop_store::EventRow]) -> ResultView 
             }
             "truncated" => truncated = true,
             "violation" => violations.push(event.data.clone()),
+            "artifact" => {
+                if let (Some(path), Some(content_base64), Some(size_bytes), Some(sha256)) = (
+                    event.data.get("path").and_then(Value::as_str),
+                    event.data.get("content_base64").and_then(Value::as_str),
+                    event.data.get("size_bytes").and_then(Value::as_u64),
+                    event.data.get("sha256").and_then(Value::as_str),
+                ) {
+                    if let Ok(size_bytes) = usize::try_from(size_bytes) {
+                        artifacts.push(ArtifactView {
+                            path: path.to_string(),
+                            content_base64: content_base64.to_string(),
+                            size_bytes,
+                            sha256: sha256.to_string(),
+                        });
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2543,6 +2703,7 @@ fn fold_result(row: &JobSummary, events: &[coop_store::EventRow]) -> ResultView 
         stderr: stderr.join("\n"),
         truncated,
         violations,
+        artifacts,
     }
 }
 
@@ -3086,6 +3247,12 @@ pub async fn capabilities(State(state): State<AppState>) -> Response {
             output_record_bytes_max: coop_types::MAX_OUTPUT_RECORD_BYTES,
             code_bytes_max: MAX_CODE_BYTES,
             stdin_bytes_max: MAX_STDIN_BYTES,
+            input_files_max: MAX_INPUT_FILES,
+            input_file_bytes_max: MAX_INPUT_FILE_BYTES,
+            input_bytes_max: MAX_INPUT_BYTES,
+            output_files_max: MAX_OUTPUT_FILES,
+            output_file_bytes_max: MAX_OUTPUT_FILE_BYTES,
+            output_bytes_max: MAX_OUTPUT_BYTES,
         },
         features: FeatureCapabilities {
             result_wait: true,
@@ -3107,6 +3274,20 @@ pub async fn capabilities(State(state): State<AppState>) -> Response {
                 .attestations
                 .enabled()
                 .then(|| "/v1/attestation/public-key".to_string()),
+        },
+        runtime_packs: if state.execution_provider.isolation_class() == IsolationClass::None {
+            Vec::new()
+        } else {
+            RUNTIME_PACKS
+                .iter()
+                .filter(|(language, _)| {
+                    state
+                        .available_languages
+                        .iter()
+                        .any(|available| available == language)
+                })
+                .map(|(_, pack)| (*pack).to_string())
+                .collect()
         },
     })
     .into_response()

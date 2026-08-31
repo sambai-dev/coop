@@ -32,11 +32,11 @@ def payload_names(version: str) -> tuple[str, ...]:
         "rookhold-cli-aarch64-apple-darwin",
         "rookhold-cli-x86_64-pc-windows-msvc.exe",
         "rookhold-cli-x86_64-unknown-linux-gnu",
-        "rookhold-sdk-" + version + ".tgz",
+        "rookhold-" + version + ".tgz",
         "rookhold-x86_64-pc-windows-msvc.zip",
         "rookhold-x86_64-unknown-linux-musl.tar.gz",
-        "rookhold_sdk-" + version + "-py3-none-any.whl",
-        "rookhold_sdk-" + version + ".tar.gz",
+        "rookhold-" + version + "-py3-none-any.whl",
+        "rookhold-" + version + ".tar.gz",
     )
 
 
@@ -300,7 +300,7 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
                 "integrations",
             )
         )
-    if asset == "rookhold_sdk-" + version + "-py3-none-any.whl":
+    if asset == "rookhold-" + version + "-py3-none-any.whl":
         return (
             "rookhold/__init__.py",
             "rookhold/py.typed",
@@ -309,11 +309,11 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
             "coop/__init__.py",
             "coop/py.typed",
             "coop_mcp.py",
-            f"rookhold_sdk-{version}.dist-info/METADATA",
-            f"rookhold_sdk-{version}.dist-info/RECORD",
+            f"rookhold-{version}.dist-info/METADATA",
+            f"rookhold-{version}.dist-info/RECORD",
         )
-    if asset == "rookhold_sdk-" + version + ".tar.gz":
-        root = "rookhold_sdk-" + version
+    if asset == "rookhold-" + version + ".tar.gz":
+        root = "rookhold-" + version
         return tuple(
             f"{root}/{name}"
             for name in (
@@ -330,7 +330,7 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
                 "tests",
             )
         )
-    if asset == "rookhold-sdk-" + version + ".tgz":
+    if asset == "rookhold-" + version + ".tgz":
         return (
             "package/package.json",
             "package/README.md",
@@ -362,9 +362,9 @@ def write_checksums(path: Path, directory: Path, names: Iterable[str]) -> None:
 def assemble(downloads: Path, dist: Path, version: str) -> None:
     containers = {
         "rookhold-sdks": (
-            "rookhold-sdk-" + version + ".tgz",
-            "rookhold_sdk-" + version + "-py3-none-any.whl",
-            "rookhold_sdk-" + version + ".tar.gz",
+            "rookhold-" + version + ".tgz",
+            "rookhold-" + version + "-py3-none-any.whl",
+            "rookhold-" + version + ".tar.gz",
         ),
         "rookhold-aarch64-apple-darwin": (
             "rookhold-aarch64-apple-darwin.tar.gz",

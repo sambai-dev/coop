@@ -1,5 +1,6 @@
 use crate::bus::WireEvent;
 use crate::AppState;
+use base64::Engine as _;
 use coop_exec::{ExecContext, Sink, Stream};
 use coop_types::{EffectiveLimits, JobSpec, JobStatus, LimitEnforcement};
 use futures_util::FutureExt;
@@ -273,6 +274,7 @@ enum Op {
     /// pipeline. Retained hashes remain truthful, but the evidence set is not
     /// a complete representation of what the executor observed.
     EvidenceIncomplete,
+    Artifact(Value),
     Finished {
         status: &'static str,
         exit_code: Option<i32>,
@@ -898,6 +900,28 @@ async fn handle_job(
         return;
     }
 
+    if let Err(e) = prepare_job_artifacts(&workdir, &execution_spec).await {
+        tracing::error!(error = %e, "failed to prepare bounded job files");
+        let _ = op_tx
+            .send(Op::Violation(
+                "artifact_setup_failed",
+                executor_error_detail(&e),
+            ))
+            .await;
+        finish_via(
+            op_tx,
+            "error",
+            None,
+            0,
+            Some("artifact_setup_failed".to_string()),
+            None,
+            Some(state.execution_provider.not_ready_provenance()),
+        )
+        .await;
+        await_event_pump(&state, &job_id, pump).await;
+        return;
+    }
+
     if let Some(reason) = pre_execution_stop_reason(&state, &cancel_flag) {
         let _ = tokio::fs::remove_dir_all(&workdir).await;
         finish_via(
@@ -990,6 +1014,25 @@ async fn handle_job(
         let _ = op_tx.send(control).await;
     }
 
+    let artifact_collection_failed = match collect_output_artifacts(&workdir, &spec.outputs).await {
+        Ok(artifacts) => {
+            for artifact in artifacts {
+                let _ = op_tx.send(Op::Artifact(artifact)).await;
+            }
+            false
+        }
+        Err(error) => {
+            tracing::warn!(%error, job_id, "one or more requested output files were unavailable");
+            let _ = op_tx
+                .send(Op::Violation(
+                    "artifact_collection_failed",
+                    json!({"code": "requested_output_unavailable"}),
+                ))
+                .await;
+            true
+        }
+    };
+
     for (stream, dropped) in [
         (Stream::Stdout, &stdout_dropped),
         (Stream::Stderr, &stderr_dropped),
@@ -1041,6 +1084,22 @@ async fn handle_job(
         .await;
     } else {
         match result {
+            Ok(outcome)
+                if artifact_collection_failed
+                    && matches!(outcome.status, coop_types::OutcomeStatus::Succeeded) =>
+            {
+                execution_observation.finish(crate::metrics::JobOutcome::Error);
+                finish_via(
+                    op_tx,
+                    "error",
+                    outcome.exit_code,
+                    outcome.telemetry.wall_time_ms.min(i64::MAX as u64) as i64,
+                    Some("requested_output_unavailable".to_string()),
+                    Some(outcome.telemetry),
+                    Some(provenance),
+                )
+                .await;
+            }
             Ok(outcome) => {
                 let status = coop_types::JobStatus::from(outcome.status);
                 execution_observation.finish(crate::metrics::JobOutcome::classify(status.as_str()));
@@ -1291,6 +1350,243 @@ async fn wait_for_retry_or_shutdown(state: &AppState, delay: Duration) -> bool {
     }
 }
 
+async fn prepare_job_artifacts(workdir: &std::path::Path, spec: &JobSpec) -> std::io::Result<()> {
+    let workdir = workdir.to_path_buf();
+    let files = spec.files.clone();
+    let outputs = spec.outputs.clone();
+    tokio::task::spawn_blocking(move || {
+        if files.len() > coop_types::MAX_INPUT_FILES || outputs.len() > coop_types::MAX_OUTPUT_FILES
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "stored artifact count exceeds the execution limit",
+            ));
+        }
+        let input_root = workdir.join("input");
+        let output_root = workdir.join("output");
+        std::fs::create_dir(&input_root)?;
+        std::fs::create_dir(&output_root)?;
+        let mut input_directories = HashSet::new();
+        let mut total_input_bytes = 0_usize;
+        input_directories.insert(input_root.clone());
+        for file in files {
+            if !coop_types::validate_artifact_path(&file.path, "input") {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "stored input path is invalid",
+                ));
+            }
+            let relative = file.path.strip_prefix("input/").expect("validated prefix");
+            let target = input_root.join(relative);
+            let parent = target.parent().expect("input files have a parent");
+            std::fs::create_dir_all(parent)?;
+            let mut cursor = parent.to_path_buf();
+            loop {
+                input_directories.insert(cursor.clone());
+                if cursor == input_root {
+                    break;
+                }
+                cursor = cursor
+                    .parent()
+                    .ok_or_else(|| std::io::Error::other("input path escaped its root"))?
+                    .to_path_buf();
+            }
+            let max_encoded = coop_types::MAX_INPUT_FILE_BYTES.div_ceil(3) * 4;
+            if file.content_base64.len() > max_encoded {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "stored input base64 exceeds the execution limit",
+                ));
+            }
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(file.content_base64)
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "stored input base64 is invalid",
+                    )
+                })?;
+            if decoded.len() > coop_types::MAX_INPUT_FILE_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "stored input file exceeds the execution limit",
+                ));
+            }
+            total_input_bytes = total_input_bytes.saturating_add(decoded.len());
+            if total_input_bytes > coop_types::MAX_INPUT_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "stored input files exceed the total execution limit",
+                ));
+            }
+            coop_exec::write_private_file(&target, &decoded)?;
+            make_input_file_read_only(&target)?;
+        }
+        for output in outputs {
+            if !coop_types::validate_artifact_path(&output, "output") {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "stored output path is invalid",
+                ));
+            }
+            let relative = output.strip_prefix("output/").expect("validated prefix");
+            if let Some(parent) = output_root.join(relative).parent() {
+                std::fs::create_dir_all(parent)?;
+                make_output_directories_writable(&output_root, parent)?;
+            }
+        }
+        for directory in input_directories {
+            make_input_directory_traversable(&directory)?;
+        }
+        make_output_directory_writable(&output_root)?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| std::io::Error::other(format!("artifact setup task failed: {error}")))?
+}
+
+#[cfg(unix)]
+fn make_input_file_read_only(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444))
+}
+
+#[cfg(not(unix))]
+fn make_input_file_read_only(_path: &std::path::Path) -> std::io::Result<()> {
+    // Development subprocess mode is not a containment boundary. Leaving the
+    // host-user file writable avoids undeletable Windows job directories; the
+    // API and receipt report isolation none rather than claiming immutable
+    // input enforcement.
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_input_directory_traversable(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // The isolated providers additionally mount this tree read-only. Owner
+    // write permission here lets an unprivileged development server remove
+    // its workdir after a run without claiming that development mode is safe.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+}
+
+#[cfg(not(unix))]
+fn make_input_directory_traversable(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_output_directory_writable(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // The outer job directory remains 0700. Inside the isolated bind mount,
+    // the unprivileged workload needs write access without matching a host UID.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777))
+}
+
+#[cfg(not(unix))]
+fn make_output_directory_writable(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn make_output_directories_writable(
+    root: &std::path::Path,
+    leaf: &std::path::Path,
+) -> std::io::Result<()> {
+    let mut cursor = leaf.to_path_buf();
+    loop {
+        make_output_directory_writable(&cursor)?;
+        if cursor == root {
+            return Ok(());
+        }
+        cursor = cursor
+            .parent()
+            .ok_or_else(|| std::io::Error::other("output path escaped its root"))?
+            .to_path_buf();
+    }
+}
+
+async fn collect_output_artifacts(
+    workdir: &std::path::Path,
+    outputs: &[String],
+) -> std::io::Result<Vec<Value>> {
+    let workdir = workdir.to_path_buf();
+    let outputs = outputs.to_vec();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read as _;
+
+        let root = workdir.join("output");
+        let mut total = 0_usize;
+        let mut artifacts = Vec::with_capacity(outputs.len());
+        for requested in outputs {
+            if !coop_types::validate_artifact_path(&requested, "output") {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "stored output path is invalid",
+                ));
+            }
+            let relative = requested.strip_prefix("output/").expect("validated prefix");
+            let mut target = root.clone();
+            let parts = relative.split('/').collect::<Vec<_>>();
+            for (index, part) in parts.iter().enumerate() {
+                target.push(part);
+                let metadata = std::fs::symlink_metadata(&target)?;
+                if metadata.file_type().is_symlink() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "requested output traversed a symbolic link",
+                    ));
+                }
+                if index + 1 == parts.len() {
+                    if !metadata.is_file() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "requested output is not a regular file",
+                        ));
+                    }
+                } else if !metadata.is_dir() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "requested output parent is not a directory",
+                    ));
+                }
+            }
+            let metadata = std::fs::metadata(&target)?;
+            if metadata.len() > coop_types::MAX_OUTPUT_FILE_BYTES as u64 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::FileTooLarge,
+                    "one requested output exceeded its byte limit",
+                ));
+            }
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            let mut file = std::fs::File::open(&target)?;
+            file.by_ref()
+                .take((coop_types::MAX_OUTPUT_FILE_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > coop_types::MAX_OUTPUT_FILE_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::FileTooLarge,
+                    "one requested output grew beyond its byte limit",
+                ));
+            }
+            total = total.saturating_add(bytes.len());
+            if total > coop_types::MAX_OUTPUT_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::FileTooLarge,
+                    "requested outputs exceeded the total byte limit",
+                ));
+            }
+            artifacts.push(json!({
+                "path": requested,
+                "content_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                "size_bytes": bytes.len(),
+                "sha256": format!("{:x}", Sha256::digest(&bytes)),
+            }));
+        }
+        Ok(artifacts)
+    })
+    .await
+    .map_err(|error| std::io::Error::other(format!("artifact collection task failed: {error}")))?
+}
+
 /// N6: tenant-visible executor errors are reduced to a coarse, generic code.
 /// Raw io::Error text can name interpreter paths and cgroup/jobs_root
 /// topology, so it stays in server-side tracing only (see the callers).
@@ -1450,6 +1746,7 @@ struct OutputEvidence {
     stderr_seen: bool,
     truncated: bool,
     persistence_complete: bool,
+    artifacts: Vec<Value>,
 }
 
 struct TerminalEvidence<'a> {
@@ -1479,6 +1776,7 @@ impl Default for OutputEvidence {
             stderr_seen: false,
             truncated: false,
             persistence_complete: true,
+            artifacts: Vec::new(),
         }
     }
 }
@@ -1625,6 +1923,10 @@ fn stage_op(
             evidence.persistence_complete = false;
             None
         }
+        Op::Artifact(artifact) => {
+            pending.push(("artifact".to_string(), artifact));
+            None
+        }
         Op::Finished {
             status,
             exit_code,
@@ -1702,6 +2004,7 @@ fn observe_persisted_event(evidence: &mut OutputEvidence, event: &coop_store::Ev
             }
         }
         "truncated" => evidence.truncated = true,
+        "artifact" => evidence.artifacts.push(event.data.clone()),
         _ => {}
     }
 }
@@ -1798,6 +2101,36 @@ async fn try_build_receipt(
         return Ok(BuiltTerminalEvidence::default());
     };
     let requested_spec = serde_json::from_value::<JobSpec>(requested.clone()).ok();
+    let input_files = requested_spec
+        .as_ref()
+        .map(|spec| {
+            spec.files
+                .iter()
+                .filter_map(|file| {
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(&file.content_base64)
+                        .ok()?;
+                    Some(json!({
+                        "path": file.path,
+                        "size_bytes": bytes.len(),
+                        "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let output_artifacts = terminal
+        .output
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            json!({
+                "path": artifact.get("path"),
+                "size_bytes": artifact.get("size_bytes"),
+                "sha256": artifact.get("sha256"),
+            })
+        })
+        .collect::<Vec<_>>();
     let code = requested.get("code").and_then(Value::as_str).unwrap_or("");
     let stdin = requested.get("stdin").and_then(Value::as_str).unwrap_or("");
     let finished_at_ms = now_ms();
@@ -1842,6 +2175,8 @@ async fn try_build_receipt(
             },
         })),
         "output": output,
+        "input_files": input_files,
+        "artifacts": output_artifacts,
     });
     // Every execution posture member comes from the executor's observed ready
     // boundary. Configuration and a durable `running` transition are not
@@ -1878,6 +2213,9 @@ async fn try_build_receipt(
             "storage_version": 2,
             "limits": effective_limits.clone(),
             "requirements": spec.requirements.clone(),
+            "files": spec.files.clone(),
+            "outputs": spec.outputs.clone(),
+            "runtime": spec.runtime.clone(),
             "isolation_class": provenance
                 .bootstrap_ready
                 .then_some(provenance.isolation_class),
@@ -1901,6 +2239,7 @@ async fn try_build_receipt(
         receipt["runtime_sha256"] = json!(provenance.runtime_sha256);
         receipt["rootfs_sha256"] = json!(provenance.rootfs_sha256);
         receipt["config_sha256"] = json!(provenance.config_sha256);
+        receipt["runtime_pack"] = json!(spec.runtime);
         receipt["policy_sha256"] = json!(format!("{:x}", Sha256::digest(&policy_bytes)));
     }
     Ok(BuiltTerminalEvidence {
@@ -2336,6 +2675,9 @@ mod admission_tests {
             stdin: None,
             limits: coop_types::Limits::default(),
             requirements: coop_types::JobRequirements::default(),
+            files: Vec::new(),
+            outputs: Vec::new(),
+            runtime: None,
         };
         state
             .store
@@ -2477,6 +2819,9 @@ mod admission_tests {
             stdin: None,
             limits: coop_types::Limits::default(),
             requirements: coop_types::JobRequirements::default(),
+            files: Vec::new(),
+            outputs: Vec::new(),
+            runtime: None,
         };
         state
             .store

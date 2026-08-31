@@ -15,6 +15,26 @@ test("legacy Coop exports alias the Rookhold client", () => {
   assert.equal(CoopError, RookholdError);
 });
 
+test("fromEnv uses plain Rookhold variables and rejects conflicting aliases", () => {
+  const client = Rookhold.fromEnv({
+    env: {
+      ROOKHOLD_BASE_URL: "https://rookhold.test",
+      ROOKHOLD_API_KEY: "secret",
+    },
+    fetch: async () => response({}),
+  });
+  assert.equal(client.baseUrl, "https://rookhold.test");
+  assert.equal(client.apiKey, "secret");
+  assert.throws(
+    () =>
+      Rookhold.fromEnv({
+        env: { ROOKHOLD_API_KEY: "new", COOP_API_KEY: "old" },
+        fetch: async () => response({}),
+      }),
+    /conflicts/,
+  );
+});
+
 function response(value, status = 200, headers = {}) {
   return new Response(value === undefined ? null : JSON.stringify(value), {
     status,
@@ -84,6 +104,78 @@ test("submit sends one correctly nested limits object", async () => {
   });
 });
 
+test("run submits once and returns a receipt-first normalized result", async () => {
+  const transport = queuedFetch(
+    response(
+      { job_id: "run-job", status: "queued", stream_url: "/s", replay_url: "/r" },
+      201,
+      { "Idempotency-Replayed": "false" },
+    ),
+    response({
+      job_id: "run-job",
+      status: "succeeded",
+      exit_code: 0,
+      duration_ms: 84,
+      stdout: "42",
+      stderr: "",
+      truncated: false,
+      violations: [],
+    }),
+    response({
+      job_id: "run-job",
+      status: "succeeded",
+      execution_policy: { isolation_class: "gvisor-application-kernel" },
+      receipt: {
+        job_id: "run-job",
+        outcome: "succeeded",
+        isolation_class: "gvisor-application-kernel",
+      },
+    }),
+  );
+  const client = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
+  const result = await client.run({ language: "python", code: "print(6 * 7)" });
+  assert.equal(result.stdout, "42");
+  assert.equal(result.jobId, "run-job");
+  assert.equal(result.duration, 0.084);
+  assert.equal(result.isolation, "gvisor-application-kernel");
+  assert.equal(result.raiseForStatus(), result);
+  assert.match(transport.calls[0].init.headers["Idempotency-Key"], /^[!-~]{1,128}$/);
+});
+
+test("runJson serializes stdin and parses stdout", async () => {
+  const transport = queuedFetch(
+    response(
+      { job_id: "json-job", status: "queued", stream_url: "/s", replay_url: "/r" },
+      201,
+      { "Idempotency-Replayed": "false" },
+    ),
+    response({
+      job_id: "json-job",
+      status: "succeeded",
+      exit_code: 0,
+      duration_ms: 1,
+      stdout: '{"sum":6}',
+      stderr: "",
+      truncated: false,
+      violations: [],
+    }),
+    response({
+      job_id: "json-job",
+      status: "succeeded",
+      execution_policy: { isolation_class: "none" },
+      receipt: null,
+    }),
+  );
+  const client = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
+  const result = await client.runJson({
+    language: "python",
+    code: "pass",
+    input: { numbers: [1, 2, 3] },
+  });
+  assert.deepEqual(result.jsonValue, { sum: 6 });
+  assert.equal(JSON.parse(transport.calls[0].init.body).stdin, '{"numbers":[1,2,3]}');
+});
+
 test("submit sends a typed minimum-isolation requirement", async () => {
   const transport = queuedFetch(
     response({ job_id: "j", status: "queued", stream_url: "/s", replay_url: "/r" }, 201),
@@ -95,6 +187,22 @@ test("submit sends a typed minimum-isolation requirement", async () => {
   assert.deepEqual(JSON.parse(transport.calls[0].init.body).requirements, {
     minimum_isolation: "linux-shared-kernel",
   });
+});
+
+test("submit sends bounded files, requested outputs, and a runtime pack", async () => {
+  const transport = queuedFetch(
+    response({ job_id: "j", status: "queued", stream_url: "/s", replay_url: "/r" }, 201),
+  );
+  const client = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
+  await client.submit("python", "pass", {
+    files: [{ path: "input/data.txt", content_base64: "aGVsbG8=" }],
+    outputs: ["output/result.txt"],
+    runtime: "python:bookworm-20260826-stdlib",
+  });
+  const body = JSON.parse(transport.calls[0].init.body);
+  assert.equal(body.files[0].path, "input/data.txt");
+  assert.deepEqual(body.outputs, ["output/result.txt"]);
+  assert.equal(body.runtime, "python:bookworm-20260826-stdlib");
 });
 
 test("isolation satisfaction matches the server's branched ordering", () => {
@@ -494,7 +602,7 @@ test("whoami and capabilities expose the current discovery contract", async () =
       expires_at_ms: null,
     }),
     response({
-      version: "0.7.1",
+      version: "0.8.0",
       languages: ["python"],
       execution: {
         backend: "gvisor",

@@ -19,7 +19,7 @@ A gVisor job is expected to fail closed unless all of these are true:
 
 1. `runsc` is an absolute, non-writable executable matching the reviewed version and SHA-256.
 2. the private rootfs and its content-complete manifest validate before workload creation; the OCI root is read-only;
-3. each job receives a unique runtime ID, OCI bundle, payload directory, cgroup, private `/tmp`/`/var/tmp`, and non-root uid/gid;
+3. each job receives a unique runtime ID, OCI bundle, payload directory, cgroup, private `/tmp`/`/var/tmp`, read-only `/input`, writable bounded `/output`, and non-root uid/gid;
 4. the OCI configuration drops capabilities, sets `noNewPrivileges`, denies networking, applies rlimits/cgroup controls, and binds its canonical SHA-256 into provenance;
 5. the dedicated `rookhold-oci-init` confirms `/.coop-rootfs.manifest`, `/proc/gvisor/kernel_is_gvisor`, and Rookhold's marker before launching user code;
 6. a nonce-bound pass-fd ready frame is observed before any gVisor isolation class or effective control is reported;
@@ -40,7 +40,7 @@ A production namespace job is expected to fail closed unless all of these are tr
 4. The job receives its own mount, PID, network, IPC, and UTS namespaces.
 5. The process that follows PID-namespace creation becomes namespace PID 1 and reaps descendants.
 6. The rootfs is pivoted before the interpreter runs; the old root is detached.
-7. `/proc`, temporary storage, stdin, and source staging are job-private.
+7. `/proc`, temporary storage, stdin, source staging, read-only inputs, and the bounded output mount are job-private.
 8. cgroup memory, process, CPU, and cleanup controls are installed before execution.
 9. supplementary groups are cleared and uid/gid dropping is checked.
 10. `no_new_privs` and the x86_64 seccomp policy are applied.
@@ -51,7 +51,14 @@ The authenticated `/v1/status` response and startup logs expose the selected bac
 
 ## Filesystem model
 
-The private rootfs contains only the interpreters and libraries intended for jobs. It has an empty `/.pivot_old` plus `/proc`, `/dev`, `/tmp`, `/tmp/home`, and `/work` mount points; bootstrap replaces the mutable paths with job-private mounts. The Docker image builds this tree at `/opt/rookhold/rootfs`; source deployments must create an equivalent tree and set `ROOKHOLD_ROOTFS` explicitly.
+The private rootfs contains only the interpreters and libraries intended for jobs. It has an empty `/.pivot_old` plus `/proc`, `/dev`, `/tmp`, `/tmp/home`, `/work`, `/input`, and `/output` mount points; bootstrap replaces the mutable paths with job-private mounts. The Docker image builds this tree at `/opt/rookhold/rootfs`; source deployments must create an equivalent tree and set `ROOKHOLD_ROOTFS` explicitly.
+
+Input paths must be relative under `input/`; isolated providers bind that tree
+read-only. Requested result paths must be relative under `output/`. Rookhold
+collects only exact requested regular files, rejects symlink traversal, checks
+per-file and total byte ceilings before retaining bytes, and records SHA-256 in
+the receipt. Development subprocess mode is same-trust and does not claim
+immutable input enforcement.
 
 Do not put secrets, the Rookhold database, host sockets, cloud credentials, SSH material, or a Docker socket in the rootfs. Do not bind the server data volume into it. Interpreter overrides must resolve to a path present inside the rootfs.
 
