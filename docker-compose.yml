@@ -13,7 +13,10 @@ services:
       - "127.0.0.1:7300:7300"
     environment:
       ROOKHOLD_ENV: production
-      ROOKHOLD_API_KEYS: "${ROOKHOLD_API_KEYS:-${COOP_API_KEYS:?Set ROOKHOLD_API_KEYS (or legacy COOP_API_KEYS) in .env}}"
+      # Compose eagerly evaluates nested required-variable expressions on some
+      # platforms. Pass either name through and let Rookhold's production
+      # config reject an empty result consistently.
+      ROOKHOLD_API_KEYS: "${ROOKHOLD_API_KEYS:-${COOP_API_KEYS:-}}"
       ROOKHOLD_METRICS_TOKEN: "${ROOKHOLD_METRICS_TOKEN:-${COOP_METRICS_TOKEN:-}}"
       ROOKHOLD_SANDBOX: "${ROOKHOLD_SANDBOX:-${COOP_SANDBOX:-gvisor}}"
       ROOKHOLD_ROOTFS: /opt/rookhold/rootfs

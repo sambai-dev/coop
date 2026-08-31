@@ -685,8 +685,8 @@ def check_pins_and_packaging() -> int:
     compose = read("docker-compose.yml")
     require("127.0.0.1:7300:7300" in compose, "Compose must publish Rookhold on loopback only")
     require(
-        "COOP_API_KEYS:?Set ROOKHOLD_API_KEYS" in compose,
-        "Compose must require either the primary or legacy API-key variable",
+        'ROOKHOLD_API_KEYS: "${ROOKHOLD_API_KEYS:-${COOP_API_KEYS:-}}"' in compose,
+        "Compose must pass through the primary API key with a legacy fallback",
     )
     for contract in [
         'ROOKHOLD_SANDBOX: "${ROOKHOLD_SANDBOX:-${COOP_SANDBOX:-gvisor}}"',
