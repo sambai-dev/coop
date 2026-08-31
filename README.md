@@ -2,62 +2,142 @@
 
 # Coop
 
-### The self-hosted execution boundary for AI agents
+### Give your AI agent a safer place to run code
 
-Run short Python, Node.js, and Bash jobs behind independently enforced policy,
-bounded output, and signed evidence.
+Coop runs short Python, Node.js, and Bash jobs in a separate service, applies
+the limits you choose, and gives you a clear record of what happened.
 
 [![CI](https://github.com/sambai-dev/coop/actions/workflows/ci.yml/badge.svg)](https://github.com/sambai-dev/coop/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/sambai-dev/coop)](https://github.com/sambai-dev/coop/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust 1.98+](https://img.shields.io/badge/Rust-1.98%2B-000000?logo=rust)](Cargo.toml)
+[![No Rust required](https://img.shields.io/badge/quick_start-no_Rust_required-198754.svg)](#try-coop-in-five-minutes)
 
-[Quick start](#try-it-locally-trusted-code) ·
-[Why Coop](#why-coop) ·
+[Try it](#try-coop-in-five-minutes) ·
+[How it works](#what-coop-does) ·
 [Agent integrations](#agent-and-harness-integration) ·
 [Production](#production-on-a-dedicated-linux-x86_64-vm) ·
-[Security boundary](docs/security-boundary.md) ·
 [Documentation](#documentation)
 
 </div>
 
 ![Coop's Chalk-and-Carbon execution desk showing the docked composer, chronological transcript, and contextual result record](docs/assets/console-v0.5.png)
 
-Coop authenticates each caller, clamps every requested limit, executes one
-short job, bounds its output, and records what actually happened. It is the
-execution layer—not an LLM, agent framework, or general-purpose development
-environment.
+## What Coop does
 
-## Why Coop
+Your agent—or any application—sends Coop a short job. Coop then:
 
-| Submit | Contain | Observe | Prove |
-|---|---|---|---|
-| One authenticated API and small SDKs | Per-job gVisor OCI isolation in the guarded production profile | Reconnectable output, cancellation, and durable event history | Hash-chained receipts plus signed DSSE/in-toto evidence |
-| Python, Node.js, or Bash | Server-clamped CPU, memory, process, file, and wall-time limits | Requested policy stays distinct from effective posture | Exact result artifacts and an offline verifier ship with every release |
+1. checks who is asking and what they are allowed to do;
+2. applies server-controlled time and resource limits;
+3. runs the job using the configured execution boundary;
+4. streams the output into the operator console; and
+5. keeps a result and evidence record you can inspect later.
 
-Most agent sandboxes protect a development workspace. Coop adds a separately
-operated API boundary for short, risky, or user-supplied execution—without
-asking the model to hold credentials or decide its own isolation policy.
+You do **not** need to understand Rust or the Coop source code to use the
+prebuilt app. You only need a supported computer, a runtime such as Python,
+and a browser.
 
-### Start here
+## Try Coop in five minutes
 
-| If you want to… | Go to… |
+This path uses a prebuilt app. You do not need Rust, a source checkout, or an
+understanding of Coop's internals.
+
+> [!WARNING]
+> This quick start is an **unisolated local demo for code you trust**. Keep it on
+> `127.0.0.1`; do not expose it to a network or use it for hostile code.
+
+### 1. Download the app
+
+Open the [v0.5.0 release](https://github.com/sambai-dev/coop/releases/tag/v0.5.0),
+then choose the archive for your computer:
+
+| Your computer | Download |
 |---|---|
-| understand what Coop protects—and what it does not | [The problem Coop solves](#the-problem-coop-solves) and [the security boundary](docs/security-boundary.md) |
-| run the trusted local loop | [Try it locally](#try-it-locally-trusted-code) |
-| connect Hermes, OpenClaw, Codex, or another MCP host | [Agent and harness integration](#agent-and-harness-integration) |
-| deploy the guarded Linux x86_64 profile | [Production on a dedicated VM](#production-on-a-dedicated-linux-x86_64-vm) |
-| verify releases, receipts, and attestations | [SDK release verification](docs/sdks.md) and [operations](docs/operations.md) |
+| Windows, 64-bit | [`coop-x86_64-pc-windows-msvc.zip`](https://github.com/sambai-dev/coop/releases/download/v0.5.0/coop-x86_64-pc-windows-msvc.zip) |
+| Mac with Apple silicon | [`coop-aarch64-apple-darwin.tar.gz`](https://github.com/sambai-dev/coop/releases/download/v0.5.0/coop-aarch64-apple-darwin.tar.gz) |
+| Linux x86_64 | [`coop-x86_64-unknown-linux-musl.tar.gz`](https://github.com/sambai-dev/coop/releases/download/v0.5.0/coop-x86_64-unknown-linux-musl.tar.gz) |
+
+Extract the archive. Install Python if you want to run the included Python
+example; Coop automatically shows only the runtimes that work on your machine.
+
+### 2. Start Coop
+
+Open a terminal in the extracted folder and run one of these commands.
+
+Windows PowerShell:
+
+```powershell
+$env:COOP_SANDBOX = "off"
+$env:COOP_JOBS_ROOT = Join-Path (Get-Location) ".coop-dev\jobs"
+.\coop.exe
+```
+
+macOS or Linux:
+
+```bash
+chmod +x coop coop-verify
+COOP_SANDBOX=off COOP_JOBS_ROOT="$PWD/.coop-dev/jobs" ./coop
+```
+
+Leave that terminal open. Coop is now running only on your computer.
+
+### 3. Use the console
+
+1. Open <http://127.0.0.1:7300>.
+2. Enter `coop-dev-key` in **API key**, then select **Apply**.
+3. Keep the included example or paste a short trusted script.
+4. Select **Queue run**.
+5. Watch the transcript, then open **Result & record**.
+
+The red `off · none` label is expected in this demo. It tells you honestly that
+the local process is **not sandboxed**.
+
+### Console guide
+
+| Area | What it is for |
+|---|---|
+| **Compose** | Choose a language, paste code, and set simple limits. |
+| **History** | Reopen earlier jobs and see whether they succeeded. |
+| **Transcript** | Follow accepted policy, execution, output, completion, and proof in order. |
+| **Result & record** | Inspect the final outcome and download available evidence. |
+| **Runtime label** | See the isolation Coop actually observed—not just what was requested. |
+
+## Connect an AI agent
+
+Coop works with Hermes, OpenClaw, Codex, and other MCP-compatible hosts through
+the included `coop-mcp` adapter.
+
+1. Start Coop using the demo above or the production deployment.
+2. Install the verified Python wheel from the same release.
+3. Copy the configuration for your agent and restart it.
+
+Use the copy-ready guides for [Hermes](integrations/hermes/config.snippet.yaml),
+[OpenClaw](integrations/openclaw/openclaw.snippet.json5), or a
+[generic MCP host](integrations/README.md#generic-mcp-host). The detailed,
+fail-closed installation path is in [Agent and harness integration](#agent-and-harness-integration).
+
+## Is Coop right for my task?
+
+| Use Coop for | Keep using your agent's normal workspace for |
+|---|---|
+| short generated or user-supplied scripts | editing a repository |
+| stateless transforms, checks, and evaluators | persistent files and package installation |
+| work that needs limits, cancellation, or an evidence record | browsers, terminals, ports, and long-running services |
+| execution that must cross a separately operated API boundary | trusted work already isolated well enough by the agent |
+
+Using both is normal. Your agent decides what work is needed; Coop independently
+decides whether and how a submitted job may run.
+
+## Before you run untrusted code
+
+The quick start above is intentionally not a sandbox. For mutually untrusted
+jobs, use the guarded production profile on a dedicated Linux x86_64 VM and
+complete every deployment check.
 
 > [!IMPORTANT]
-> **Security boundary:** The guarded Linux x86_64 deployment creates a separate
-> gVisor OCI workload for every job, with a pinned `runsc`, immutable
-> private-rootfs manifest, cgroup v2 limits, and denied networking. The outer
-> Coop service is still privileged and belongs on a dedicated VM. The namespace
-> backend remains a shared-kernel fallback; macOS, Windows, and other Linux architectures
-> run only the same-trust subprocess backend. Read
-> [the security boundary](docs/security-boundary.md) before accepting untrusted
-> jobs.
+> The `gVisor` production profile is Linux x86_64-only. macOS, Windows, and other Linux architectures can run only the same-trust subprocess backend. The outer
+> Coop service is privileged even when each job uses gVisor, so it belongs on a
+> dedicated VM. Read [the security boundary](docs/security-boundary.md) before
+> accepting untrusted jobs.
 
 > [!NOTE]
 > **Current release:** [v0.5.0](https://github.com/sambai-dev/coop/releases/tag/v0.5.0).
@@ -66,41 +146,27 @@ asking the model to hold credentials or decide its own isolation policy.
 > verifier inside each platform archive. Older release lines are unsupported
 > for new deployments.
 
-| Question | Short answer |
-|---|---|
-| Do I need an LLM? | **No.** Any application can call Coop through HTTP or an SDK. An agent harness needs an LLM only for its own reasoning. |
-| Can I use Hermes or OpenClaw? | **Yes.** Install `coop-mcp` and use the included configuration snippet. The same adapter works with other MCP hosts. |
-| Does Coop replace the harness sandbox? | **No.** Keep persistent repository work in the harness; send short, risky, or user-supplied jobs to Coop. |
-| Why add another service? | It separates generated code from the agent process and gives operators authentication, limits, cancellation, bounded output, and a durable receipt. |
+## Why Coop exists
+
+Most agent sandboxes protect a development workspace. Coop adds a separately
+operated execution boundary for short, risky, or user-supplied jobs without
+letting the model hold the Coop key or choose its own server, tenant, language
+allowlist, or required isolation posture.
 
 ```text
-user → LLM → Hermes / OpenClaw / app → coop-mcp or SDK → Coop → job
-              orchestration layer                         policy + evidence
+you → AI agent or app → coop-mcp or SDK → Coop → short job
+       decides what      submits safely    policy + evidence
 ```
 
-The LLM chooses *what* to run. The harness decides *when* to call the tool.
-Coop decides *whether and how* the job may run. The model never gets the Coop
-key and cannot choose the server, tenant, language allowlist, or required
-isolation posture.
+## Common questions
 
-| Use Coop | Use the harness sandbox |
+| Question | Answer |
 |---|---|
-| short generated or user-supplied snippets | trusted repository editing |
-| stateless transforms, evaluators, and validation jobs | persistent files and package installation |
-| work that needs tenant limits, cancellation, or retained evidence | browsers, PTYs, ports, and long-running services |
-| execution that must cross an independently operated API boundary | work already adequately isolated by the harness workspace |
-
-Using both is normal: keep trusted development in the harness workspace and
-route risky or stateless execution through Coop.
-
-### Operator console
-
-The embedded console shown above follows the same API as every SDK. Compose and History
-share the left dock, the selected job unfolds as a chronological execution
-transcript, and Result & record opens as contextual evidence instead of
-permanent dashboard chrome. Requested policy remains ahead of observed posture
-and portable proof. The red `off · none` runtime shown above is an intentional
-local-development warning, not a claimed production boundary.
+| Do I need Rust? | **No.** Download a prebuilt release unless you want to contribute to Coop itself. |
+| Do I need an AI model? | **No.** Any application can call Coop through HTTP or an SDK. |
+| Can I use Hermes, OpenClaw, or Codex? | **Yes.** Use the included MCP adapter and copy-ready configuration. |
+| Does Coop replace my agent's normal workspace? | **No.** Keep repository editing in the workspace and send short execution jobs to Coop. |
+| Is the five-minute demo safe for untrusted code? | **No.** It is loopback-only and unisolated. Use the guarded production deployment for mutually untrusted jobs. |
 
 ## The problem Coop solves
 
@@ -132,10 +198,11 @@ the run ended. Evidence survives failure, timeout, OOM, and cancellation.
 
 The event chain remains server-verifiable operational evidence. A signed envelope additionally proves that the configured Coop key asserted the authoritative tenant, exact receipt, and result digest. It does **not** prove deterministic re-execution, trusted hardware, remote attestation, or WORM storage; distribute or pin the public key out of band rather than trusting its API `key_id` hint.
 
-## Try it locally (trusted code)
+## Build from source (optional)
 
-This path is intentionally unisolated and is only for trusted smoke tests.
-Install Rust 1.98 and the runtimes you intend to execute, then start Coop:
+Most users should use the [prebuilt quick start](#try-coop-in-five-minutes).
+This section is only for contributors or operators who specifically want to
+compile Coop themselves. Install Rust 1.98 and the runtimes you intend to use:
 
 ```bash
 git clone https://github.com/sambai-dev/coop.git
@@ -158,22 +225,6 @@ cargo run --locked -p coop-server
 Open <http://127.0.0.1:7300>. Development mode uses the public local key
 `coop-dev-key` if `COOP_API_KEYS` is unset. The explicit `off` setting uses an
 **unisolated subprocess**. Do not expose it or submit code you do not trust.
-
-In a second terminal, download and verify the published wheel using the
-[fail-closed SDK release procedure](docs/sdks.md), then install that local
-artifact. Normally an MCP host launches `coop-mcp`; running it directly is
-only a quick startup check:
-
-```bash
-python -m pip install --no-deps ./coop_sdk-0.5.0-py3-none-any.whl
-export COOP_API_KEY=coop-dev-key
-coop-mcp
-```
-
-`coop-mcp` speaks newline-delimited JSON-RPC on stdin/stdout; normally Hermes,
-OpenClaw, Codex, or another MCP host launches it rather than a person typing
-into it. See [agent integrations](docs/integrations.md) for copy-ready Hermes,
-OpenClaw, and generic MCP configuration.
 
 At startup, development mode runs a bounded canary under the same sanitized
 environment used for jobs. `/v1/capabilities` advertises only runtimes that
