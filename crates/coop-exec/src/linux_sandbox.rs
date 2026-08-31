@@ -328,6 +328,7 @@ pub(crate) async fn run_observed(
             .ok_or_else(|| io::Error::other("namespace sandbox requires ROOKHOLD_ROOTFS"))?,
         &ctx.workdir,
     )?;
+    crate::ensure_job_artifact_dirs(&ctx.workdir)?;
     let helper = validate_helper(resolve_helper(ctx.helper_path.as_deref())?)?;
     let interpreter = resolve_interpreter(&ctx.language, ctx.interpreter_override.as_deref())?;
     let program = resolve_rootfs_interpreter(&rootfs, &interpreter)?;

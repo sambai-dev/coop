@@ -274,6 +274,7 @@ impl GvisorProvider {
         }
         let rootfs =
             validate_rootfs(&self.rootfs, &ctx.workdir).map_err(RunFailure::before_ready)?;
+        crate::ensure_job_artifact_dirs(&ctx.workdir).map_err(RunFailure::before_ready)?;
         let interpreter =
             crate::resolve_interpreter(&ctx.language, ctx.interpreter_override.as_deref())
                 .and_then(|configured| resolve_rootfs_interpreter(&rootfs, &configured))
