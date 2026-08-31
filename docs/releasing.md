@@ -4,7 +4,7 @@ A source checkout does not authorize a tag or publication. The release workflow 
 
 ## One-time repository controls
 
-Configure these controls in GitHub before setting the repository variable `COOP_RELEASE_GOVERNANCE=enabled`:
+Configure these controls in GitHub before setting the repository variable `ROOKHOLD_RELEASE_GOVERNANCE=enabled`:
 
 1. Protect `main` with a ruleset that requires changes through a pull request, blocks force pushes/deletion, and requires every CI job, including the container and hostile-containment gates. Require an approving review when the repository has a second trusted maintainer; a solo maintainer must still use a PR and may bypass only through that PR after all required checks pass.
 2. Protect `v*` tags with a ruleset that restricts tag creation, update, and deletion to designated release maintainers or automation. Do not permit a tag to be moved after publication.
@@ -26,8 +26,8 @@ The repository variable is an acknowledgement, not proof. Recheck the settings a
 7. Confirm the workspace, lockfile, SDK, Docker, Compose, changelog, and tag versions all match exactly.
 8. Re-read [AUDIT.md](../AUDIT.md), the [security boundary](security-boundary.md), and residual risks. Stop if the code enforces a weaker posture than the documents.
 9. Reproduce the schema-v3-to-v4 migration, signed restart backfill, offline
-   `coop-verify` vectors, and real pinned-runsc lifecycle without skips. Confirm
-   the archive and image contain the matching `coop-verify`/init binaries.
+   `rookhold-verify` vectors, and real pinned-runsc lifecycle without skips. Confirm
+   the archive and image contain the matching `rookhold-verify`/init binaries.
 10. Create and push the protected `vVERSION` tag from the reviewed commit. The tag push starts the release workflow; do not move or reuse the tag.
 11. When the publish job reaches the protected `release` environment, obtain its required approval only after reviewing the completed gates and intended eight-asset set.
 
@@ -38,7 +38,7 @@ No release command is run by this documentation. Do not reuse or move a publishe
 For a matching, finalized tag the workflow:
 
 1. re-runs formatting, Clippy, locked tests, RustSec, SDK packaging, Docker canaries, and hostile containment;
-2. builds only the declared platform artifacts, packages `coop-verify` on every platform, and packages both execution init helpers with Linux;
+2. builds only the declared platform artifacts, packages `rookhold-verify` on every platform, and packages both execution init helpers with Linux;
 3. downloads only four exactly named workflow artifacts, then requires exactly three platform archives and three SDK packages;
 4. safely extracts and inventories those six payloads into a fresh staging tree and produces one combined, artifact-scoped SPDX JSON SBOM;
 5. binds the SPDX predicate to all six payload digests, writes `SHA256SUMS` for the other seven public assets, and records SLSA provenance for the exact eight-asset set through OIDC;

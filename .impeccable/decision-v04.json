@@ -1,6 +1,6 @@
 {
-  "title": "Choose Coop's new operator console",
-  "question": "Three production-level directions from the current flow and Mobbin research. Choose the one Coop should become.",
+  "title": "Choose Rookhold's new operator console",
+  "question": "Three production-level directions from the current flow and Mobbin research. Choose the one Rookhold should become.",
   "options": [
     {
       "id": "assigned",
@@ -16,7 +16,7 @@
         {"from": "night-flight six-pack", "raise": "The run, lifecycle, and proof folio now form one fixed cross-check sweep."},
         {"from": "jet-age ticket wallet", "raise": "Cancelled and failed evidence remains visible instead of disappearing."},
         {"from": "mecha crisis wall", "raise": "Amber and red are reserved for genuine caution and failure."},
-        {"from": "cloud quarry", "raise": "The transition from live run to sealed proof becomes Coop's signature moment."}
+        {"from": "cloud quarry", "raise": "The transition from live run to sealed proof becomes Rookhold's signature moment."}
       ],
       "comp": ".impeccable/mocks/decision/execution-dossier.png"
     },

@@ -1,6 +1,6 @@
 # Upgrading
 
-Coop uses semantic versioning while the API is pre-1.0: minor releases may contain intentional contract changes. Read [CHANGELOG.md](../CHANGELOG.md), compare `/openapi.json`, and test SDKs before upgrading production.
+Rookhold uses semantic versioning while the API is pre-1.0: minor releases may contain intentional contract changes. Read [CHANGELOG.md](../CHANGELOG.md), compare `/openapi.json`, and test SDKs before upgrading production.
 
 ## Standard procedure
 
@@ -25,11 +25,11 @@ remain explicitly unverifiable rather than receiving fabricated hashes.
 
 v0.2 tightens the security contract and should be treated as a security-sensitive upgrade:
 
-- production namespace execution is Linux x86_64-only, requires `COOP_ROOTFS`, and never falls back to host `/`;
-- `COOP_JOBS_ROOT` must be a dedicated absolute non-symlink path;
+- production namespace execution is Linux x86_64-only, requires `ROOKHOLD_ROOTFS`, and never falls back to host `/`;
+- `ROOKHOLD_JOBS_ROOT` must be a dedicated absolute non-symlink path;
 - production rejects blank, weak, and public development API keys;
 - production cannot disable seccomp;
-- an explicit production subprocess backend requires `COOP_UNSAFE_ALLOW_NAIVE=true` and remains unsafe;
+- an explicit production subprocess backend requires `ROOKHOLD_UNSAFE_ALLOW_NAIVE=true` and remains unsafe;
 - output is byte-bounded as well as record-bounded;
 - terminal receipts and event-chain metadata are new; legacy records may be marked incomplete or unverifiable;
 - requested and effective policy are distinct: `effective_spec` uses nullable
@@ -51,14 +51,14 @@ The v0.1 release made containment and audit claims that v0.2 deliberately narrow
 
 v0.3 keeps the v0.2 HTTP API, database schema, and Linux x86_64 execution
 boundary. Stop the old service, back up SQLite and deployment configuration,
-install the matching v0.3 `coop` and `coop-sandbox-init`, rebuild the private
+install the matching v0.3 `coop` and `rookhold-sandbox-init`, rebuild the private
 rootfs/image from the v0.3 source, and run `scripts/verify-production.py`
 before restoring traffic.
 
-The Python wheel now installs `coop-mcp`; existing SDK imports remain
+The Python wheel now installs `rookhold-mcp`; existing SDK imports remain
 compatible. Agent operators should give each harness a separate tenant key,
-set `COOP_MCP_REQUIRE_ISOLATION=true`, restrict its language allowlist, and
-remove alternate execution tools when Coop must be mandatory rather than an
+set `ROOKHOLD_MCP_REQUIRE_ISOLATION=true`, restrict its language allowlist, and
+remove alternate execution tools when Rookhold must be mandatory rather than an
 optional tool.
 
 ## From v0.3.x to v0.4.0
@@ -71,23 +71,23 @@ Treat v0.4 as a security- and deployment-sensitive upgrade:
    and accounting integrity plus attestation/outbox tables and is forward-only;
    migrated terminal receipts keep their exact v0.3 bytes and checksum, while
    first-time v0.4 attestations bind the authoritative `jobs.tenant` separately;
-3. install Rust 1.98-built `coop`, `coop-verify`, `coop-sandbox-init`, and
-   `coop-oci-init` from the same release;
+3. install Rust 1.98-built `coop`, `rookhold-verify`, `rookhold-sandbox-init`, and
+   `rookhold-oci-init` from the same release;
 4. rebuild the private rootfs and manifest, provision the exact reviewed
    `runsc`, set its manifest SHA-256, and run the real gVisor gate;
 5. generate an owner-only Ed25519 key, retain its derived public key through an
-   authenticated operator channel, and set `COOP_ATTESTATION_MODE=sign` plus
-   `COOP_ATTESTATION_KEY_FILE`. Production refuses an implicit unsigned start;
+   authenticated operator channel, and set `ROOKHOLD_ATTESTATION_MODE=sign` plus
+   `ROOKHOLD_ATTESTATION_KEY_FILE`. Production refuses an implicit unsigned start;
    `off` must be explicit;
 6. migrate legacy keys to the indexed credential file/pepper or configure the
    strict JWT issuer/audience/JWKS/tenant mapping and required scopes;
 7. set tenant/global queue, memory, retained-byte, and disk-reserve budgets
    from measured host capacity;
 8. update MCP policy from the legacy boolean to the exact
-   `COOP_MCP_MINIMUM_ISOLATION` class and enable Tasks only where the host
+   `ROOKHOLD_MCP_MINIMUM_ISOLATION` class and enable Tasks only where the host
    negotiates the 2026 extension;
 9. run `scripts/verify-production.py` with the explicit public-key pin and the
-   packaged `coop-verify` binary/image, then run the real Python/MCP adapter
+   packaged `rookhold-verify` binary/image, then run the real Python/MCP adapter
    verifier and all language canaries before restoring traffic. The production
    script passes the exact signed-artifact bytes to the offline verifier and
    does not trust the server key endpoint.
@@ -105,7 +105,7 @@ exact tenant-bound rows are preserved, while unbound or malformed rows are
 removed from availability and requeued for signing from authoritative job
 state. Under explicit signing-off policy they remain unavailable and are
 waived until a later signing-enabled restart reseeds them.
-Legacy `COOP_API_KEYS` tenant IDs must now meet the same identity contract as
+Legacy `ROOKHOLD_API_KEYS` tenant IDs must now meet the same identity contract as
 indexed credentials and OIDC mappings: 1–128 safe printable ASCII characters.
 Validate legacy tenant names before restart so every accepted job can be
 encoded into the tenant-bound portable attestation profile.
@@ -131,3 +131,46 @@ evidence on the browsers used by operators. Because v0.5 does not migrate the
 database, a v0.4 binary rollback remains possible after draining v0.5, provided
 the complete v0.4 binary/image/configuration set was retained and no separately
 introduced configuration change prevents it.
+
+## From v0.5.x to v0.6.0
+
+v0.6 renames the project from Coop to Rookhold. It does not migrate the HTTP
+API, schema-v4 database, signed-evidence format, execution providers, identity
+model, or containment boundary. Existing v0.5 databases and evidence remain
+valid.
+
+Use the standard drain and backup procedure, then:
+
+1. install the v0.6 `rookhold`, `rookhold-verify`,
+   `rookhold-sandbox-init`, and `rookhold-oci-init` binaries from the same
+   release; the corresponding `coop*` executable aliases are included for a
+   staged migration;
+2. rename operator configuration from `COOP_*` to `ROOKHOLD_*`. A v0.6 process
+   falls back to the old name when the new one is absent, but rejects different
+   non-empty values under both names;
+3. install `deploy/rookhold.service` and
+   `deploy/rookhold.env.example` under Rookhold paths. For an existing systemd
+   installation, copy the database/jobs/key material into the new paths or set
+   explicit `ROOKHOLD_DB`, `ROOKHOLD_JOBS_ROOT`, and
+   `ROOKHOLD_ATTESTATION_KEY_FILE` values that point to the retained paths;
+4. for Compose, keep `.coop-runtime`, the `coop-data` volume, and the
+   `coop_attestation_key` secret name. v0.6 deliberately retains those storage
+   identities so an in-place deployment does not start with a blank database
+   or new signing key;
+5. migrate SDK imports and MCP configuration when convenient: `rookhold` and
+   `rookhold-mcp` are primary, while `coop`, `coop_mcp`, `coop-mcp`, and the old
+   `coop_*` MCP tool calls remain aliases;
+6. rebuild the image, run the production verifier and live SDK/MCP adapter,
+   confirm the Rookhold dashboard branding, then restore traffic.
+
+Do not rewrite existing evidence. `/v1`, `application/vnd.coop...` media types,
+`coop://jobs/...` subject names, the original predicate-v1 URI, event/receipt
+hashes, and `coop_*` metrics are durable compatibility identities. The GitHub
+repository rename preserves the former URL redirect, but verifiers compare the
+signed predicate URI as data and therefore continue to use the original Coop
+URI.
+
+Because there is no database migration, a drained rollback to v0.5 remains
+possible with the complete v0.5 binary/image/configuration set. New Rookhold
+paths and variables are not understood by v0.5, so retain the old deployment
+files until rollback is no longer needed.

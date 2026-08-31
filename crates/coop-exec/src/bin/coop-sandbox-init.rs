@@ -8,6 +8,6 @@ fn main() {
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
-    eprintln!("coop-sandbox-init is available only on Linux");
+    eprintln!("{} is available only on Linux", env!("CARGO_BIN_NAME"));
     std::process::exit(64);
 }

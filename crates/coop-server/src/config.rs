@@ -1,8 +1,58 @@
 use std::collections::HashMap;
 use std::path::{Component, Path};
 
-pub const DEV_DEFAULT_API_KEY: &str = "local:coop-dev-key";
-const PUBLIC_DEV_API_KEY: &str = "coop-dev-key";
+pub const DEV_DEFAULT_API_KEY: &str = "local:rookhold-dev-key";
+const LEGACY_DEV_DEFAULT_API_KEY: &str = "local:coop-dev-key";
+const PUBLIC_DEV_API_KEY: &str = "rookhold-dev-key";
+const LEGACY_PUBLIC_DEV_API_KEY: &str = "coop-dev-key";
+const PRIMARY_ENV_PREFIX: &str = "ROOKHOLD_";
+const LEGACY_ENV_PREFIX: &str = "COOP_";
+const CONFIG_ENV_KEYS: &[&str] = &[
+    "ROOKHOLD_ADDR",
+    "ROOKHOLD_API_KEYS",
+    "ROOKHOLD_ATTESTATION_KEY_FILE",
+    "ROOKHOLD_ATTESTATION_MODE",
+    "ROOKHOLD_BASH",
+    "ROOKHOLD_CREDENTIAL_PEPPER_FILE",
+    "ROOKHOLD_CREDENTIALS_FILE",
+    "ROOKHOLD_DB",
+    "ROOKHOLD_ENV",
+    "ROOKHOLD_GVISOR_GID",
+    "ROOKHOLD_GVISOR_PLATFORM",
+    "ROOKHOLD_GVISOR_ROOTFS_SHA256",
+    "ROOKHOLD_GVISOR_RUNSC",
+    "ROOKHOLD_GVISOR_UID",
+    "ROOKHOLD_JOBS_ROOT",
+    "ROOKHOLD_LOG_FORMAT",
+    "ROOKHOLD_MAX_JOB_MEM_MB",
+    "ROOKHOLD_MEMORY_BUDGET_MB",
+    "ROOKHOLD_METRICS_TOKEN",
+    "ROOKHOLD_NODE",
+    "ROOKHOLD_OIDC_ALGORITHMS",
+    "ROOKHOLD_OIDC_AUDIENCE",
+    "ROOKHOLD_OIDC_ISSUER",
+    "ROOKHOLD_OIDC_JWKS_TTL_SECONDS",
+    "ROOKHOLD_OIDC_JWKS_URL",
+    "ROOKHOLD_OIDC_MAX_TOKEN_AGE_SECONDS",
+    "ROOKHOLD_OIDC_TENANT_CLAIM",
+    "ROOKHOLD_OIDC_TENANT_MAP",
+    "ROOKHOLD_PYTHON",
+    "ROOKHOLD_RATE_PER_MIN",
+    "ROOKHOLD_RETENTION_HOURS",
+    "ROOKHOLD_ROOTFS",
+    "ROOKHOLD_SANDBOX",
+    "ROOKHOLD_SANDBOX_HELPER",
+    "ROOKHOLD_SECCOMP",
+    "ROOKHOLD_STORAGE_FREE_RESERVE_MB",
+    "ROOKHOLD_STORAGE_GLOBAL_MB",
+    "ROOKHOLD_STORAGE_TENANT_MB",
+    "ROOKHOLD_SWEEP_INTERVAL_SECS",
+    "ROOKHOLD_TENANT_CONCURRENCY",
+    "ROOKHOLD_TENANT_QUEUE_CAPACITY",
+    "ROOKHOLD_UNSAFE_ALLOW_NAIVE",
+    "ROOKHOLD_UNSAFE_ALLOW_PUBLIC_DEV",
+    "ROOKHOLD_WORKERS",
+];
 pub const DEFAULT_TENANT_QUEUE_CAPACITY: usize = 64;
 pub const DEFAULT_MAX_JOB_MEM_MB: u32 = 1024;
 pub const DEFAULT_MEMORY_BUDGET_MB: u32 = 4096;
@@ -61,7 +111,7 @@ pub struct Config {
     /// so embedded servers cannot accidentally use the caller process' env.
     pub production: bool,
     /// Conspicuous acknowledgement required for the unisolated executor in
-    /// production. This is deliberately separate from `COOP_SANDBOX=off`.
+    /// production. This is deliberately separate from `ROOKHOLD_SANDBOX=off`.
     pub unsafe_allow_naive: bool,
     pub unsafe_allow_public_dev: bool,
     pub python_bin: Option<String>,
@@ -73,7 +123,7 @@ pub struct Config {
     /// Seconds between retention sweeps.
     pub sweep_interval_secs: u64,
     /// F-005: install a seccomp-BPF syscall allowlist in sandboxed jobs
-    /// (namespace backend only). Default on; `COOP_SECCOMP=off` disables.
+    /// (namespace backend only). Default on; `ROOKHOLD_SECCOMP=off` disables.
     pub seccomp: bool,
 }
 
@@ -173,7 +223,32 @@ fn listener_is_loopback(addr: &str) -> bool {
 }
 
 fn legacy_api_key_is_weak(key: &str) -> bool {
-    key == PUBLIC_DEV_API_KEY || key.len() < 16
+    key == PUBLIC_DEV_API_KEY || key == LEGACY_PUBLIC_DEV_API_KEY || key.len() < 16
+}
+
+fn legacy_env_key(primary: &str) -> Option<String> {
+    primary
+        .strip_prefix(PRIMARY_ENV_PREFIX)
+        .map(|suffix| format!("{LEGACY_ENV_PREFIX}{suffix}"))
+}
+
+fn validate_compatible_env(getenv: &dyn Fn(&str) -> Option<String>) -> Result<(), String> {
+    for primary in CONFIG_ENV_KEYS {
+        let Some(legacy) = legacy_env_key(primary) else {
+            continue;
+        };
+        if let (Some(primary_value), Some(legacy_value)) = (getenv(primary), getenv(&legacy)) {
+            if !primary_value.is_empty()
+                && !legacy_value.is_empty()
+                && primary_value != legacy_value
+            {
+                return Err(format!(
+                    "{primary} conflicts with legacy compatibility variable {legacy}; configure only {primary} or give both the same value"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn ensure_metrics_token_is_separate(
@@ -185,7 +260,7 @@ fn ensure_metrics_token_is_separate(
         api_keys.contains_key(token) || credentials.matches_active_credential(token)
     }) {
         return Err(
-            "COOP_METRICS_TOKEN must be different from every active tenant API credential"
+            "ROOKHOLD_METRICS_TOKEN must be different from every active tenant API credential"
                 .to_string(),
         );
     }
@@ -197,13 +272,13 @@ fn ensure_metrics_token_is_separate(
 /// directory, so it must be an absolute, dedicated, non-symlink path.
 pub fn validate_jobs_root(path: &Path) -> Result<(), String> {
     if !path.is_absolute() {
-        return Err("COOP_JOBS_ROOT must be an absolute path".to_string());
+        return Err("ROOKHOLD_JOBS_ROOT must be an absolute path".to_string());
     }
     if path
         .components()
         .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
     {
-        return Err("COOP_JOBS_ROOT must not contain '.' or '..' components".to_string());
+        return Err("ROOKHOLD_JOBS_ROOT must not contain '.' or '..' components".to_string());
     }
 
     let normal_components = path
@@ -212,7 +287,7 @@ pub fn validate_jobs_root(path: &Path) -> Result<(), String> {
         .count();
     if normal_components < 2 {
         return Err(format!(
-            "COOP_JOBS_ROOT={} is too broad; choose a dedicated directory such as /var/lib/coop/jobs",
+            "ROOKHOLD_JOBS_ROOT={} is too broad; choose a dedicated directory such as /var/lib/rookhold/jobs",
             path.display()
         ));
     }
@@ -285,7 +360,7 @@ pub fn validate_jobs_root(path: &Path) -> Result<(), String> {
     ];
     if broad.contains(&normalized) {
         return Err(format!(
-            "COOP_JOBS_ROOT={} is a shared system directory; choose a dedicated child",
+            "ROOKHOLD_JOBS_ROOT={} is a shared system directory; choose a dedicated child",
             path.display()
         ));
     }
@@ -306,7 +381,7 @@ pub fn validate_jobs_root(path: &Path) -> Result<(), String> {
             .eq_ignore_ascii_case(normalized)
     }) {
         return Err(format!(
-            "COOP_JOBS_ROOT={} must not be a home, temporary, or current working directory",
+            "ROOKHOLD_JOBS_ROOT={} must not be a home, temporary, or current working directory",
             path.display()
         ));
     }
@@ -323,9 +398,12 @@ pub fn prepare_jobs_root(path: &Path, strict: bool) -> Result<(), String> {
     if std::fs::symlink_metadata(path).is_ok() {
         require_existing_jobs_root_private(path)?;
     } else {
-        let parent = path
-            .parent()
-            .ok_or_else(|| format!("COOP_JOBS_ROOT {} has no dedicated parent", path.display()))?;
+        let parent = path.parent().ok_or_else(|| {
+            format!(
+                "ROOKHOLD_JOBS_ROOT {} has no dedicated parent",
+                path.display()
+            )
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -333,7 +411,7 @@ pub fn prepare_jobs_root(path: &Path, strict: bool) -> Result<(), String> {
             parents.recursive(true).mode(0o700);
             parents.create(parent).map_err(|error| {
                 format!(
-                    "failed to create COOP_JOBS_ROOT parent {}: {error}",
+                    "failed to create ROOKHOLD_JOBS_ROOT parent {}: {error}",
                     parent.display()
                 )
             })?;
@@ -341,7 +419,7 @@ pub fn prepare_jobs_root(path: &Path, strict: bool) -> Result<(), String> {
         #[cfg(not(unix))]
         std::fs::create_dir_all(parent).map_err(|error| {
             format!(
-                "failed to create COOP_JOBS_ROOT parent {}: {error}",
+                "failed to create ROOKHOLD_JOBS_ROOT parent {}: {error}",
                 parent.display()
             )
         })?;
@@ -362,7 +440,7 @@ pub fn prepare_jobs_root(path: &Path, strict: bool) -> Result<(), String> {
         match create_result {
             Ok(()) => coop_exec::owner_only_dir(path).map_err(|error| {
                 format!(
-                    "failed to lock down newly created COOP_JOBS_ROOT {}: {error}",
+                    "failed to lock down newly created ROOKHOLD_JOBS_ROOT {}: {error}",
                     path.display()
                 )
             })?,
@@ -371,7 +449,7 @@ pub fn prepare_jobs_root(path: &Path, strict: bool) -> Result<(), String> {
             }
             Err(error) => {
                 return Err(format!(
-                    "failed to create COOP_JOBS_ROOT {}: {error}",
+                    "failed to create ROOKHOLD_JOBS_ROOT {}: {error}",
                     path.display()
                 ));
             }
@@ -387,7 +465,7 @@ fn require_existing_jobs_root_private(path: &Path) -> Result<(), String> {
         let mode = std::fs::metadata(path)
             .map_err(|error| {
                 format!(
-                    "cannot inspect existing COOP_JOBS_ROOT {}: {error}",
+                    "cannot inspect existing ROOKHOLD_JOBS_ROOT {}: {error}",
                     path.display()
                 )
             })?
@@ -396,7 +474,7 @@ fn require_existing_jobs_root_private(path: &Path) -> Result<(), String> {
             & 0o7777;
         if mode != 0o700 {
             return Err(format!(
-                "existing COOP_JOBS_ROOT {} must already have mode 0700; refusing to chmod a potentially shared directory (found {mode:04o})",
+                "existing ROOKHOLD_JOBS_ROOT {} must already have mode 0700; refusing to chmod a potentially shared directory (found {mode:04o})",
                 path.display()
             ));
         }
@@ -415,7 +493,7 @@ fn validate_existing_jobs_root_chain(path: &Path, strict: bool) -> Result<(), St
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
                 return Err(format!(
-                    "cannot inspect COOP_JOBS_ROOT ancestor {}: {error}",
+                    "cannot inspect ROOKHOLD_JOBS_ROOT ancestor {}: {error}",
                     ancestor.display()
                 ))
             }
@@ -426,13 +504,13 @@ fn validate_existing_jobs_root_chain(path: &Path, strict: bool) -> Result<(), St
                 continue;
             }
             return Err(format!(
-                "COOP_JOBS_ROOT must not traverse a symlink: {}",
+                "ROOKHOLD_JOBS_ROOT must not traverse a symlink: {}",
                 ancestor.display()
             ));
         }
         if !metadata.is_dir() {
             return Err(format!(
-                "COOP_JOBS_ROOT ancestor {} is not a directory",
+                "ROOKHOLD_JOBS_ROOT ancestor {} is not a directory",
                 ancestor.display()
             ));
         }
@@ -441,7 +519,7 @@ fn validate_existing_jobs_root_chain(path: &Path, strict: bool) -> Result<(), St
             use std::os::unix::fs::{MetadataExt, PermissionsExt};
             if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
                 return Err(format!(
-                    "COOP_JOBS_ROOT strict mode requires root-owned, non-group/world-writable components; {} is insecure",
+                    "ROOKHOLD_JOBS_ROOT strict mode requires root-owned, non-group/world-writable components; {} is insecure",
                     ancestor.display()
                 ));
             }
@@ -452,7 +530,7 @@ fn validate_existing_jobs_root_chain(path: &Path, strict: bool) -> Result<(), St
             const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
             if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                 return Err(format!(
-                    "COOP_JOBS_ROOT must not traverse a junction or reparse point: {}",
+                    "ROOKHOLD_JOBS_ROOT must not traverse a junction or reparse point: {}",
                     ancestor.display()
                 ));
             }
@@ -474,27 +552,47 @@ fn is_trusted_macos_system_alias(path: &Path) -> bool {
 }
 
 fn default_jobs_root() -> String {
-    if cfg!(target_os = "linux") {
-        "/var/lib/coop/jobs".to_string()
+    let (primary, legacy) = if cfg!(target_os = "linux") {
+        (
+            std::path::PathBuf::from("/var/lib/rookhold/jobs"),
+            std::path::PathBuf::from("/var/lib/coop/jobs"),
+        )
     } else {
-        std::env::temp_dir()
-            .join("coop-jobs")
-            .to_string_lossy()
-            .into_owned()
+        (
+            std::env::temp_dir().join("rookhold-jobs"),
+            std::env::temp_dir().join("coop-jobs"),
+        )
+    };
+    if legacy.exists() && !primary.exists() {
+        legacy.to_string_lossy().into_owned()
+    } else {
+        primary.to_string_lossy().into_owned()
+    }
+}
+
+fn default_db_path() -> String {
+    let primary = Path::new("rookhold.db");
+    let legacy = Path::new("coop.db");
+    if legacy.exists() && !primary.exists() {
+        legacy.to_string_lossy().into_owned()
+    } else {
+        primary.to_string_lossy().into_owned()
     }
 }
 
 fn default_sandbox_helper() -> Option<String> {
     let executable = std::env::current_exe().ok()?;
-    let name = if cfg!(windows) {
-        "coop-sandbox-init.exe"
+    let names = if cfg!(windows) {
+        ["rookhold-sandbox-init.exe", "coop-sandbox-init.exe"]
     } else {
-        "coop-sandbox-init"
+        ["rookhold-sandbox-init", "coop-sandbox-init"]
     };
-    let candidate = executable.parent()?.join(name);
-    candidate
-        .is_file()
-        .then(|| candidate.to_string_lossy().into_owned())
+    names.into_iter().find_map(|name| {
+        let candidate = executable.parent()?.join(name);
+        candidate
+            .is_file()
+            .then(|| candidate.to_string_lossy().into_owned())
+    })
 }
 
 fn is_production_env(value: Option<String>) -> bool {
@@ -508,11 +606,15 @@ fn is_production_env(value: Option<String>) -> bool {
     )
 }
 
-/// True when the process should be treated as a production deployment
-/// (COOP_ENV or NODE_ENV says so; the Docker image sets COOP_ENV=production).
+/// True when the process should be treated as a production deployment.
+/// `ROOKHOLD_ENV` is authoritative; `COOP_ENV` remains a v0.6 compatibility
+/// alias, and `NODE_ENV` keeps its documented compatibility behavior.
 pub fn is_production() -> bool {
-    is_production_env(std::env::var("COOP_ENV").ok())
-        || is_production_env(std::env::var("NODE_ENV").ok())
+    is_production_env(
+        std::env::var("ROOKHOLD_ENV")
+            .ok()
+            .or_else(|| std::env::var("COOP_ENV").ok()),
+    ) || is_production_env(std::env::var("NODE_ENV").ok())
 }
 
 impl Config {
@@ -525,10 +627,23 @@ impl Config {
         getenv: &dyn Fn(&str) -> Option<String>,
         production: bool,
     ) -> Result<Self, String> {
-        let credentials_path = getenv("COOP_CREDENTIALS_FILE")
+        validate_compatible_env(getenv)?;
+        let source = getenv;
+        let compatible_getenv = |key: &str| {
+            let primary = source(key);
+            if primary.as_ref().is_some_and(|value| !value.is_empty()) {
+                return primary;
+            }
+            legacy_env_key(key)
+                .and_then(|legacy| source(legacy.as_str()))
+                .or(primary)
+        };
+        let getenv = &compatible_getenv;
+
+        let credentials_path = getenv("ROOKHOLD_CREDENTIALS_FILE")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let pepper_path = getenv("COOP_CREDENTIAL_PEPPER_FILE")
+        let pepper_path = getenv("ROOKHOLD_CREDENTIAL_PEPPER_FILE")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         let credentials = match (credentials_path.as_deref(), pepper_path.as_deref()) {
@@ -539,28 +654,28 @@ impl Config {
             )?,
             (None, None) => crate::auth::CredentialStore::default(),
             _ => return Err(
-                "COOP_CREDENTIALS_FILE and COOP_CREDENTIAL_PEPPER_FILE must be configured together"
+                "ROOKHOLD_CREDENTIALS_FILE and ROOKHOLD_CREDENTIAL_PEPPER_FILE must be configured together"
                     .to_string(),
             ),
         };
 
-        let oidc_issuer = getenv("COOP_OIDC_ISSUER")
+        let oidc_issuer = getenv("ROOKHOLD_OIDC_ISSUER")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let oidc_audience = getenv("COOP_OIDC_AUDIENCE")
+        let oidc_audience = getenv("ROOKHOLD_OIDC_AUDIENCE")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let oidc_jwks = getenv("COOP_OIDC_JWKS_URL")
+        let oidc_jwks = getenv("ROOKHOLD_OIDC_JWKS_URL")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let oidc_tenant_map = getenv("COOP_OIDC_TENANT_MAP")
+        let oidc_tenant_map = getenv("ROOKHOLD_OIDC_TENANT_MAP")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         let optional_oidc_values = [
-            getenv("COOP_OIDC_TENANT_CLAIM"),
-            getenv("COOP_OIDC_ALGORITHMS"),
-            getenv("COOP_OIDC_JWKS_TTL_SECONDS"),
-            getenv("COOP_OIDC_MAX_TOKEN_AGE_SECONDS"),
+            getenv("ROOKHOLD_OIDC_TENANT_CLAIM"),
+            getenv("ROOKHOLD_OIDC_ALGORITHMS"),
+            getenv("ROOKHOLD_OIDC_JWKS_TTL_SECONDS"),
+            getenv("ROOKHOLD_OIDC_MAX_TOKEN_AGE_SECONDS"),
         ];
         let oidc_requested = oidc_issuer.is_some()
             || oidc_audience.is_some()
@@ -571,35 +686,38 @@ impl Config {
                 .any(|value| value.as_ref().is_some_and(|value| !value.trim().is_empty()));
         let jwt = if oidc_requested {
             let issuer = oidc_issuer.as_deref().ok_or_else(|| {
-                "COOP_OIDC_ISSUER is required when OIDC authentication is configured".to_string()
+                "ROOKHOLD_OIDC_ISSUER is required when OIDC authentication is configured"
+                    .to_string()
             })?;
             let audience = oidc_audience.as_deref().ok_or_else(|| {
-                "COOP_OIDC_AUDIENCE is required when OIDC authentication is configured".to_string()
+                "ROOKHOLD_OIDC_AUDIENCE is required when OIDC authentication is configured"
+                    .to_string()
             })?;
             let jwks = oidc_jwks.as_deref().ok_or_else(|| {
-                "COOP_OIDC_JWKS_URL is required when OIDC authentication is configured".to_string()
+                "ROOKHOLD_OIDC_JWKS_URL is required when OIDC authentication is configured"
+                    .to_string()
             })?;
             let tenant_map = oidc_tenant_map.as_deref().ok_or_else(|| {
-                "COOP_OIDC_TENANT_MAP is required when OIDC authentication is configured"
+                "ROOKHOLD_OIDC_TENANT_MAP is required when OIDC authentication is configured"
                     .to_string()
             })?;
             Some(crate::auth::JwtConfig::parse(
                 issuer,
                 audience,
                 jwks,
-                &env_or(getenv, "COOP_OIDC_TENANT_CLAIM", "tenant_id"),
+                &env_or(getenv, "ROOKHOLD_OIDC_TENANT_CLAIM", "tenant_id"),
                 tenant_map,
-                &env_or(getenv, "COOP_OIDC_ALGORITHMS", "RS256,ES256,EdDSA"),
+                &env_or(getenv, "ROOKHOLD_OIDC_ALGORITHMS", "RS256,ES256,EdDSA"),
                 parse_number(
                     getenv,
-                    "COOP_OIDC_JWKS_TTL_SECONDS",
+                    "ROOKHOLD_OIDC_JWKS_TTL_SECONDS",
                     "300",
                     60_u64,
                     3600_u64,
                 )?,
                 parse_number(
                     getenv,
-                    "COOP_OIDC_MAX_TOKEN_AGE_SECONDS",
+                    "ROOKHOLD_OIDC_MAX_TOKEN_AGE_SECONDS",
                     "3600",
                     60_u64,
                     86_400_u64,
@@ -610,24 +728,27 @@ impl Config {
         };
 
         let mut api_keys = HashMap::new();
-        let raw = getenv("COOP_API_KEYS").filter(|v| !v.trim().is_empty());
+        let raw = getenv("ROOKHOLD_API_KEYS").filter(|v| !v.trim().is_empty());
         let raw = match raw {
             Some(raw) => Some(raw),
             None if !credentials.is_empty() || jwt.is_some() => None,
             None if production => {
                 return Err(
-                    "configure COOP_CREDENTIALS_FILE with COOP_CREDENTIAL_PEPPER_FILE or provide \
-                     legacy COOP_API_KEYS; refusing to start production without credentials"
+                    "configure ROOKHOLD_CREDENTIALS_FILE with ROOKHOLD_CREDENTIAL_PEPPER_FILE or provide \
+                     legacy ROOKHOLD_API_KEYS; refusing to start production without credentials"
                         .to_string(),
                 );
             }
             None => {
                 tracing::warn!(
-                    "SECURITY: no COOP_API_KEYS configured — falling back to the PUBLIC development \
+                    "SECURITY: no ROOKHOLD_API_KEYS configured — falling back to the PUBLIC development \
                      default key '{DEV_DEFAULT_API_KEY}'. Anyone who can reach this server can run \
-                     code on it. Set COOP_API_KEYS before exposing coop beyond localhost."
+                     code on it. The legacy key 'coop-dev-key' is also accepted during v0.6 migration. \
+                     Set ROOKHOLD_API_KEYS before exposing Rookhold beyond localhost."
                 );
-                Some(DEV_DEFAULT_API_KEY.to_string())
+                Some(format!(
+                    "{DEV_DEFAULT_API_KEY},{LEGACY_DEV_DEFAULT_API_KEY}"
+                ))
             }
         };
         if let Some(raw) = raw {
@@ -636,23 +757,22 @@ impl Config {
                 if entry.is_empty() {
                     continue;
                 }
-                let (tenant, key) = match entry.split_once(':') {
-                    Some((tenant, key)) => (tenant.trim(), key.trim()),
-                    None if !production => ("local", entry),
-                    None => {
-                        return Err(
-                            "each production COOP_API_KEYS entry must use tenant:key syntax"
+                let (tenant, key) =
+                    match entry.split_once(':') {
+                        Some((tenant, key)) => (tenant.trim(), key.trim()),
+                        None if !production => ("local", entry),
+                        None => return Err(
+                            "each production ROOKHOLD_API_KEYS entry must use tenant:key syntax"
                                 .to_string(),
-                        )
-                    }
-                };
+                        ),
+                    };
                 if tenant.is_empty() {
-                    return Err("COOP_API_KEYS contains a blank tenant".to_string());
+                    return Err("ROOKHOLD_API_KEYS contains a blank tenant".to_string());
                 }
-                crate::auth::validate_identity("legacy COOP_API_KEYS tenant", tenant)?;
+                crate::auth::validate_identity("legacy ROOKHOLD_API_KEYS tenant", tenant)?;
                 if key.is_empty() {
                     return Err(format!(
-                        "COOP_API_KEYS contains a blank key for tenant {tenant:?}"
+                        "ROOKHOLD_API_KEYS contains a blank key for tenant {tenant:?}"
                     ));
                 }
                 if production && legacy_api_key_is_weak(key) {
@@ -664,7 +784,7 @@ impl Config {
                     .insert(key.to_string(), tenant.to_string())
                     .is_some()
                 {
-                    return Err("COOP_API_KEYS contains a duplicate key".to_string());
+                    return Err("ROOKHOLD_API_KEYS contains a duplicate key".to_string());
                 }
             }
         }
@@ -676,26 +796,26 @@ impl Config {
         }
         if production && !api_keys.is_empty() {
             tracing::warn!(
-                "SECURITY: legacy COOP_API_KEYS are enabled in production; migrate to the indexed \
-                 peppered COOP_CREDENTIALS_FILE format"
+                "SECURITY: legacy ROOKHOLD_API_KEYS are enabled in production; migrate to the indexed \
+                 peppered ROOKHOLD_CREDENTIALS_FILE format"
             );
         }
 
-        let metrics_token = getenv("COOP_METRICS_TOKEN")
+        let metrics_token = getenv("ROOKHOLD_METRICS_TOKEN")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         if metrics_token.as_ref().is_some_and(|token| token.len() < 16) {
             return Err(
-                "COOP_METRICS_TOKEN must contain at least 16 characters when configured"
+                "ROOKHOLD_METRICS_TOKEN must contain at least 16 characters when configured"
                     .to_string(),
             );
         }
         ensure_metrics_token_is_separate(metrics_token.as_deref(), &api_keys, &credentials)?;
 
-        let attestation_key_file = getenv("COOP_ATTESTATION_KEY_FILE")
+        let attestation_key_file = getenv("ROOKHOLD_ATTESTATION_KEY_FILE")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let attestation_mode = match getenv("COOP_ATTESTATION_MODE")
+        let attestation_mode = match getenv("ROOKHOLD_ATTESTATION_MODE")
             .map(|value| value.trim().to_ascii_lowercase())
             .filter(|value| !value.is_empty())
             .as_deref()
@@ -703,7 +823,7 @@ impl Config {
             None if attestation_key_file.is_some() => AttestationMode::Sign,
             None if production => {
                 return Err(
-                    "production requires COOP_ATTESTATION_KEY_FILE for signed terminal evidence; set COOP_ATTESTATION_MODE=off only as an explicit policy decision to disable signing"
+                    "production requires ROOKHOLD_ATTESTATION_KEY_FILE for signed terminal evidence; set ROOKHOLD_ATTESTATION_MODE=off only as an explicit policy decision to disable signing"
                         .to_string(),
                 )
             }
@@ -711,7 +831,7 @@ impl Config {
             Some("sign" | "signed" | "on" | "enabled") => {
                 if attestation_key_file.is_none() {
                     return Err(
-                        "COOP_ATTESTATION_MODE=sign requires COOP_ATTESTATION_KEY_FILE"
+                        "ROOKHOLD_ATTESTATION_MODE=sign requires ROOKHOLD_ATTESTATION_KEY_FILE"
                             .to_string(),
                     );
                 }
@@ -720,7 +840,7 @@ impl Config {
             Some("off" | "disabled" | "none") => {
                 if attestation_key_file.is_some() {
                     return Err(
-                        "COOP_ATTESTATION_MODE=off must not also configure COOP_ATTESTATION_KEY_FILE"
+                        "ROOKHOLD_ATTESTATION_MODE=off must not also configure ROOKHOLD_ATTESTATION_KEY_FILE"
                             .to_string(),
                     );
                 }
@@ -728,7 +848,7 @@ impl Config {
             }
             Some(_) => {
                 return Err(
-                    "COOP_ATTESTATION_MODE must be either sign or off".to_string(),
+                    "ROOKHOLD_ATTESTATION_MODE must be either sign or off".to_string(),
                 )
             }
         };
@@ -736,132 +856,150 @@ impl Config {
             if let Some(path) = attestation_key_file.as_deref() {
                 if !Path::new(path).is_absolute() {
                     return Err(
-                        "COOP_ATTESTATION_KEY_FILE must be an absolute path in production"
+                        "ROOKHOLD_ATTESTATION_KEY_FILE must be an absolute path in production"
                             .to_string(),
                     );
                 }
             }
         }
 
-        let sandbox = env_or(getenv, "COOP_SANDBOX", "auto");
-        let unsafe_allow_naive = env_true(getenv, "COOP_UNSAFE_ALLOW_NAIVE");
-        let unsafe_allow_public_dev = env_true(getenv, "COOP_UNSAFE_ALLOW_PUBLIC_DEV");
+        let sandbox = env_or(getenv, "ROOKHOLD_SANDBOX", "auto");
+        let unsafe_allow_naive = env_true(getenv, "ROOKHOLD_UNSAFE_ALLOW_NAIVE");
+        let unsafe_allow_public_dev = env_true(getenv, "ROOKHOLD_UNSAFE_ALLOW_PUBLIC_DEV");
         let seccomp = !matches!(
-            env_or(getenv, "COOP_SECCOMP", "auto")
+            env_or(getenv, "ROOKHOLD_SECCOMP", "auto")
                 .trim()
                 .to_ascii_lowercase()
                 .as_str(),
             "off" | "none" | "disabled" | "false" | "0"
         );
         if production && !seccomp {
-            return Err("COOP_SECCOMP cannot be disabled in production".to_string());
+            return Err("ROOKHOLD_SECCOMP cannot be disabled in production".to_string());
         }
 
         let tenant_queue_capacity = parse_number(
             getenv,
-            "COOP_TENANT_QUEUE_CAPACITY",
+            "ROOKHOLD_TENANT_QUEUE_CAPACITY",
             &DEFAULT_TENANT_QUEUE_CAPACITY.to_string(),
             1usize,
             crate::QUEUE_CAPACITY,
         )?;
         let max_job_mem_mb = parse_number(
             getenv,
-            "COOP_MAX_JOB_MEM_MB",
+            "ROOKHOLD_MAX_JOB_MEM_MB",
             &DEFAULT_MAX_JOB_MEM_MB.to_string(),
             16u32,
             coop_types::MEM_MAX_MB,
         )?;
         let memory_budget_mb = parse_number(
             getenv,
-            "COOP_MEMORY_BUDGET_MB",
+            "ROOKHOLD_MEMORY_BUDGET_MB",
             &DEFAULT_MEMORY_BUDGET_MB.to_string(),
             16u32,
             1_048_576u32,
         )?;
         if max_job_mem_mb > memory_budget_mb {
             return Err(format!(
-                "COOP_MAX_JOB_MEM_MB ({max_job_mem_mb}) must not exceed COOP_MEMORY_BUDGET_MB ({memory_budget_mb})"
+                "ROOKHOLD_MAX_JOB_MEM_MB ({max_job_mem_mb}) must not exceed ROOKHOLD_MEMORY_BUDGET_MB ({memory_budget_mb})"
             ));
         }
         let storage_global_mb = parse_number(
             getenv,
-            "COOP_STORAGE_GLOBAL_MB",
+            "ROOKHOLD_STORAGE_GLOBAL_MB",
             &DEFAULT_STORAGE_GLOBAL_MB.to_string(),
             128u64,
             1_048_576u64,
         )?;
         let storage_tenant_mb = parse_number(
             getenv,
-            "COOP_STORAGE_TENANT_MB",
+            "ROOKHOLD_STORAGE_TENANT_MB",
             &DEFAULT_STORAGE_TENANT_MB.to_string(),
             64u64,
             1_048_576u64,
         )?;
         if storage_tenant_mb > storage_global_mb {
             return Err(format!(
-                "COOP_STORAGE_TENANT_MB ({storage_tenant_mb}) must not exceed COOP_STORAGE_GLOBAL_MB ({storage_global_mb})"
+                "ROOKHOLD_STORAGE_TENANT_MB ({storage_tenant_mb}) must not exceed ROOKHOLD_STORAGE_GLOBAL_MB ({storage_global_mb})"
             ));
         }
         let storage_free_reserve_mb = parse_number(
             getenv,
-            "COOP_STORAGE_FREE_RESERVE_MB",
+            "ROOKHOLD_STORAGE_FREE_RESERVE_MB",
             &DEFAULT_STORAGE_FREE_RESERVE_MB.to_string(),
             0u64,
             1_048_576u64,
         )?;
 
         let config = Self {
-            addr: env_or(getenv, "COOP_ADDR", "127.0.0.1:7300"),
-            db_path: env_or(getenv, "COOP_DB", "coop.db"),
+            addr: env_or(getenv, "ROOKHOLD_ADDR", "127.0.0.1:7300"),
+            db_path: env_or(getenv, "ROOKHOLD_DB", &default_db_path()),
             api_keys,
             metrics_token,
             attestation_mode,
             attestation_key_file,
             credentials,
             jwt,
-            workers: parse_number(getenv, "COOP_WORKERS", "4", 1usize, 256usize)?,
+            workers: parse_number(getenv, "ROOKHOLD_WORKERS", "4", 1usize, 256usize)?,
             tenant_concurrency: parse_number(
                 getenv,
-                "COOP_TENANT_CONCURRENCY",
+                "ROOKHOLD_TENANT_CONCURRENCY",
                 "2",
                 1usize,
                 256usize,
             )?,
             tenant_queue_capacity,
-            rate_per_min: parse_number(getenv, "COOP_RATE_PER_MIN", "120", 1u32, 1_000_000u32)?,
+            rate_per_min: parse_number(getenv, "ROOKHOLD_RATE_PER_MIN", "120", 1u32, 1_000_000u32)?,
             max_job_mem_mb,
             memory_budget_mb,
             storage_global_mb,
             storage_tenant_mb,
             storage_free_reserve_mb,
             sandbox,
-            jobs_root: env_or(getenv, "COOP_JOBS_ROOT", &default_jobs_root()),
-            rootfs: getenv("COOP_ROOTFS")
+            jobs_root: env_or(getenv, "ROOKHOLD_JOBS_ROOT", &default_jobs_root()),
+            rootfs: getenv("ROOKHOLD_ROOTFS")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
-            sandbox_helper: getenv("COOP_SANDBOX_HELPER")
+            sandbox_helper: getenv("ROOKHOLD_SANDBOX_HELPER")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .or_else(default_sandbox_helper),
-            gvisor_runsc: getenv("COOP_GVISOR_RUNSC")
+            gvisor_runsc: getenv("ROOKHOLD_GVISOR_RUNSC")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
-            gvisor_rootfs_sha256: getenv("COOP_GVISOR_ROOTFS_SHA256")
+            gvisor_rootfs_sha256: getenv("ROOKHOLD_GVISOR_ROOTFS_SHA256")
                 .map(|value| value.trim().to_ascii_lowercase())
                 .filter(|value| !value.is_empty()),
-            gvisor_platform: env_or(getenv, "COOP_GVISOR_PLATFORM", "systrap"),
-            gvisor_uid: parse_number(getenv, "COOP_GVISOR_UID", "65534", 1u32, 4_294_967_294u32)?,
-            gvisor_gid: parse_number(getenv, "COOP_GVISOR_GID", "65534", 1u32, 4_294_967_294u32)?,
+            gvisor_platform: env_or(getenv, "ROOKHOLD_GVISOR_PLATFORM", "systrap"),
+            gvisor_uid: parse_number(
+                getenv,
+                "ROOKHOLD_GVISOR_UID",
+                "65534",
+                1u32,
+                4_294_967_294u32,
+            )?,
+            gvisor_gid: parse_number(
+                getenv,
+                "ROOKHOLD_GVISOR_GID",
+                "65534",
+                1u32,
+                4_294_967_294u32,
+            )?,
             production,
             unsafe_allow_naive,
             unsafe_allow_public_dev,
-            python_bin: getenv("COOP_PYTHON"),
-            node_bin: getenv("COOP_NODE"),
-            bash_bin: getenv("COOP_BASH"),
-            retention_hours: parse_number(getenv, "COOP_RETENTION_HOURS", "168", 0u64, 87_600u64)?,
+            python_bin: getenv("ROOKHOLD_PYTHON"),
+            node_bin: getenv("ROOKHOLD_NODE"),
+            bash_bin: getenv("ROOKHOLD_BASH"),
+            retention_hours: parse_number(
+                getenv,
+                "ROOKHOLD_RETENTION_HOURS",
+                "168",
+                0u64,
+                87_600u64,
+            )?,
             sweep_interval_secs: parse_number(
                 getenv,
-                "COOP_SWEEP_INTERVAL_SECS",
+                "ROOKHOLD_SWEEP_INTERVAL_SECS",
                 "3600",
                 60u64,
                 86_400u64,
@@ -878,7 +1016,7 @@ impl Config {
         }
         if self.api_keys.keys().any(|key| legacy_api_key_is_weak(key)) {
             return Err(
-                "a non-loopback COOP_ADDR cannot use the public development API key or a legacy API key shorter than 16 characters; configure a strong COOP_API_KEYS value or set COOP_UNSAFE_ALLOW_PUBLIC_DEV=true to acknowledge the unsafe development exposure"
+                "a non-loopback ROOKHOLD_ADDR cannot use the public development API key or a legacy API key shorter than 16 characters; configure a strong ROOKHOLD_API_KEYS value or set ROOKHOLD_UNSAFE_ALLOW_PUBLIC_DEV=true to acknowledge the unsafe development exposure"
                     .to_string(),
             );
         }
@@ -887,7 +1025,7 @@ impl Config {
             "off" | "none" | "naive"
         ) {
             return Err(
-                "a non-loopback COOP_ADDR cannot use the unisolated subprocess backend unless COOP_UNSAFE_ALLOW_PUBLIC_DEV=true is set"
+                "a non-loopback ROOKHOLD_ADDR cannot use the unisolated subprocess backend unless ROOKHOLD_UNSAFE_ALLOW_PUBLIC_DEV=true is set"
                     .to_string(),
             );
         }
@@ -912,7 +1050,7 @@ impl Config {
             && !self.unsafe_allow_public_dev
         {
             return Err(
-                "COOP_SANDBOX=auto resolved to the unisolated subprocess backend on a non-loopback listener; configure namespace isolation or set COOP_UNSAFE_ALLOW_PUBLIC_DEV=true to acknowledge the unsafe development exposure"
+                "ROOKHOLD_SANDBOX=auto resolved to the unisolated subprocess backend on a non-loopback listener; configure namespace isolation or set ROOKHOLD_UNSAFE_ALLOW_PUBLIC_DEV=true to acknowledge the unsafe development exposure"
                     .to_string(),
             );
         }
@@ -931,7 +1069,7 @@ impl Config {
             || mode == coop_exec::SandboxMode::Off
         {
             return Err(format!(
-                "listener resolved to non-loopback address {bound} with an unsafe development credential or executor; configure production keys and namespace isolation, or explicitly set COOP_UNSAFE_ALLOW_PUBLIC_DEV=true"
+                "listener resolved to non-loopback address {bound} with an unsafe development credential or executor; configure production keys and namespace isolation, or explicitly set ROOKHOLD_UNSAFE_ALLOW_PUBLIC_DEV=true"
             ));
         }
         Ok(())
@@ -1032,30 +1170,67 @@ mod tests {
     #[test]
     fn prod_mode_without_api_keys_is_rejected() {
         let err = Config::from_sources(&source(&[]), true).unwrap_err();
-        assert!(err.contains("COOP_API_KEYS"), "{err}");
+        assert!(err.contains("ROOKHOLD_API_KEYS"), "{err}");
     }
 
     #[test]
     fn empty_api_keys_value_counts_as_unset_in_prod() {
-        assert!(Config::from_sources(&source(&[("COOP_API_KEYS", "  ")]), true).is_err());
+        assert!(Config::from_sources(&source(&[("ROOKHOLD_API_KEYS", "  ")]), true).is_err());
     }
 
     #[test]
     fn dev_mode_without_api_keys_falls_back_to_dev_default() {
         let cfg = Config::from_sources(&source(&[]), false).expect("dev default applies");
         assert_eq!(
+            cfg.api_keys.get("rookhold-dev-key").map(String::as_str),
+            Some("local")
+        );
+        assert_eq!(
             cfg.api_keys.get("coop-dev-key").map(String::as_str),
             Some("local")
         );
-        assert_eq!(cfg.api_keys.len(), 1);
+        assert_eq!(cfg.api_keys.len(), 2);
+    }
+
+    #[test]
+    fn legacy_coop_environment_names_remain_compatible() {
+        let cfg = Config::from_sources(
+            &source(&[
+                ("COOP_API_KEYS", "legacy:a-long-legacy-key"),
+                ("COOP_ATTESTATION_MODE", "off"),
+                ("COOP_WORKERS", "7"),
+            ]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.api_keys.get("a-long-legacy-key").map(String::as_str),
+            Some("legacy")
+        );
+        assert_eq!(cfg.workers, 7);
+    }
+
+    #[test]
+    fn conflicting_rookhold_and_coop_environment_names_fail_closed() {
+        let error = Config::from_sources(
+            &source(&[
+                ("ROOKHOLD_API_KEYS", "new:a-long-primary-key"),
+                ("COOP_API_KEYS", "old:a-long-legacy-key"),
+            ]),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("ROOKHOLD_API_KEYS"), "{error}");
+        assert!(error.contains("COOP_API_KEYS"), "{error}");
+        assert!(!error.contains("a-long"), "{error}");
     }
 
     #[test]
     fn prod_mode_with_explicit_keys_does_not_get_dev_default() {
         let cfg = Config::from_sources(
             &source(&[
-                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
-                ("COOP_ATTESTATION_MODE", "off"),
+                ("ROOKHOLD_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("ROOKHOLD_ATTESTATION_MODE", "off"),
             ]),
             true,
         )
@@ -1071,15 +1246,15 @@ mod tests {
 
     #[test]
     fn production_attestation_policy_is_fail_closed_and_off_is_explicit() {
-        let base = [("COOP_API_KEYS", "acme:correct-horse-battery-staple")];
+        let base = [("ROOKHOLD_API_KEYS", "acme:correct-horse-battery-staple")];
         let error = Config::from_sources(&source(&base), true).unwrap_err();
-        assert!(error.contains("COOP_ATTESTATION_KEY_FILE"), "{error}");
-        assert!(error.contains("COOP_ATTESTATION_MODE=off"), "{error}");
+        assert!(error.contains("ROOKHOLD_ATTESTATION_KEY_FILE"), "{error}");
+        assert!(error.contains("ROOKHOLD_ATTESTATION_MODE=off"), "{error}");
 
         let off = Config::from_sources(
             &source(&[
-                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
-                ("COOP_ATTESTATION_MODE", "off"),
+                ("ROOKHOLD_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("ROOKHOLD_ATTESTATION_MODE", "off"),
             ]),
             true,
         )
@@ -1089,19 +1264,19 @@ mod tests {
 
         let missing_key = Config::from_sources(
             &source(&[
-                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
-                ("COOP_ATTESTATION_MODE", "sign"),
+                ("ROOKHOLD_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("ROOKHOLD_ATTESTATION_MODE", "sign"),
             ]),
             true,
         )
         .unwrap_err();
-        assert!(missing_key.contains("requires COOP_ATTESTATION_KEY_FILE"));
+        assert!(missing_key.contains("requires ROOKHOLD_ATTESTATION_KEY_FILE"));
 
         let ambiguous = Config::from_sources(
             &source(&[
-                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
-                ("COOP_ATTESTATION_MODE", "off"),
-                ("COOP_ATTESTATION_KEY_FILE", "/var/lib/coop/signing.pem"),
+                ("ROOKHOLD_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("ROOKHOLD_ATTESTATION_MODE", "off"),
+                ("ROOKHOLD_ATTESTATION_KEY_FILE", "/var/lib/coop/signing.pem"),
             ]),
             true,
         )
@@ -1109,8 +1284,8 @@ mod tests {
         assert!(ambiguous.contains("must not also configure"), "{ambiguous}");
         assert!(Config::from_sources(
             &source(&[
-                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
-                ("COOP_ATTESTATION_MODE", "maybe"),
+                ("ROOKHOLD_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("ROOKHOLD_ATTESTATION_MODE", "maybe"),
             ]),
             true,
         )
@@ -1145,8 +1320,8 @@ mod tests {
         let pepper_path = pepper.to_string_lossy().into_owned();
         let cfg = Config::from_sources(
             &source(&[
-                ("COOP_CREDENTIALS_FILE", credential_path.as_str()),
-                ("COOP_CREDENTIAL_PEPPER_FILE", pepper_path.as_str()),
+                ("ROOKHOLD_CREDENTIALS_FILE", credential_path.as_str()),
+                ("ROOKHOLD_CREDENTIAL_PEPPER_FILE", pepper_path.as_str()),
             ]),
             false,
         )
@@ -1154,7 +1329,7 @@ mod tests {
         assert!(cfg.api_keys.is_empty());
         assert_eq!(cfg.credentials.len(), 1);
         assert!(Config::from_sources(
-            &source(&[("COOP_CREDENTIALS_FILE", credential_path.as_str())]),
+            &source(&[("ROOKHOLD_CREDENTIALS_FILE", credential_path.as_str())]),
             false
         )
         .is_err());
@@ -1163,17 +1338,17 @@ mod tests {
     #[test]
     fn oidc_can_be_the_only_auth_source_but_partial_or_insecure_config_fails_closed() {
         let complete = [
-            ("COOP_OIDC_ISSUER", "https://issuer.example"),
-            ("COOP_OIDC_AUDIENCE", "https://coop.example"),
-            ("COOP_OIDC_JWKS_URL", "https://issuer.example/jwks"),
-            ("COOP_OIDC_TENANT_MAP", "external=internal"),
+            ("ROOKHOLD_OIDC_ISSUER", "https://issuer.example"),
+            ("ROOKHOLD_OIDC_AUDIENCE", "https://coop.example"),
+            ("ROOKHOLD_OIDC_JWKS_URL", "https://issuer.example/jwks"),
+            ("ROOKHOLD_OIDC_TENANT_MAP", "external=internal"),
         ];
         let cfg = Config::from_sources(&source(&complete), false).unwrap();
         assert!(cfg.api_keys.is_empty());
         assert!(cfg.jwt.is_some());
 
         assert!(Config::from_sources(
-            &source(&[("COOP_OIDC_ISSUER", "https://issuer.example")]),
+            &source(&[("ROOKHOLD_OIDC_ISSUER", "https://issuer.example")]),
             false
         )
         .is_err());
@@ -1186,9 +1361,9 @@ mod tests {
     fn debug_output_never_contains_plaintext_keys() {
         let cfg = Config::from_sources(
             &source(&[
-                ("COOP_API_KEYS", "acme:s3cr3t-value-that-is-long"),
-                ("COOP_METRICS_TOKEN", "metrics-secret-value"),
-                ("COOP_ATTESTATION_MODE", "off"),
+                ("ROOKHOLD_API_KEYS", "acme:s3cr3t-value-that-is-long"),
+                ("ROOKHOLD_METRICS_TOKEN", "metrics-secret-value"),
+                ("ROOKHOLD_ATTESTATION_MODE", "off"),
             ]),
             true,
         )
@@ -1210,12 +1385,13 @@ mod tests {
         let cfg = Config::from_sources(&source(&[]), false).unwrap();
         assert!(cfg.metrics_token.is_none());
 
-        let error = Config::from_sources(&source(&[("COOP_METRICS_TOKEN", "too-short")]), false)
-            .unwrap_err();
-        assert!(error.contains("COOP_METRICS_TOKEN"), "{error}");
+        let error =
+            Config::from_sources(&source(&[("ROOKHOLD_METRICS_TOKEN", "too-short")]), false)
+                .unwrap_err();
+        assert!(error.contains("ROOKHOLD_METRICS_TOKEN"), "{error}");
 
         let cfg = Config::from_sources(
-            &source(&[("COOP_METRICS_TOKEN", "separate-operator-secret")]),
+            &source(&[("ROOKHOLD_METRICS_TOKEN", "separate-operator-secret")]),
             false,
         )
         .unwrap();
@@ -1226,8 +1402,8 @@ mod tests {
 
         let error = Config::from_sources(
             &source(&[
-                ("COOP_API_KEYS", "tenant:shared-secret-value"),
-                ("COOP_METRICS_TOKEN", "shared-secret-value"),
+                ("ROOKHOLD_API_KEYS", "tenant:shared-secret-value"),
+                ("ROOKHOLD_METRICS_TOKEN", "shared-secret-value"),
             ]),
             false,
         )
@@ -1244,9 +1420,9 @@ mod tests {
                 indexed_credential_fixture(&token, expires_at_ms, revoked_at_ms);
             let error = Config::from_sources(
                 &source(&[
-                    ("COOP_CREDENTIALS_FILE", credentials.as_str()),
-                    ("COOP_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
-                    ("COOP_METRICS_TOKEN", token.as_str()),
+                    ("ROOKHOLD_CREDENTIALS_FILE", credentials.as_str()),
+                    ("ROOKHOLD_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
+                    ("ROOKHOLD_METRICS_TOKEN", token.as_str()),
                 ]),
                 false,
             )
@@ -1259,9 +1435,9 @@ mod tests {
         let unrelated_same_key_id = format!("coop_metrics-alias_{}", "b".repeat(43));
         Config::from_sources(
             &source(&[
-                ("COOP_CREDENTIALS_FILE", credentials.as_str()),
-                ("COOP_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
-                ("COOP_METRICS_TOKEN", unrelated_same_key_id.as_str()),
+                ("ROOKHOLD_CREDENTIALS_FILE", credentials.as_str()),
+                ("ROOKHOLD_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
+                ("ROOKHOLD_METRICS_TOKEN", unrelated_same_key_id.as_str()),
             ]),
             false,
         )
@@ -1273,9 +1449,9 @@ mod tests {
                 indexed_credential_fixture(&token, expires_at_ms, revoked_at_ms);
             Config::from_sources(
                 &source(&[
-                    ("COOP_CREDENTIALS_FILE", credentials.as_str()),
-                    ("COOP_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
-                    ("COOP_METRICS_TOKEN", token.as_str()),
+                    ("ROOKHOLD_CREDENTIALS_FILE", credentials.as_str()),
+                    ("ROOKHOLD_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
+                    ("ROOKHOLD_METRICS_TOKEN", token.as_str()),
                 ]),
                 false,
             )
@@ -1291,11 +1467,11 @@ mod tests {
         let jobs = root.join("jobs").to_string_lossy().into_owned();
         let mut cfg = Config::from_sources(
             &source(&[
-                ("COOP_CREDENTIALS_FILE", credentials.as_str()),
-                ("COOP_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
-                ("COOP_SANDBOX", "off"),
-                ("COOP_JOBS_ROOT", jobs.as_str()),
-                ("COOP_STORAGE_FREE_RESERVE_MB", "0"),
+                ("ROOKHOLD_CREDENTIALS_FILE", credentials.as_str()),
+                ("ROOKHOLD_CREDENTIAL_PEPPER_FILE", pepper.as_str()),
+                ("ROOKHOLD_SANDBOX", "off"),
+                ("ROOKHOLD_JOBS_ROOT", jobs.as_str()),
+                ("ROOKHOLD_STORAGE_FREE_RESERVE_MB", "0"),
             ]),
             false,
         )
@@ -1323,7 +1499,7 @@ mod tests {
             "acme:too-short",
         ] {
             let err =
-                Config::from_sources(&source(&[("COOP_API_KEYS", raw)]), true).expect_err(raw);
+                Config::from_sources(&source(&[("ROOKHOLD_API_KEYS", raw)]), true).expect_err(raw);
             assert!(
                 err.contains("blank") || err.contains("short") || err.contains("public"),
                 "{raw}: {err}"
@@ -1345,8 +1521,8 @@ mod tests {
             let raw = format!("{tenant}:correct-horse-battery-staple");
             let error = Config::from_sources(
                 &source(&[
-                    ("COOP_API_KEYS", raw.as_str()),
-                    ("COOP_ATTESTATION_MODE", "off"),
+                    ("ROOKHOLD_API_KEYS", raw.as_str()),
+                    ("ROOKHOLD_ATTESTATION_MODE", "off"),
                 ]),
                 true,
             )
@@ -1361,8 +1537,8 @@ mod tests {
         let raw = format!("{maximum}:correct-horse-battery-staple");
         let config = Config::from_sources(
             &source(&[
-                ("COOP_API_KEYS", raw.as_str()),
-                ("COOP_ATTESTATION_MODE", "off"),
+                ("ROOKHOLD_API_KEYS", raw.as_str()),
+                ("ROOKHOLD_ATTESTATION_MODE", "off"),
             ]),
             true,
         )
@@ -1379,10 +1555,10 @@ mod tests {
     #[test]
     fn invalid_numeric_configuration_is_not_silently_defaulted() {
         for (key, value) in [
-            ("COOP_WORKERS", "many"),
-            ("COOP_TENANT_CONCURRENCY", "0"),
-            ("COOP_RATE_PER_MIN", "-1"),
-            ("COOP_SWEEP_INTERVAL_SECS", "59"),
+            ("ROOKHOLD_WORKERS", "many"),
+            ("ROOKHOLD_TENANT_CONCURRENCY", "0"),
+            ("ROOKHOLD_RATE_PER_MIN", "-1"),
+            ("ROOKHOLD_SWEEP_INTERVAL_SECS", "59"),
         ] {
             let err = Config::from_sources(&source(&[(key, value)]), false).expect_err(key);
             assert!(err.contains(key), "{key}: {err}");
@@ -1393,14 +1569,14 @@ mod tests {
     fn production_cannot_disable_seccomp() {
         let err = Config::from_sources(
             &source(&[
-                ("COOP_API_KEYS", "acme:correct-horse-battery-staple"),
-                ("COOP_SECCOMP", "off"),
-                ("COOP_ATTESTATION_MODE", "off"),
+                ("ROOKHOLD_API_KEYS", "acme:correct-horse-battery-staple"),
+                ("ROOKHOLD_SECCOMP", "off"),
+                ("ROOKHOLD_ATTESTATION_MODE", "off"),
             ]),
             true,
         )
         .unwrap_err();
-        assert!(err.contains("COOP_SECCOMP"), "{err}");
+        assert!(err.contains("ROOKHOLD_SECCOMP"), "{err}");
     }
 
     #[test]
@@ -1570,15 +1746,15 @@ mod tests {
 
     #[test]
     fn non_loopback_development_listener_fails_closed_without_acknowledgement() {
-        let error = Config::from_sources(&source(&[("COOP_ADDR", "0.0.0.0:7300")]), false)
+        let error = Config::from_sources(&source(&[("ROOKHOLD_ADDR", "0.0.0.0:7300")]), false)
             .expect_err("public fallback key must not bind publicly");
         assert!(error.contains("public development API key"), "{error}");
 
         let error = Config::from_sources(
             &source(&[
-                ("COOP_ADDR", "0.0.0.0:7300"),
-                ("COOP_API_KEYS", "local:coop-dev-key"),
-                ("COOP_SANDBOX", "namespaces"),
+                ("ROOKHOLD_ADDR", "0.0.0.0:7300"),
+                ("ROOKHOLD_API_KEYS", "local:coop-dev-key"),
+                ("ROOKHOLD_SANDBOX", "namespaces"),
             ]),
             false,
         )
@@ -1587,9 +1763,9 @@ mod tests {
 
         let error = Config::from_sources(
             &source(&[
-                ("COOP_ADDR", "[::]:7300"),
-                ("COOP_API_KEYS", "tenant:a-long-development-key"),
-                ("COOP_SANDBOX", "off"),
+                ("ROOKHOLD_ADDR", "[::]:7300"),
+                ("ROOKHOLD_API_KEYS", "tenant:a-long-development-key"),
+                ("ROOKHOLD_SANDBOX", "off"),
             ]),
             false,
         )
@@ -1598,8 +1774,8 @@ mod tests {
 
         Config::from_sources(
             &source(&[
-                ("COOP_ADDR", "0.0.0.0:7300"),
-                ("COOP_UNSAFE_ALLOW_PUBLIC_DEV", "true"),
+                ("ROOKHOLD_ADDR", "0.0.0.0:7300"),
+                ("ROOKHOLD_UNSAFE_ALLOW_PUBLIC_DEV", "true"),
             ]),
             false,
         )
@@ -1611,9 +1787,9 @@ mod tests {
         for weak in ["123456789012345", PUBLIC_DEV_API_KEY] {
             let error = Config::from_sources(
                 &source(&[
-                    ("COOP_ADDR", "0.0.0.0:7300"),
-                    ("COOP_API_KEYS", weak),
-                    ("COOP_SANDBOX", "namespaces"),
+                    ("ROOKHOLD_ADDR", "0.0.0.0:7300"),
+                    ("ROOKHOLD_API_KEYS", weak),
+                    ("ROOKHOLD_SANDBOX", "namespaces"),
                 ]),
                 false,
             )
@@ -1626,27 +1802,27 @@ mod tests {
 
         Config::from_sources(
             &source(&[
-                ("COOP_ADDR", "0.0.0.0:7300"),
-                ("COOP_API_KEYS", "1234567890123456"),
-                ("COOP_SANDBOX", "namespaces"),
+                ("ROOKHOLD_ADDR", "0.0.0.0:7300"),
+                ("ROOKHOLD_API_KEYS", "1234567890123456"),
+                ("ROOKHOLD_SANDBOX", "namespaces"),
             ]),
             false,
         )
         .expect("a 16-byte public development key meets the existing strength floor");
         Config::from_sources(
             &source(&[
-                ("COOP_API_KEYS", "short-loopback"),
-                ("COOP_SANDBOX", "namespaces"),
+                ("ROOKHOLD_API_KEYS", "short-loopback"),
+                ("ROOKHOLD_SANDBOX", "namespaces"),
             ]),
             false,
         )
         .expect("weak development credentials remain available on literal loopback");
         Config::from_sources(
             &source(&[
-                ("COOP_ADDR", "0.0.0.0:7300"),
-                ("COOP_API_KEYS", "short-public"),
-                ("COOP_SANDBOX", "namespaces"),
-                ("COOP_UNSAFE_ALLOW_PUBLIC_DEV", "true"),
+                ("ROOKHOLD_ADDR", "0.0.0.0:7300"),
+                ("ROOKHOLD_API_KEYS", "short-public"),
+                ("ROOKHOLD_SANDBOX", "namespaces"),
+                ("ROOKHOLD_UNSAFE_ALLOW_PUBLIC_DEV", "true"),
             ]),
             false,
         )
@@ -1654,10 +1830,10 @@ mod tests {
 
         let production_error = Config::from_sources(
             &source(&[
-                ("COOP_ADDR", "0.0.0.0:7300"),
-                ("COOP_API_KEYS", "tenant:short"),
-                ("COOP_SANDBOX", "namespaces"),
-                ("COOP_UNSAFE_ALLOW_PUBLIC_DEV", "true"),
+                ("ROOKHOLD_ADDR", "0.0.0.0:7300"),
+                ("ROOKHOLD_API_KEYS", "tenant:short"),
+                ("ROOKHOLD_SANDBOX", "namespaces"),
+                ("ROOKHOLD_UNSAFE_ALLOW_PUBLIC_DEV", "true"),
             ]),
             true,
         )
@@ -1666,8 +1842,8 @@ mod tests {
 
         let weak_loopback = Config::from_sources(
             &source(&[
-                ("COOP_API_KEYS", "short-loopback"),
-                ("COOP_SANDBOX", "namespaces"),
+                ("ROOKHOLD_API_KEYS", "short-loopback"),
+                ("ROOKHOLD_SANDBOX", "namespaces"),
             ]),
             false,
         )
@@ -1680,9 +1856,9 @@ mod tests {
 
         let hostname_error = Config::from_sources(
             &source(&[
-                ("COOP_ADDR", "localhost:7300"),
-                ("COOP_API_KEYS", "short-hostname"),
-                ("COOP_SANDBOX", "namespaces"),
+                ("ROOKHOLD_ADDR", "localhost:7300"),
+                ("ROOKHOLD_API_KEYS", "short-hostname"),
+                ("ROOKHOLD_SANDBOX", "namespaces"),
             ]),
             false,
         )
@@ -1697,10 +1873,10 @@ mod tests {
     fn configured_resource_ceilings_are_coherent_and_clamp_memory() {
         let cfg = Config::from_sources(
             &source(&[
-                ("COOP_MAX_JOB_MEM_MB", "512"),
-                ("COOP_MEMORY_BUDGET_MB", "1024"),
-                ("COOP_STORAGE_TENANT_MB", "128"),
-                ("COOP_STORAGE_GLOBAL_MB", "256"),
+                ("ROOKHOLD_MAX_JOB_MEM_MB", "512"),
+                ("ROOKHOLD_MEMORY_BUDGET_MB", "1024"),
+                ("ROOKHOLD_STORAGE_TENANT_MB", "128"),
+                ("ROOKHOLD_STORAGE_GLOBAL_MB", "256"),
             ]),
             false,
         )
@@ -1713,8 +1889,8 @@ mod tests {
 
         let error = Config::from_sources(
             &source(&[
-                ("COOP_MAX_JOB_MEM_MB", "2048"),
-                ("COOP_MEMORY_BUDGET_MB", "1024"),
+                ("ROOKHOLD_MAX_JOB_MEM_MB", "2048"),
+                ("ROOKHOLD_MEMORY_BUDGET_MB", "1024"),
             ]),
             false,
         )

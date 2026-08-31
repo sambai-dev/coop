@@ -12,7 +12,7 @@ Authorization: Bearer TENANT_KEY
 
 Indexed credentials and RFC 9068 JWTs resolve a principal, tenant, scopes, and authority lifetime; legacy keys map to one tenant with the complete compatibility scope set. Job identifiers are not authorization tokens. Job reads, cancellation, streams, result artifacts, and attestations always check tenant ownership, while route-specific middleware enforces `jobs:submit`, `jobs:read`, `jobs:cancel`, `service:read`, or `metrics:read`. Invalid credentials use RFC 6750 challenges. `/healthz`, `/readyz`, `/openapi.json`, and the dashboard shell are public by design, so do not put secrets in those responses.
 
-Coop uses plain HTTP/1.1. Put it behind a TLS proxy for any connection that leaves the local host or a private encrypted network; the proxy may serve HTTP/2 or HTTP/3 to clients while using HTTP/1.1 on the private Coop hop.
+Rookhold uses plain HTTP/1.1. Put it behind a TLS proxy for any connection that leaves the local host or a private encrypted network; the proxy may serve HTTP/2 or HTTP/3 to clients while using HTTP/1.1 on the private Rookhold hop.
 
 ## Submit
 
@@ -208,17 +208,17 @@ key ID when signing is enabled. Its `trust_notice` is part of the contract:
 the unauthenticated DSSE `keyid` hint and a key fetched from the signer are not
 independent trust anchors. Pin or distribute the public key out of band, retain
 old keys across rotation, and verify the envelope plus exact result with
-`coop-verify verify --tenant EXPECTED_TENANT`. Verification proves possession
+`rookhold-verify verify --tenant EXPECTED_TENANT`. Verification proves possession
 of that key and profile integrity;
 it does not prove trusted hardware, deterministic execution, or semantic truth.
-`COOP_ATTESTATION_MODE=off` is an explicit production policy that produces no
+`ROOKHOLD_ATTESTATION_MODE=off` is an explicit production policy that produces no
 signatures.
 
 ## WebSocket stream
 
 First send an authenticated `POST /v1/jobs/{id}/stream-ticket`. It returns a short-lived, one-use, job-bound ticket and stream URL. Open that URL with `ws://` (or `wss://` behind TLS). The server consumes the ticket before active-stream admission, sends persisted history first, then live events, and finishes after the terminal event. A `429`/`503` capacity rejection therefore requires minting a new ticket after `Retry-After`. Reconnect by minting a new ticket and continue from the last sequence; deduplicate by job ID and sequence number.
 
-Browser WebSocket APIs cannot set an `Authorization` header. Stream tickets exist so the long-lived API key never needs to enter a WebSocket URL. The bundled clients disable their v0.1 API-key query fallback by default; enabling it requires an explicit opt-in and should be limited to a trusted legacy server because URLs leak into history, logs, and proxy telemetry. Structured Coop errors never trigger the fallback.
+Browser WebSocket APIs cannot set an `Authorization` header. Stream tickets exist so the long-lived API key never needs to enter a WebSocket URL. The bundled clients disable their v0.1 API-key query fallback by default; enabling it requires an explicit opt-in and should be limited to a trusted legacy server because URLs leak into history, logs, and proxy telemetry. Structured Rookhold errors never trigger the fallback.
 
 Clients must handle:
 
@@ -238,7 +238,7 @@ server features, including signer metadata when enabled. `GET /v1/whoami`
 resolves the authenticated tenant, principal, credential/auth method, scopes,
 and authority expiry. `GET /v1/metrics` exposes tenant-scoped current-job
 metrics. The separate global `/metrics` endpoint is disabled unless
-`COOP_METRICS_TOKEN` is configured and never accepts a tenant credential; it
+`ROOKHOLD_METRICS_TOKEN` is configured and never accepts a tenant credential; it
 uses fixed-cardinality labels and OpenMetrics negotiation. Neither surface is
 a billing ledger. `/healthz` is liveness and `/readyz` checks cached
 process/store readiness. Use authenticated `/v1/status`, signer capabilities,

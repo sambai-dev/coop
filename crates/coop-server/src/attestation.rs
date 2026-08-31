@@ -18,6 +18,8 @@ use std::time::Duration;
 pub const RESULT_ARTIFACT_MEDIA_TYPE: &str = "application/vnd.coop.execution-result.v1+json";
 pub const DSSE_ENVELOPE_MEDIA_TYPE: &str = "application/vnd.dsse.envelope.v1+json";
 const RESULT_ARTIFACT_TYPE: &str =
+    // Immutable v1 wire identity. The repository rename must not invalidate
+    // existing result artifacts or signed evidence.
     "https://github.com/sambai-dev/coop/blob/main/docs/api.md#execution-result-artifact-v1";
 const OUTBOX_PAGE: i64 = 32;
 const IDLE_POLL: Duration = Duration::from_millis(250);
@@ -496,9 +498,9 @@ mod tests {
         std::fs::write(&key, b"definitely-not-private-key-material").unwrap();
         let key_path = key.to_string_lossy().to_string();
         let source = |name: &str| match name {
-            "COOP_API_KEYS" => Some("local:test-key".to_string()),
-            "COOP_ATTESTATION_MODE" => Some("sign".to_string()),
-            "COOP_ATTESTATION_KEY_FILE" => Some(key_path.clone()),
+            "ROOKHOLD_API_KEYS" => Some("local:test-key".to_string()),
+            "ROOKHOLD_ATTESTATION_MODE" => Some("sign".to_string()),
+            "ROOKHOLD_ATTESTATION_KEY_FILE" => Some(key_path.clone()),
             _ => None,
         };
         let config = Config::from_sources(&source, false).unwrap();

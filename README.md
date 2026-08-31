@@ -1,30 +1,30 @@
 <div align="center">
 
-# Coop
+# Rookhold
 
-### Give your AI agent a safer place to run code
+### Give your AI agent a controlled place to run code
 
-Coop runs short Python, Node.js, and Bash jobs in a separate service, applies
+Rookhold runs short Python, Node.js, and Bash jobs in a separate service, applies
 the limits you choose, and gives you a clear record of what happened.
 
-[![CI](https://github.com/sambai-dev/coop/actions/workflows/ci.yml/badge.svg)](https://github.com/sambai-dev/coop/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/sambai-dev/coop)](https://github.com/sambai-dev/coop/releases)
+[![CI](https://github.com/sambai-dev/rookhold/actions/workflows/ci.yml/badge.svg)](https://github.com/sambai-dev/rookhold/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/sambai-dev/rookhold)](https://github.com/sambai-dev/rookhold/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![No Rust required](https://img.shields.io/badge/quick_start-no_Rust_required-198754.svg)](#try-coop-in-five-minutes)
+[![No Rust required](https://img.shields.io/badge/quick_start-no_Rust_required-198754.svg)](#try-rookhold-in-five-minutes)
 
-[Try it](#try-coop-in-five-minutes) ·
-[How it works](#what-coop-does) ·
+[Try it](#try-rookhold-in-five-minutes) ·
+[How it works](#what-rookhold-does) ·
 [Agent integrations](#agent-and-harness-integration) ·
 [Production](#production-on-a-dedicated-linux-x86_64-vm) ·
 [Documentation](#documentation)
 
 </div>
 
-![Coop's Chalk-and-Carbon execution desk showing the docked composer, chronological transcript, and contextual result record](docs/assets/console-v0.5.png)
+![Rookhold's Chalk-and-Carbon execution desk showing the docked composer, chronological transcript, and contextual result record](docs/assets/console-v0.6.png)
 
-## What Coop does
+## What Rookhold does
 
-Your agent—or any application—sends Coop a short job. Coop then:
+Your agent—or any application—sends Rookhold a short job. Rookhold then:
 
 1. checks who is asking and what they are allowed to do;
 2. applies server-controlled time and resource limits;
@@ -32,14 +32,14 @@ Your agent—or any application—sends Coop a short job. Coop then:
 4. streams the output into the operator console; and
 5. keeps a result and evidence record you can inspect later.
 
-You do **not** need to understand Rust or the Coop source code to use the
+You do **not** need to understand Rust or the Rookhold source code to use the
 prebuilt app. You only need a supported computer, a runtime such as Python,
 and a browser.
 
-## Try Coop in five minutes
+## Try Rookhold in five minutes
 
 This path uses a prebuilt app. You do not need Rust, a source checkout, or an
-understanding of Coop's internals.
+understanding of Rookhold's internals.
 
 > [!WARNING]
 > This quick start is an **unisolated local demo for code you trust**. Keep it on
@@ -47,43 +47,43 @@ understanding of Coop's internals.
 
 ### 1. Download the app
 
-Open the [v0.5.0 release](https://github.com/sambai-dev/coop/releases/tag/v0.5.0),
+Open the [v0.6.0 release](https://github.com/sambai-dev/rookhold/releases/tag/v0.6.0),
 then choose the archive for your computer:
 
 | Your computer | Download |
 |---|---|
-| Windows, 64-bit | [`coop-x86_64-pc-windows-msvc.zip`](https://github.com/sambai-dev/coop/releases/download/v0.5.0/coop-x86_64-pc-windows-msvc.zip) |
-| Mac with Apple silicon | [`coop-aarch64-apple-darwin.tar.gz`](https://github.com/sambai-dev/coop/releases/download/v0.5.0/coop-aarch64-apple-darwin.tar.gz) |
-| Linux x86_64 | [`coop-x86_64-unknown-linux-musl.tar.gz`](https://github.com/sambai-dev/coop/releases/download/v0.5.0/coop-x86_64-unknown-linux-musl.tar.gz) |
+| Windows, 64-bit | [`rookhold-x86_64-pc-windows-msvc.zip`](https://github.com/sambai-dev/rookhold/releases/download/v0.6.0/rookhold-x86_64-pc-windows-msvc.zip) |
+| Mac with Apple silicon | [`rookhold-aarch64-apple-darwin.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.6.0/rookhold-aarch64-apple-darwin.tar.gz) |
+| Linux x86_64 | [`rookhold-x86_64-unknown-linux-musl.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.6.0/rookhold-x86_64-unknown-linux-musl.tar.gz) |
 
 Extract the archive. Install Python if you want to run the included Python
-example; Coop automatically shows only the runtimes that work on your machine.
+example; Rookhold automatically shows only the runtimes that work on your machine.
 
-### 2. Start Coop
+### 2. Start Rookhold
 
 Open a terminal in the extracted folder and run one of these commands.
 
 Windows PowerShell:
 
 ```powershell
-$env:COOP_SANDBOX = "off"
-$env:COOP_JOBS_ROOT = Join-Path (Get-Location) ".coop-dev\jobs"
-.\coop.exe
+$env:ROOKHOLD_SANDBOX = "off"
+$env:ROOKHOLD_JOBS_ROOT = Join-Path (Get-Location) ".rookhold-dev\jobs"
+.\rookhold.exe
 ```
 
 macOS or Linux:
 
 ```bash
-chmod +x coop coop-verify
-COOP_SANDBOX=off COOP_JOBS_ROOT="$PWD/.coop-dev/jobs" ./coop
+chmod +x rookhold rookhold-verify
+ROOKHOLD_SANDBOX=off ROOKHOLD_JOBS_ROOT="$PWD/.rookhold-dev/jobs" ./rookhold
 ```
 
-Leave that terminal open. Coop is now running only on your computer.
+Leave that terminal open. Rookhold is now running only on your computer.
 
 ### 3. Use the console
 
 1. Open <http://127.0.0.1:7300>.
-2. Enter `coop-dev-key` in **API key**, then select **Apply**.
+2. Enter `rookhold-dev-key` in **API key**, then select **Apply**.
 3. Keep the included example or paste a short trusted script.
 4. Select **Queue run**.
 5. Watch the transcript, then open **Result & record**.
@@ -99,14 +99,14 @@ the local process is **not sandboxed**.
 | **History** | Reopen earlier jobs and see whether they succeeded. |
 | **Transcript** | Follow accepted policy, execution, output, completion, and proof in order. |
 | **Result & record** | Inspect the final outcome and download available evidence. |
-| **Runtime label** | See the isolation Coop actually observed—not just what was requested. |
+| **Runtime label** | See the isolation Rookhold actually observed—not just what was requested. |
 
 ## Connect an AI agent
 
-Coop works with Hermes, OpenClaw, Codex, and other MCP-compatible hosts through
-the included `coop-mcp` adapter.
+Rookhold works with Hermes, OpenClaw, Codex, and other MCP-compatible hosts through
+the included `rookhold-mcp` adapter.
 
-1. Start Coop using the demo above or the production deployment.
+1. Start Rookhold using the demo above or the production deployment.
 2. Install the verified Python wheel from the same release.
 3. Copy the configuration for your agent and restart it.
 
@@ -115,16 +115,16 @@ Use the copy-ready guides for [Hermes](integrations/hermes/config.snippet.yaml),
 [generic MCP host](integrations/README.md#generic-mcp-host). The detailed,
 fail-closed installation path is in [Agent and harness integration](#agent-and-harness-integration).
 
-## Is Coop right for my task?
+## Is Rookhold right for my task?
 
-| Use Coop for | Keep using your agent's normal workspace for |
+| Use Rookhold for | Keep using your agent's normal workspace for |
 |---|---|
 | short generated or user-supplied scripts | editing a repository |
 | stateless transforms, checks, and evaluators | persistent files and package installation |
 | work that needs limits, cancellation, or an evidence record | browsers, terminals, ports, and long-running services |
 | execution that must cross a separately operated API boundary | trusted work already isolated well enough by the agent |
 
-Using both is normal. Your agent decides what work is needed; Coop independently
+Using both is normal. Your agent decides what work is needed; Rookhold independently
 decides whether and how a submitted job may run.
 
 ## Before you run untrusted code
@@ -135,36 +135,49 @@ complete every deployment check.
 
 > [!IMPORTANT]
 > The `gVisor` production profile is Linux x86_64-only. macOS, Windows, and other Linux architectures can run only the same-trust subprocess backend. The outer
-> Coop service is privileged even when each job uses gVisor, so it belongs on a
+> Rookhold service is privileged even when each job uses gVisor, so it belongs on a
 > dedicated VM. Read [the security boundary](docs/security-boundary.md) before
 > accepting untrusted jobs.
 
 > [!NOTE]
-> **Current release:** [v0.5.0](https://github.com/sambai-dev/coop/releases/tag/v0.5.0).
+> **Current release:** [v0.6.0](https://github.com/sambai-dev/rookhold/releases/tag/v0.6.0).
 > Its exact eight-asset set includes checksums, a combined artifact-scoped SPDX
-> SBOM, GitHub SBOM/provenance attestations, and the offline `coop-verify`
+> SBOM, GitHub SBOM/provenance attestations, and the offline `rookhold-verify`
 > verifier inside each platform archive. Older release lines are unsupported
 > for new deployments.
 
-## Why Coop exists
+### Upgrading from Coop
 
-Most agent sandboxes protect a development workspace. Coop adds a separately
+Rookhold is the new project name as of v0.6. Existing integrations do not need
+an all-at-once migration: the `coop` binaries, Python imports, TypeScript
+compatibility export, `coop-mcp` command, and `COOP_*` environment variables
+remain supported aliases. If both a `ROOKHOLD_*` and matching `COOP_*` variable
+are set to different non-empty values, startup fails instead of guessing.
+
+The `/v1` API, `application/vnd.coop...` media types, `coop://` evidence subject
+names, and v1 predicate URI are unchanged because they are durable wire and
+signature identities. See the [v0.6 upgrade guide](docs/upgrading.md#from-v05x-to-v060)
+for service files, paths, and rollback details.
+
+## Why Rookhold exists
+
+Most agent sandboxes protect a development workspace. Rookhold adds a separately
 operated execution boundary for short, risky, or user-supplied jobs without
-letting the model hold the Coop key or choose its own server, tenant, language
+letting the model hold the Rookhold key or choose its own server, tenant, language
 allowlist, or required isolation posture.
 
-Without Coop, a tool call often ends as `subprocess.run(model_text)` inside the
+Without Rookhold, a tool call often ends as `subprocess.run(model_text)` inside the
 agent process or a long-lived container. The application then has to invent
 authentication, resource ceilings, cancellation, output bounds, tenant
 concurrency, reconnectable streaming, and an audit record.
 
-With Coop, the trusted adapter submits once and receives a job ID. Operators
+With Rookhold, the trusted adapter submits once and receives a job ID. Operators
 can answer five concrete questions: what ran, who submitted it, which controls
 actually became effective, what output or violations were observed, and how
 the run ended. Evidence survives failure, timeout, OOM, and cancellation.
 
 ```text
-you → AI agent or app → coop-mcp or SDK → Coop → short job
+you → AI agent or app → rookhold-mcp or SDK → Rookhold → short job
        decides what      submits safely    policy + evidence
 ```
 
@@ -182,46 +195,46 @@ you → AI agent or app → coop-mcp or SDK → Coop → short job
 - Ed25519-signed DSSE/in-toto envelopes, exact result artifacts, restart backfill, and offline verification
 - bounded OpenMetrics telemetry plus W3C Trace Context correlation
 - stdlib-only Python and dependency-free TypeScript clients
-- a dependency-free, concurrent `coop-mcp` stdio server supporting MCP 2026 Tasks and legacy hosts
+- a dependency-free, concurrent `rookhold-mcp` stdio server supporting MCP 2026 Tasks and legacy hosts
 
-The event chain remains server-verifiable operational evidence. A signed envelope additionally proves that the configured Coop key asserted the authoritative tenant, exact receipt, and result digest. It does **not** prove deterministic re-execution, trusted hardware, remote attestation, or WORM storage; distribute or pin the public key out of band rather than trusting its API `key_id` hint.
+The event chain remains server-verifiable operational evidence. A signed envelope additionally proves that the configured Rookhold key asserted the authoritative tenant, exact receipt, and result digest. It does **not** prove deterministic re-execution, trusted hardware, remote attestation, or WORM storage; distribute or pin the public key out of band rather than trusting its API `key_id` hint.
 
 ## Common questions
 
 | Question | Answer |
 |---|---|
-| Do I need Rust? | **No.** Download a prebuilt release unless you want to contribute to Coop itself. |
-| Do I need an AI model? | **No.** Any application can call Coop through HTTP or an SDK. |
+| Do I need Rust? | **No.** Download a prebuilt release unless you want to contribute to Rookhold itself. |
+| Do I need an AI model? | **No.** Any application can call Rookhold through HTTP or an SDK. |
 | Can I use Hermes, OpenClaw, or Codex? | **Yes.** Use the included MCP adapter and copy-ready configuration. |
-| Does Coop replace my agent's normal workspace? | **No.** Keep repository editing in the workspace and send short execution jobs to Coop. |
+| Does Rookhold replace my agent's normal workspace? | **No.** Keep repository editing in the workspace and send short execution jobs to Rookhold. |
 | Is the five-minute demo safe for untrusted code? | **No.** It is loopback-only and unisolated. Use the guarded production deployment for mutually untrusted jobs. |
 
 ## Build from source (optional)
 
-Most users should use the [prebuilt quick start](#try-coop-in-five-minutes).
+Most users should use the [prebuilt quick start](#try-rookhold-in-five-minutes).
 This section is only for contributors or operators who specifically want to
-compile Coop themselves. Install Rust 1.98 and the runtimes you intend to use:
+compile Rookhold themselves. Install Rust 1.98 and the runtimes you intend to use:
 
 ```bash
-git clone https://github.com/sambai-dev/coop.git
-cd coop
-COOP_SANDBOX=off \
-COOP_JOBS_ROOT="$PWD/.coop-dev/jobs" \
-cargo run --locked -p coop-server
+git clone https://github.com/sambai-dev/rookhold.git
+cd rookhold
+ROOKHOLD_SANDBOX=off \
+ROOKHOLD_JOBS_ROOT="$PWD/.rookhold-dev/jobs" \
+cargo run --locked -p coop-server --bin rookhold
 ```
 
 PowerShell:
 
 ```powershell
-git clone https://github.com/sambai-dev/coop.git
-Set-Location coop
-$env:COOP_SANDBOX = "off"
-$env:COOP_JOBS_ROOT = Join-Path (Get-Location) ".coop-dev\jobs"
-cargo run --locked -p coop-server
+git clone https://github.com/sambai-dev/rookhold.git
+Set-Location rookhold
+$env:ROOKHOLD_SANDBOX = "off"
+$env:ROOKHOLD_JOBS_ROOT = Join-Path (Get-Location) ".rookhold-dev\jobs"
+cargo run --locked -p coop-server --bin rookhold
 ```
 
 Open <http://127.0.0.1:7300>. Development mode uses the public local key
-`coop-dev-key` if `COOP_API_KEYS` is unset. The explicit `off` setting uses an
+`rookhold-dev-key` if `ROOKHOLD_API_KEYS` is unset. The explicit `off` setting uses an
 **unisolated subprocess**. Do not expose it or submit code you do not trust.
 
 At startup, development mode runs a bounded canary under the same sanitized
@@ -240,21 +253,21 @@ starts the service; and runs receipt-and-attestation-checked canaries in every
 runtime:
 
 ```bash
-COOP_PRODUCTION_VM_ACKNOWLEDGED=true scripts/bootstrap-production.sh
+ROOKHOLD_PRODUCTION_VM_ACKNOWLEDGED=true scripts/bootstrap-production.sh
 ```
 
 The bootstrap creates `.env` and `.coop-runtime/` with owner-only permissions
 and never replaces existing credentials or private key material. It also
 derives `.coop-runtime/attestation-public-key.pem` locally as the explicit
 operator trust pin. The image entrypoint stages the host-owned key and `runsc`
-into root-owned container-local paths before Coop starts, preserving the
+into root-owned container-local paths before Rookhold starts, preserving the
 strict ownership boundary of a rootful deployment. On later runs the bootstrap
 validates the exact staged runtime/key and existing pin, updates the rootfs
 digest, deploys, and repeats the same production verifier with the packaged
-`coop-verify`. The acknowledgement is deliberate: it does not make the
+`rookhold-verify`. The acknowledgement is deliberate: it does not make the
 privileged outer service safe on a general-purpose host.
 
-Compose is loopback-only. Each submitted job crosses its own gVisor application-kernel boundary, but `privileged: true` still gives the **outer Coop container** host-equivalent authority for runtime and cgroup setup. Use this configuration only inside a dedicated, disposable x86_64 VM. It is not a safe control-plane deployment on a general-purpose Docker host. See [deployment choices](docs/deployment.md).
+Compose is loopback-only. Each submitted job crosses its own gVisor application-kernel boundary, but `privileged: true` still gives the **outer Rookhold container** host-equivalent authority for runtime and cgroup setup. Use this configuration only inside a dedicated, disposable x86_64 VM. It is not a safe control-plane deployment on a general-purpose Docker host. See [deployment choices](docs/deployment.md).
 
 Production is more involved because the private rootfs, cgroup delegation,
 reviewed runtime, signing key, tenant identity, TLS/private ingress, and
@@ -268,9 +281,9 @@ traffic is admitted.
 Set the client key for the path you started: use the public development key only for the loopback local-development process, or use the random key portion you placed after `tenant:` in `.env` for Compose.
 
 ```bash
-COOP_CLIENT_KEY="${COOP_CLIENT_KEY:-coop-dev-key}"
+ROOKHOLD_CLIENT_KEY="${ROOKHOLD_CLIENT_KEY:-rookhold-dev-key}"
 curl --fail-with-body -X POST http://127.0.0.1:7300/v1/jobs \
-  -H "Authorization: Bearer $COOP_CLIENT_KEY" \
+  -H "Authorization: Bearer $ROOKHOLD_CLIENT_KEY" \
   -H 'Idempotency-Key: readme-python-42-v1' \
   -H 'Content-Type: application/json' \
   --data '{
@@ -289,15 +302,15 @@ The response contains a UUIDv7 `job_id`. Use it in the following requests:
 
 ```bash
 curl --fail-with-body \
-  -H "Authorization: Bearer $COOP_CLIENT_KEY" \
+  -H "Authorization: Bearer $ROOKHOLD_CLIENT_KEY" \
   'http://127.0.0.1:7300/v1/jobs/JOB_ID/result?wait_seconds=60'
 
 curl --fail-with-body \
-  -H "Authorization: Bearer $COOP_CLIENT_KEY" \
+  -H "Authorization: Bearer $ROOKHOLD_CLIENT_KEY" \
   http://127.0.0.1:7300/v1/jobs/JOB_ID/replay
 
 stream_response=$(curl --fail-with-body -X POST \
-  -H "Authorization: Bearer $COOP_CLIENT_KEY" \
+  -H "Authorization: Bearer $ROOKHOLD_CLIENT_KEY" \
   http://127.0.0.1:7300/v1/jobs/JOB_ID/stream-ticket)
 stream_path=$(printf '%s' "$stream_response" | \
   python -c 'import json, sys; print(json.load(sys.stdin)["stream_url"])')
@@ -309,14 +322,14 @@ exact signed envelope and result artifact, then verify them with a public key
 you obtained through a trusted operator channel:
 
 ```bash
-curl --fail-with-body -H "Authorization: Bearer $COOP_CLIENT_KEY" \
+curl --fail-with-body -H "Authorization: Bearer $ROOKHOLD_CLIENT_KEY" \
   -o job.dsse.json http://127.0.0.1:7300/v1/jobs/JOB_ID/attestation
-curl --fail-with-body -H "Authorization: Bearer $COOP_CLIENT_KEY" \
+curl --fail-with-body -H "Authorization: Bearer $ROOKHOLD_CLIENT_KEY" \
   -o job-result.json http://127.0.0.1:7300/v1/jobs/JOB_ID/result-artifact
-coop-verify verify \
+rookhold-verify verify \
   --envelope job.dsse.json \
   --subject job-result.json \
-  --public-key coop-attestation.pub.pem \
+  --public-key rookhold-attestation.pub.pem \
   --tenant TENANT_ID
 ```
 
@@ -324,12 +337,12 @@ coop-verify verify \
 its own trust notice is important: fetching a key from the same server is not
 independent key distribution. The predicate and exact result both bind the
 authoritative tenant; pass the tenant expected by your workflow to
-`coop-verify` rather than trusting a value copied from downloaded JSON.
+`rookhold-verify` rather than trusting a value copied from downloaded JSON.
 
 PowerShell local-development equivalent:
 
 ```powershell
-$headers = @{ Authorization = "Bearer coop-dev-key" }
+$headers = @{ Authorization = "Bearer rookhold-dev-key" }
 $body = @{
     language = "python"
     code = "print(6 * 7)"
@@ -387,7 +400,7 @@ See [API and streaming](docs/api.md) and [SDK usage](docs/sdks.md). The dashboar
 
 ## Agent and harness integration
 
-Installing the Python SDK also installs `coop-mcp`. It exposes four narrow
+Installing the Python SDK also installs `rookhold-mcp`. It exposes four narrow
 tools—run, result, events, and cancel—while keeping credentials and policy in
 the trusted adapter process. It supports the stateless MCP 2026 discovery and
 opt-in Tasks contract while retaining the legacy initialize flow. Concurrent
@@ -396,31 +409,31 @@ wait returns the job ID instead of losing ownership of the still-running job.
 
 ### Connect a harness
 
-1. Start Coop locally or deploy it on the dedicated VM.
+1. Start Rookhold locally or deploy it on the dedicated VM.
 2. Follow the [checksum, release-attestation, and constrained workflow-provenance checks](docs/sdks.md), then install the verified wheel in an operator-owned environment:
 
    ```bash
-   python -m venv ~/.local/share/coop-mcp
-   ~/.local/share/coop-mcp/bin/python -m pip install --no-deps \
-     ./coop_sdk-0.5.0-py3-none-any.whl
+   python -m venv ~/.local/share/rookhold-mcp
+   ~/.local/share/rookhold-mcp/bin/python -m pip install --no-deps \
+     ./rookhold_sdk-0.6.0-py3-none-any.whl
    ```
 
 3. Give the harness process—not the model—the connection and policy settings:
 
    ```dotenv
-   COOP_BASE_URL=https://coop.internal.example
-   COOP_API_KEY=replace-with-the-key-only
-   COOP_MCP_MINIMUM_ISOLATION=gvisor-application-kernel
-   COOP_MCP_ALLOWED_LANGUAGES=python,node
+   ROOKHOLD_BASE_URL=https://rookhold.internal.example
+   ROOKHOLD_API_KEY=replace-with-the-key-only
+   ROOKHOLD_MCP_MINIMUM_ISOLATION=gvisor-application-kernel
+   ROOKHOLD_MCP_ALLOWED_LANGUAGES=python,node
    ```
 
 4. Point the harness's stdio MCP configuration at
-   `~/.local/share/coop-mcp/bin/coop-mcp`, merge the matching snippet below,
+   `~/.local/share/rookhold-mcp/bin/rookhold-mcp`, merge the matching snippet below,
    and restart or reload the harness.
 
 On Windows, the executable is
-`%USERPROFILE%\.local\share\coop-mcp\Scripts\coop-mcp.exe`.
-`COOP_MCP_MINIMUM_ISOLATION` may be omitted or set to `none` only for the
+`%USERPROFILE%\.local\share\rookhold-mcp\Scripts\rookhold-mcp.exe`.
+`ROOKHOLD_MCP_MINIMUM_ISOLATION` may be omitted or set to `none` only for the
 explicitly unisolated local demo. Production integrations should specify the
 exact minimum isolation class and fail closed.
 
@@ -430,44 +443,44 @@ Copy-ready configuration is included for:
 - [OpenClaw](integrations/openclaw/openclaw.snippet.json5)
 - [generic MCP hosts](integrations/README.md#generic-mcp-host)
 
-Adding Coop does not disable an agent's existing `exec`, terminal, or native
+Adding Rookhold does not disable an agent's existing `exec`, terminal, or native
 code-execution tool. Deny those alternate routes when policy requires every
-generated job to pass through Coop. See [integration architecture and the
+generated job to pass through Rookhold. See [integration architecture and the
 production checklist](docs/integrations.md).
 
 ## Configuration
 
 | Variable | Default | Notes |
 |---|---|---|
-| `COOP_ADDR` | `127.0.0.1:7300` | Listen address; keep private or place behind TLS |
-| `COOP_DB` | `coop.db` | SQLite database path |
-| `COOP_API_KEYS` | dev key outside production | Comma-separated `tenant:key` entries; production rejects blank, short, and public keys |
-| `COOP_CREDENTIALS_FILE` + `COOP_CREDENTIAL_PEPPER_FILE` | unset | Indexed, peppered HMAC credentials with principal, scopes, expiry, and revocation; preferred over legacy keys |
-| `COOP_OIDC_ISSUER`, `COOP_OIDC_AUDIENCE`, `COOP_OIDC_JWKS_URL`, `COOP_OIDC_TENANT_MAP` | unset | Strict RFC 9068 JWT authority and tenant mapping; all core values are required together |
-| `COOP_METRICS_TOKEN` | unset | Separate operator credential for global `/metrics`; never accepted as a tenant credential |
-| `COOP_ENV` | unset | `prod`, `production`, or `release` enables fail-closed production checks |
+| `ROOKHOLD_ADDR` | `127.0.0.1:7300` | Listen address; keep private or place behind TLS |
+| `ROOKHOLD_DB` | `rookhold.db` | SQLite database path; an existing `coop.db` is adopted when the new default does not exist |
+| `ROOKHOLD_API_KEYS` | dev key outside production | Comma-separated `tenant:key` entries; production rejects blank, short, and public keys |
+| `ROOKHOLD_CREDENTIALS_FILE` + `ROOKHOLD_CREDENTIAL_PEPPER_FILE` | unset | Indexed, peppered HMAC credentials with principal, scopes, expiry, and revocation; preferred over legacy keys |
+| `ROOKHOLD_OIDC_ISSUER`, `ROOKHOLD_OIDC_AUDIENCE`, `ROOKHOLD_OIDC_JWKS_URL`, `ROOKHOLD_OIDC_TENANT_MAP` | unset | Strict RFC 9068 JWT authority and tenant mapping; all core values are required together |
+| `ROOKHOLD_METRICS_TOKEN` | unset | Separate operator credential for global `/metrics`; never accepted as a tenant credential |
+| `ROOKHOLD_ENV` | unset | `prod`, `production`, or `release` enables fail-closed production checks |
 | `NODE_ENV` | unset | Compatibility alias: `prod`, `production`, or `release` also enables the same production checks |
-| `COOP_SANDBOX` | `auto` | `gvisor`, `ns`, `auto`, or `off`; production does not silently downgrade and Compose defaults to `gvisor` |
-| `COOP_ROOTFS` | unset | Required private rootfs for gVisor and namespaces; `/` is rejected |
-| `COOP_SANDBOX_HELPER` | sibling `coop-sandbox-init` | Dedicated single-threaded Linux x86_64 bootstrap helper; package and version it with `coop` |
-| `COOP_GVISOR_RUNSC` | unset | Absolute path to the reviewed `runsc` binary |
-| `COOP_GVISOR_ROOTFS_SHA256` | unset | SHA-256 of the exact `/.coop-rootfs.manifest`; required in gVisor mode |
-| `COOP_GVISOR_PLATFORM` | `systrap` | Reviewed gVisor platform (`systrap`, or `kvm` on a separately reviewed host) |
-| `COOP_ATTESTATION_MODE` | `off` in development; signing required in production | `sign` or explicit `off` |
-| `COOP_ATTESTATION_KEY_FILE` | unset | Strict Ed25519 PKCS#8 key; required for signing and must be absolute in production |
-| `COOP_UNSAFE_ALLOW_NAIVE` | false | Required acknowledgement for an explicit unisolated production-mode process |
-| `COOP_SECCOMP` | `auto` | Namespace syscall filter; cannot be disabled in production |
-| `COOP_JOBS_ROOT` | `/var/lib/coop/jobs` on Linux | Dedicated absolute non-symlink staging directory |
-| `COOP_WORKERS` | `4` | Worker count |
-| `COOP_TENANT_CONCURRENCY` | `2` | Concurrent jobs per tenant |
-| `COOP_TENANT_QUEUE_CAPACITY` | `64` | Durable accepted-but-queued jobs per tenant |
-| `COOP_MAX_JOB_MEM_MB` / `COOP_MEMORY_BUDGET_MB` | `1024` / `4096` | Per-job ceiling and weighted aggregate in-flight memory budget |
-| `COOP_STORAGE_TENANT_MB` / `COOP_STORAGE_GLOBAL_MB` | `4096` / `16384` | Transactional logical retained-data quotas |
-| `COOP_STORAGE_FREE_RESERVE_MB` | `1024` | Filesystem free-space watermark below which growth fails closed |
-| `COOP_RATE_PER_MIN` | `120` | Requests per minute per tenant |
-| `COOP_RETENTION_HOURS` | `168` | Terminal-job retention; `0` disables deletion |
-| `COOP_SWEEP_INTERVAL_SECS` | `3600` | Retention sweep interval, minimum 60 |
-| `COOP_PYTHON`, `COOP_NODE`, `COOP_BASH` | `PATH` lookup | Interpreter overrides; paths must exist in the private rootfs too |
+| `ROOKHOLD_SANDBOX` | `auto` | `gvisor`, `ns`, `auto`, or `off`; production does not silently downgrade and Compose defaults to `gvisor` |
+| `ROOKHOLD_ROOTFS` | unset | Required private rootfs for gVisor and namespaces; `/` is rejected |
+| `ROOKHOLD_SANDBOX_HELPER` | sibling `rookhold-sandbox-init` | Dedicated single-threaded Linux x86_64 bootstrap helper; package and version it with `rookhold` |
+| `ROOKHOLD_GVISOR_RUNSC` | unset | Absolute path to the reviewed `runsc` binary |
+| `ROOKHOLD_GVISOR_ROOTFS_SHA256` | unset | SHA-256 of the exact `/.coop-rootfs.manifest`; required in gVisor mode |
+| `ROOKHOLD_GVISOR_PLATFORM` | `systrap` | Reviewed gVisor platform (`systrap`, or `kvm` on a separately reviewed host) |
+| `ROOKHOLD_ATTESTATION_MODE` | `off` in development; signing required in production | `sign` or explicit `off` |
+| `ROOKHOLD_ATTESTATION_KEY_FILE` | unset | Strict Ed25519 PKCS#8 key; required for signing and must be absolute in production |
+| `ROOKHOLD_UNSAFE_ALLOW_NAIVE` | false | Required acknowledgement for an explicit unisolated production-mode process |
+| `ROOKHOLD_SECCOMP` | `auto` | Namespace syscall filter; cannot be disabled in production |
+| `ROOKHOLD_JOBS_ROOT` | `/var/lib/rookhold/jobs` on Linux | Dedicated absolute non-symlink staging directory |
+| `ROOKHOLD_WORKERS` | `4` | Worker count |
+| `ROOKHOLD_TENANT_CONCURRENCY` | `2` | Concurrent jobs per tenant |
+| `ROOKHOLD_TENANT_QUEUE_CAPACITY` | `64` | Durable accepted-but-queued jobs per tenant |
+| `ROOKHOLD_MAX_JOB_MEM_MB` / `ROOKHOLD_MEMORY_BUDGET_MB` | `1024` / `4096` | Per-job ceiling and weighted aggregate in-flight memory budget |
+| `ROOKHOLD_STORAGE_TENANT_MB` / `ROOKHOLD_STORAGE_GLOBAL_MB` | `4096` / `16384` | Transactional logical retained-data quotas |
+| `ROOKHOLD_STORAGE_FREE_RESERVE_MB` | `1024` | Filesystem free-space watermark below which growth fails closed |
+| `ROOKHOLD_RATE_PER_MIN` | `120` | Requests per minute per tenant |
+| `ROOKHOLD_RETENTION_HOURS` | `168` | Terminal-job retention; `0` disables deletion |
+| `ROOKHOLD_SWEEP_INTERVAL_SECS` | `3600` | Retention sweep interval, minimum 60 |
+| `ROOKHOLD_PYTHON`, `ROOKHOLD_NODE`, `ROOKHOLD_BASH` | `PATH` lookup | Interpreter overrides; paths must exist in the private rootfs too |
 | `RUST_LOG` | `info` | Rust tracing filter |
 
 Requested limits are clamped to compiled ceilings before execution, but
@@ -487,7 +500,7 @@ development backend retains the service account's host networking and reports
 | `crates/coop-types` | API types, statuses, and limit ceilings |
 | `crates/coop-store` | SQLite jobs, events, quotas, signing outbox, and exact attestation artifacts |
 | `crates/coop-exec` | development, Linux namespace, and per-job gVisor OCI providers |
-| `crates/coop-attestation` | DSSE/in-toto profile, Ed25519 keys, and `coop-verify` |
+| `crates/coop-attestation` | DSSE/in-toto profile, Ed25519 keys, and `rookhold-verify` |
 | `crates/coop-server` | API, fair scheduler, identity, observability, signer, dashboard, and OpenAPI |
 | `sdks` | Python and TypeScript clients |
 | `integrations` | MCP, Hermes, and OpenClaw setup templates |
@@ -515,13 +528,13 @@ Containment tests and isolated providers are Linux x86_64-only. Namespace tests 
 
 ```bash
 sudo env \
-  COOP_ROOTFS=/opt/coop/rootfs \
-  COOP_SANDBOX_HELPER=/usr/local/bin/coop-sandbox-init \
+  ROOKHOLD_ROOTFS=/opt/rookhold/rootfs \
+  ROOKHOLD_SANDBOX_HELPER=/usr/local/bin/rookhold-sandbox-init \
   cargo test --locked -p coop-server --test hostile -- --ignored --nocapture
 
 sudo env \
-  COOP_GVISOR_RUNSC=/usr/local/bin/runsc \
-  COOP_GVISOR_SERVER_BIN=target/debug/coop \
+  ROOKHOLD_GVISOR_RUNSC=/usr/local/bin/runsc \
+  ROOKHOLD_GVISOR_SERVER_BIN=target/debug/rookhold \
   bash scripts/smoke-gvisor.sh
 ```
 
@@ -551,7 +564,7 @@ Issues and focused pull requests are welcome. Start with [CONTRIBUTING.md](CONTR
 
 ## Project direction
 
-Coop now has the hardened-runtime, signed-evidence, scoped-identity, MCP 2026,
+Rookhold now has the hardened-runtime, signed-evidence, scoped-identity, MCP 2026,
 and bounded-observability foundations selected by the v0.4 research. The next
 credible steps are external KMS/HSM signing and key history, transparency
 anchoring, a destination-bound credential broker for tightly controlled

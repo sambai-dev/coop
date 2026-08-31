@@ -319,7 +319,7 @@ fn readiness_probe_requires_current_versions_and_both_data_tables() {
             .execute(&mut connection)
             .await
             .unwrap();
-        // Model an offline/corrupting writer that bypassed Coop's immutable
+        // Model an offline/corrupting writer that bypassed Rookhold's immutable
         // migration-history guard. Readiness must detect the marker drift but
         // must never repair it as a side effect.
         sqlx::query("DROP TRIGGER coop_schema_migrations_storage_guard_delete")

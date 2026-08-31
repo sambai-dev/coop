@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate, inventory, and reconcile Coop release artifacts.
+"""Validate, inventory, and reconcile Rookhold release artifacts.
 
 This script is intentionally standard-library-only so the privileged publish job
 can establish its exact release boundary before installing any dependencies.
@@ -28,18 +28,18 @@ COPY_CHUNK_BYTES = 1024 * 1024
 def payload_names(version: str) -> tuple[str, ...]:
     require_version(version)
     return (
-        "coop-aarch64-apple-darwin.tar.gz",
-        "coop-sdk-" + version + ".tgz",
-        "coop-x86_64-pc-windows-msvc.zip",
-        "coop-x86_64-unknown-linux-musl.tar.gz",
-        "coop_sdk-" + version + "-py3-none-any.whl",
-        "coop_sdk-" + version + ".tar.gz",
+        "rookhold-aarch64-apple-darwin.tar.gz",
+        "rookhold-sdk-" + version + ".tgz",
+        "rookhold-x86_64-pc-windows-msvc.zip",
+        "rookhold-x86_64-unknown-linux-musl.tar.gz",
+        "rookhold_sdk-" + version + "-py3-none-any.whl",
+        "rookhold_sdk-" + version + ".tar.gz",
     )
 
 
 def sbom_name(version: str) -> str:
     require_version(version)
-    return "coop-" + version + ".spdx.json"
+    return "rookhold-" + version + ".spdx.json"
 
 
 def release_names(version: str) -> tuple[str, ...]:
@@ -214,14 +214,18 @@ def extract_zip(archive_path: Path, destination: Path) -> None:
 
 
 def required_paths(asset: str, version: str) -> tuple[str, ...]:
-    if asset == "coop-x86_64-unknown-linux-musl.tar.gz":
-        root = "coop-x86_64-unknown-linux-musl"
+    if asset == "rookhold-x86_64-unknown-linux-musl.tar.gz":
+        root = "rookhold-x86_64-unknown-linux-musl"
         return tuple(
             f"{root}/{name}"
             for name in (
+                "rookhold",
                 "coop",
+                "rookhold-verify",
                 "coop-verify",
+                "rookhold-sandbox-init",
                 "coop-sandbox-init",
+                "rookhold-oci-init",
                 "coop-oci-init",
                 "README.md",
                 "LICENSE",
@@ -236,12 +240,14 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
                 "scripts/smoke-gvisor.sh",
             )
         )
-    if asset == "coop-aarch64-apple-darwin.tar.gz":
-        root = "coop-aarch64-apple-darwin"
+    if asset == "rookhold-aarch64-apple-darwin.tar.gz":
+        root = "rookhold-aarch64-apple-darwin"
         return tuple(
             f"{root}/{name}"
             for name in (
+                "rookhold",
                 "coop",
+                "rookhold-verify",
                 "coop-verify",
                 "README.md",
                 "LICENSE",
@@ -256,12 +262,14 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
                 "scripts/smoke-gvisor.sh",
             )
         )
-    if asset == "coop-x86_64-pc-windows-msvc.zip":
-        root = "coop-x86_64-pc-windows-msvc"
+    if asset == "rookhold-x86_64-pc-windows-msvc.zip":
+        root = "rookhold-x86_64-pc-windows-msvc"
         return tuple(
             f"{root}/{name}"
             for name in (
+                "rookhold.exe",
                 "coop.exe",
+                "rookhold-verify.exe",
                 "coop-verify.exe",
                 "README.md",
                 "LICENSE",
@@ -274,33 +282,41 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
                 "integrations",
             )
         )
-    if asset == "coop_sdk-" + version + "-py3-none-any.whl":
+    if asset == "rookhold_sdk-" + version + "-py3-none-any.whl":
         return (
+            "rookhold/__init__.py",
+            "rookhold/py.typed",
+            "rookhold_mcp.py",
             "coop/__init__.py",
             "coop/py.typed",
             "coop_mcp.py",
-            f"coop_sdk-{version}.dist-info/METADATA",
-            f"coop_sdk-{version}.dist-info/RECORD",
+            f"rookhold_sdk-{version}.dist-info/METADATA",
+            f"rookhold_sdk-{version}.dist-info/RECORD",
         )
-    if asset == "coop_sdk-" + version + ".tar.gz":
-        root = "coop_sdk-" + version
+    if asset == "rookhold_sdk-" + version + ".tar.gz":
+        root = "rookhold_sdk-" + version
         return tuple(
             f"{root}/{name}"
             for name in (
+                "rookhold.py",
+                "rookhold_mcp.py",
                 "coop.py",
                 "coop_mcp.py",
                 "py.typed",
+                "coop.py.typed",
                 "pyproject.toml",
                 "README.md",
                 "LICENSE",
                 "tests",
             )
         )
-    if asset == "coop-sdk-" + version + ".tgz":
+    if asset == "rookhold-sdk-" + version + ".tgz":
         return (
             "package/package.json",
             "package/README.md",
             "package/LICENSE",
+            "package/dist/rookhold.js",
+            "package/dist/rookhold.d.ts",
             "package/dist/coop.js",
             "package/dist/coop.d.ts",
         )
@@ -325,14 +341,14 @@ def write_checksums(path: Path, directory: Path, names: Iterable[str]) -> None:
 
 def assemble(downloads: Path, dist: Path, version: str) -> None:
     containers = {
-        "coop-sdks": (
-            "coop-sdk-" + version + ".tgz",
-            "coop_sdk-" + version + "-py3-none-any.whl",
-            "coop_sdk-" + version + ".tar.gz",
+        "rookhold-sdks": (
+            "rookhold-sdk-" + version + ".tgz",
+            "rookhold_sdk-" + version + "-py3-none-any.whl",
+            "rookhold_sdk-" + version + ".tar.gz",
         ),
-        "coop-aarch64-apple-darwin": ("coop-aarch64-apple-darwin.tar.gz",),
-        "coop-x86_64-pc-windows-msvc": ("coop-x86_64-pc-windows-msvc.zip",),
-        "coop-x86_64-unknown-linux-musl": ("coop-x86_64-unknown-linux-musl.tar.gz",),
+        "rookhold-aarch64-apple-darwin": ("rookhold-aarch64-apple-darwin.tar.gz",),
+        "rookhold-x86_64-pc-windows-msvc": ("rookhold-x86_64-pc-windows-msvc.zip",),
+        "rookhold-x86_64-unknown-linux-musl": ("rookhold-x86_64-unknown-linux-musl.tar.gz",),
     }
     if not downloads.is_dir() or downloads.is_symlink():
         raise ValueError(f"artifact-download root is not a real directory: {downloads}")
@@ -401,7 +417,7 @@ def prepare(dist: Path, output: Path, checksums: Path, version: str) -> None:
             "size": asset.stat().st_size,
             "files": len(files),
         }
-        marker_path = asset_root / ".coop-release-artifact.json"
+        marker_path = asset_root / ".rookhold-release-artifact.json"
         with marker_path.open("x", encoding="utf-8", newline="\n") as handle:
             handle.write(
                 json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n"
@@ -413,7 +429,7 @@ def prepare(dist: Path, output: Path, checksums: Path, version: str) -> None:
 
 
 def verify_sbom(sbom: Path, version: str) -> None:
-    expected_name = "coop-release-" + version
+    expected_name = "rookhold-release-" + version
     if sbom.is_symlink() or not sbom.is_file() or sbom.stat().st_size <= 0:
         raise ValueError(f"SBOM is not a non-empty regular file: {sbom}")
     if sbom.stat().st_size > 16 * 1024 * 1024:
@@ -441,7 +457,7 @@ def verify_sbom(sbom: Path, version: str) -> None:
         for item in document.get("files", [])
     }
     for asset in payload_names(version):
-        marker = asset + "/.coop-release-artifact.json"
+        marker = asset + "/.rookhold-release-artifact.json"
         if marker not in file_names:
             raise ValueError(
                 f"release SBOM did not inventory the bound marker for {asset}"

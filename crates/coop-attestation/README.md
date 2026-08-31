@@ -1,20 +1,21 @@
 # coop-attestation
 
 `coop-attestation` is the isolated signing and verification component for
-portable Coop execution evidence. It does not modify the server, scheduler,
+portable Rookhold execution evidence. It does not modify the server, scheduler,
 store, API, or existing receipt format.
 
-The default `cli` feature builds `coop-verify`. A server that only needs the
+The default `cli` feature builds `rookhold-verify` plus the compatibility
+alias `coop-verify`. A server that only needs the
 library may depend on the crate with `default-features = false`.
 
 It provides:
 
-- a typed in-toto Statement/v1 Coop predicate;
+- a typed in-toto Statement/v1 Rookhold predicate;
 - exact-byte DSSE v1 PAE;
 - Ed25519 multi-signature and distinct-key threshold verification;
 - result-artifact SHA-256 and schema/profile validation;
 - strict canonical PKCS#8/SPKI key files;
-- the `coop-verify` key-management and offline-verification CLI.
+- the `rookhold-verify` key-management and offline-verification CLI.
 
 Read [FORMAT.md](FORMAT.md) before integrating it. In particular, `keyid` is
 only a hint, statement parsing occurs only after signature verification, and a
@@ -67,14 +68,14 @@ returns the exact verified statement bytes alongside the typed view.
 ## CLI
 
 ```text
-coop-verify generate-key --output coop-attestation.pem
-coop-verify public-key \
-  --private-key coop-attestation.pem \
-  --output coop-attestation.pub.pem
-coop-verify verify \
+rookhold-verify generate-key --output rookhold-attestation.pem
+rookhold-verify public-key \
+  --private-key rookhold-attestation.pem \
+  --output rookhold-attestation.pub.pem
+rookhold-verify verify \
   --envelope job.dsse.json \
   --subject job-result.json \
-  --public-key coop-attestation.pub.pem \
+  --public-key rookhold-attestation.pub.pem \
   --tenant tenant-id
 ```
 
@@ -90,7 +91,7 @@ and `event_chain_complete` fields against its own policy.
 
 ## Server integration
 
-Coop schema v4 now implements this boundary with a durable signing outbox:
+Rookhold schema v4 now implements this boundary with a durable signing outbox:
 
 1. terminal receipt and outbox work commit together;
 2. the trusted control plane binds `jobs.tenant` into both the predicate and
@@ -100,7 +101,7 @@ Coop schema v4 now implements this boundary with a durable signing outbox:
 5. restart backfills retained terminal rows without changing legacy v0.3
    receipt bytes or their digest;
 6. tenant-scoped endpoints return exact artifact/envelope bytes and digests;
-7. production requires a key unless `COOP_ATTESTATION_MODE=off` is explicit.
+7. production requires a key unless `ROOKHOLD_ATTESTATION_MODE=off` is explicit.
 
 Signing is intentionally eventual. The current public-key endpoint is
 discovery metadata, not trust bootstrap; operators must pin/distribute keys

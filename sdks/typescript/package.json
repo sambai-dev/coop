@@ -1,13 +1,18 @@
 {
-  "name": "coop-sdk",
-  "version": "0.5.0",
-  "description": "Typed browser and Node.js client for the Coop execution gateway",
+  "name": "rookhold-sdk",
+  "version": "0.6.0",
+  "description": "Typed browser and Node.js client for the Rookhold execution gateway",
   "type": "module",
   "sideEffects": false,
-  "main": "./dist/coop.js",
-  "types": "./dist/coop.d.ts",
+  "main": "./dist/rookhold.js",
+  "types": "./dist/rookhold.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/rookhold.d.ts",
+      "import": "./dist/rookhold.js",
+      "default": "./dist/rookhold.js"
+    },
+    "./coop": {
       "types": "./dist/coop.d.ts",
       "import": "./dist/coop.js",
       "default": "./dist/coop.js"
@@ -15,6 +20,7 @@
   },
   "files": [
     "dist",
+    "rookhold.ts",
     "coop.ts",
     "LICENSE",
     "README.md"
@@ -41,11 +47,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sambai-dev/coop.git",
+    "url": "git+https://github.com/sambai-dev/rookhold.git",
     "directory": "sdks/typescript"
   },
-  "bugs": "https://github.com/sambai-dev/coop/issues",
-  "homepage": "https://github.com/sambai-dev/coop#readme",
+  "bugs": "https://github.com/sambai-dev/rookhold/issues",
+  "homepage": "https://github.com/sambai-dev/rookhold#readme",
   "devDependencies": {
     "typescript": "^7.0.2"
   }

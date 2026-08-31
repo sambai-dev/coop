@@ -345,7 +345,7 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "coop-attestation"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64",
  "clap",
@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "coop-exec"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "coop-types",
  "libc",
@@ -380,7 +380,7 @@ dependencies = [
 
 [[package]]
 name = "coop-server"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -414,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "coop-store"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64",
  "futures-util",
@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "coop-types"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",

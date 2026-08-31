@@ -1,4 +1,4 @@
-# Coop security review record
+# Rookhold security review record
 
 **Review date:** 2026-08-26
 
@@ -68,13 +68,13 @@ These changes materially improve the previous release, but they do not turn Linu
 |---|---|---|---|
 | R-001 | Shared kernel | Namespace jobs share the VM kernel and interpreter attack surface | Dedicated VM; patch promptly; use a hardened external runtime for hostile multi-tenancy when integrated |
 | R-002 | Container packaging | Compose uses `privileged: true` to manage namespaces/mounts/cgroups | Run only inside a dedicated VM; never on a mixed-trust Docker host |
-| R-003 | Trusted server/store | The Coop process and SQLite administrator can rewrite state and recompute hashes | Restrict access; export evidence to independently controlled immutable storage when required |
+| R-003 | Trusted server/store | The Rookhold process and SQLite administrator can rewrite state and recompute hashes | Restrict access; export evidence to independently controlled immutable storage when required |
 | R-004 | Browser streaming | Browser WebSockets cannot send a bearer header; URL-key compatibility can leak in logs/history | Keep dashboard trusted/private; avoid query credentials where possible; rotate exposed keys |
 | R-005 | Single node | Queue, tenant admission, and live fan-out are process-local | One active server per database; no horizontal scaling claim |
 | R-006 | No egress broker | Namespace jobs have no supported network access; development subprocesses retain host egress | Fetch through trusted adapters and pass bounded input; never run untrusted code in subprocess mode |
 | R-007 | Rootfs supply chain | Interpreter packages inside the private rootfs are trusted inputs | Build from approved snapshots, record manifests/digests, scan and patch |
 | R-008 | Architecture support | The v0.2 namespace/seccomp backend supports Linux x86_64 only | Treat macOS, Windows, and non-x86_64 Linux as unisolated development platforms |
-| R-009 | Forced-abort cleanup | Lease drop synchronously requests `cgroup.kill`, waits up to two seconds for `populated 0`, and removes the leaf; a hard process/host kill can still interrupt that bounded cleanup | Keep shutdown grace above worker grace; alert on and reconcile populated or stale Coop cgroups before admission |
+| R-009 | Forced-abort cleanup | Lease drop synchronously requests `cgroup.kill`, waits up to two seconds for `populated 0`, and removes the leaf; a hard process/host kill can still interrupt that bounded cleanup | Keep shutdown grace above worker grace; alert on and reconcile populated or stale Rookhold cgroups before admission |
 
 ## Receipt and event-chain semantics
 

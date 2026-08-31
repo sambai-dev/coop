@@ -3,24 +3,24 @@
 {
   mcp: {
     servers: {
-      coop: {
-        command: "coop-mcp",
+      rookhold: {
+        command: "rookhold-mcp",
         args: [],
         env: {
-          COOP_BASE_URL: "${COOP_BASE_URL}",
-          COOP_API_KEY: "${COOP_API_KEY}",
-          COOP_MCP_MINIMUM_ISOLATION: "${COOP_MCP_MINIMUM_ISOLATION}",
-          COOP_MCP_ALLOWED_LANGUAGES: "${COOP_MCP_ALLOWED_LANGUAGES}",
+          ROOKHOLD_BASE_URL: "${ROOKHOLD_BASE_URL}",
+          ROOKHOLD_API_KEY: "${ROOKHOLD_API_KEY}",
+          ROOKHOLD_MCP_MINIMUM_ISOLATION: "${ROOKHOLD_MCP_MINIMUM_ISOLATION}",
+          ROOKHOLD_MCP_ALLOWED_LANGUAGES: "${ROOKHOLD_MCP_ALLOWED_LANGUAGES}",
         },
         requestTimeoutMs: 330000,
         connectionTimeoutMs: 30000,
         supportsParallelToolCalls: false,
         toolFilter: {
           include: [
-            "coop_run_code",
-            "coop_job_result",
-            "coop_job_events",
-            "coop_cancel_job",
+            "rookhold_run_code",
+            "rookhold_job_result",
+            "rookhold_job_events",
+            "rookhold_cancel_job",
           ],
         },
       },

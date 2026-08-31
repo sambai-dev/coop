@@ -1,9 +1,9 @@
-//! Portable, exact-byte signed execution attestations for Coop.
+//! Portable, exact-byte signed execution attestations for Rookhold.
 //!
 //! The crate defines a deliberately narrow profile:
 //!
 //! - one in-toto [`StatementV1`] subject, identified by SHA-256;
-//! - one tenant-bound [`CoopExecutionPredicateV1`] containing a Coop receipt;
+//! - one tenant-bound [`CoopExecutionPredicateV1`] containing a Rookhold receipt;
 //! - JSON DSSE with v1 pre-authentication encoding (PAE);
 //! - strict Ed25519 signing and verification against configured public keys;
 //! - signature verification before statement JSON parsing.

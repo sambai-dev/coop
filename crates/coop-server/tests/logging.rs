@@ -33,7 +33,7 @@ fn json_mode_fatal_startup_is_ndjson_without_plaintext_suffix() {
         records > 0,
         "fatal startup must emit a structured diagnosis"
     );
-    assert!(combined.contains("coop terminated"), "{combined}");
+    assert!(combined.contains("Rookhold terminated"), "{combined}");
     assert!(
         !combined.contains("\nerror:"),
         "plaintext fatal suffix: {combined}"

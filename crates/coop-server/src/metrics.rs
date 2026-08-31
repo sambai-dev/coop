@@ -737,7 +737,7 @@ impl Metrics {
             &mut output,
             format,
             "coop_up",
-            "Whether this Coop process is running.",
+            "Whether this Rookhold process is running.",
             "gauge",
             None,
         );
@@ -746,7 +746,7 @@ impl Metrics {
             &mut output,
             format,
             "coop_process_uptime_seconds",
-            "Seconds since this Coop process initialized telemetry.",
+            "Seconds since this Rookhold process initialized telemetry.",
             "gauge",
             Some("seconds"),
         );
@@ -760,12 +760,16 @@ impl Metrics {
             &mut output,
             format,
             "coop_build_info",
-            "Build information for the running Coop binary.",
+            "Build information for the running Rookhold binary.",
             "gauge",
             None,
         );
         let version = escape_label_value(env!("CARGO_PKG_VERSION"));
-        let revision = escape_label_value(option_env!("COOP_GIT_REVISION").unwrap_or("unknown"));
+        let revision = escape_label_value(
+            option_env!("ROOKHOLD_GIT_REVISION")
+                .or(option_env!("COOP_GIT_REVISION"))
+                .unwrap_or("unknown"),
+        );
         writeln!(
             output,
             "coop_build_info{{version=\"{}\",revision=\"{}\"}} 1",
@@ -796,7 +800,7 @@ impl Metrics {
             output,
             format,
             "coop_http_server_active_requests",
-            "HTTP requests currently executing in Coop.",
+            "HTTP requests currently executing in Rookhold.",
             "gauge",
             None,
         );
@@ -1199,7 +1203,7 @@ fn render_runtime(format: ExpositionFormat, output: &mut String, snapshot: Runti
         output,
         format,
         "coop_ready",
-        "Whether Coop is ready to accept production traffic.",
+        "Whether Rookhold is ready to accept production traffic.",
         "gauge",
         None,
     );
@@ -1443,8 +1447,11 @@ mod tests {
         assert!(body.contains("coop_executions_active 0"));
         assert!(body.contains("coop_queue_depth 3"));
         assert!(body.contains("coop_build_info"));
-        let expected_revision =
-            escape_label_value(option_env!("COOP_GIT_REVISION").unwrap_or("unknown"));
+        let expected_revision = escape_label_value(
+            option_env!("ROOKHOLD_GIT_REVISION")
+                .or(option_env!("COOP_GIT_REVISION"))
+                .unwrap_or("unknown"),
+        );
         assert!(
             body.contains(&format!("revision=\"{expected_revision}\"")),
             "{body}"

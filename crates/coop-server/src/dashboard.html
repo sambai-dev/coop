@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light">
-<title>Coop · Execution desk</title>
+<title>Rookhold · Execution desk</title>
 <style>
 :root {
   color-scheme: light;
@@ -355,7 +355,7 @@ dialog::backdrop { background: rgba(31, 41, 55, .42); }
   .limit-grid { grid-template-columns: 1fr 1fr; }
 }
 
-/* v0.5 — Chalk-and-Carbon Execution Desk */
+/* v0.6 — Rookhold Chalk-and-Carbon Execution Desk */
 :root {
   --canvas: #f5f6f9;
   --workbench: #fdfeff;
@@ -667,7 +667,7 @@ kbd { min-width: 18px; padding: 1px 3px; border: 1px solid var(--border); border
 </head>
 <body>
 <!--
-THESIS: Coop is a chalk-and-carbon execution desk; it refuses equal-weight dashboard chrome and makes the truthful run transcript the dominant work surface.
+THESIS: Rookhold is a chalk-and-carbon execution desk; it refuses equal-weight dashboard chrome and makes the truthful run transcript the dominant work surface.
 OWN-WORLD: Chalk command planes surround a carbon execution well; cobalt means intent, semantic colors mean real state, and one-pixel seams plus compact square controls carry the system.
 STORY: Compose a bounded run, queue it, follow actual accepted policy and ordered output, then inspect the server-reported result and portable proof without losing context.
 FIRST VIEWPORT: A 68px command bar sits above a 292px Compose/History dock, flexible chronological transcript, and closeable 310px Result & record sheet; Queue run anchors the dock.
@@ -679,8 +679,8 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
 <header class="topbar">
   <div class="brand">
-    <div class="brand-mark" aria-hidden="true">C</div>
-    <span class="brand-name">Coop</span>
+    <div class="brand-mark" aria-hidden="true">R</div>
+    <span class="brand-name">Rookhold</span>
   </div>
   <div class="topbar-divider" aria-hidden="true"></div>
   <div class="boundary-chip" id="boundaryChip" title="Server-reported execution boundary">
@@ -1309,7 +1309,7 @@ print("done")</textarea>
     } catch (error) {
       if (error && error.name === "AbortError") return;
       const authFailure = error instanceof ApiError && (error.status === 401 || error.status === 403);
-      const failure = authFailure ? "The applied API key was rejected. Enter a valid key and apply it again." : error instanceof TypeError ? "Could not reach Coop. Check that the server is running, then apply the API key again." : describeError(error);
+      const failure = authFailure ? "The applied API key was rejected. Enter a valid key and apply it again." : error instanceof TypeError ? "Could not reach Rookhold. Check that the server is running, then apply the API key again." : describeError(error);
       state.listError = failure; renderRunList(); updateSubmissionAvailability();
       setApiState("error", authFailure ? "key rejected" : "unavailable"); showNotice(failure, "error"); dom.runList.setAttribute("aria-busy", "false");
       if (!authFailure) { state.pollBackoff = Math.min(Math.max(state.pollBackoff * 2, 4000), 30000); schedulePoll(state.pollBackoff); }
@@ -1606,9 +1606,9 @@ print("done")</textarea>
     ];
     const actions = document.createElement("div"); actions.className = "section-actions"; const safeId = String(job.job_id || "run").replace(/[^a-zA-Z0-9._-]/g, "_");
     for (const button of [
-      available && artifactButton("Download envelope", attestation.envelope_url, "coop-" + safeId + ".dsse.json"),
-      available && artifactButton("Download result", attestation.result_artifact_url, "coop-" + safeId + ".result.json"),
-      capabilities && capabilities.public_key_url && artifactButton("Download key record", capabilities.public_key_url, "coop-attestation-public-key.json")
+      available && artifactButton("Download envelope", attestation.envelope_url, "rookhold-" + safeId + ".dsse.json"),
+      available && artifactButton("Download result", attestation.result_artifact_url, "rookhold-" + safeId + ".result.json"),
+      capabilities && capabilities.public_key_url && artifactButton("Download key record", capabilities.public_key_url, "rookhold-attestation-public-key.json")
     ]) if (button) actions.appendChild(button);
     const note = available ? "These are exact server-provided artifact bytes, not a dashboard verification result. The served public key and key ID are discovery material, not a trust anchor; establish trust out of band and independently verify the DSSE envelope, result digest, and receipt." : disabled ? "This server reports signed attestations disabled. Receipt hash metadata remains unsigned." : enabled ? "Signing is enabled, but a signed envelope is not available yet. Terminal evidence is refreshed briefly; reload the run if signing is still pending." : "This server did not report whether signed attestations are enabled.";
     return evidenceMetadataSection("Signed attestation", rows, actions.childElementCount ? actions : null, note);

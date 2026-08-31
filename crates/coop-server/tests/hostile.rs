@@ -60,13 +60,20 @@ fn preflight() -> bool {
         return false;
     }
 
-    for variable in ["COOP_ROOTFS", "COOP_SANDBOX_HELPER"] {
-        let configured = std::env::var(variable).ok();
+    for (variable, legacy) in [
+        ("ROOKHOLD_ROOTFS", "COOP_ROOTFS"),
+        ("ROOKHOLD_SANDBOX_HELPER", "COOP_SANDBOX_HELPER"),
+    ] {
+        let configured = std::env::var(variable)
+            .ok()
+            .or_else(|| std::env::var(legacy).ok());
         if configured
             .as_deref()
             .is_none_or(|value| !std::path::Path::new(value).exists())
         {
-            eprintln!("SKIP: {variable} must point to a prepared containment test artifact");
+            eprintln!(
+                "SKIP: {variable} (or legacy {legacy}) must point to a prepared containment test artifact"
+            );
             return false;
         }
     }
@@ -118,8 +125,12 @@ async fn spawn_app_with_root() -> (Router, String) {
         storage_free_reserve_mb: 0,
         sandbox: "ns".to_string(),
         jobs_root,
-        rootfs: std::env::var("COOP_ROOTFS").ok(),
-        sandbox_helper: std::env::var("COOP_SANDBOX_HELPER").ok(),
+        rootfs: std::env::var("ROOKHOLD_ROOTFS")
+            .ok()
+            .or_else(|| std::env::var("COOP_ROOTFS").ok()),
+        sandbox_helper: std::env::var("ROOKHOLD_SANDBOX_HELPER")
+            .ok()
+            .or_else(|| std::env::var("COOP_SANDBOX_HELPER").ok()),
         gvisor_runsc: None,
         gvisor_rootfs_sha256: None,
         gvisor_platform: "systrap".to_string(),

@@ -28,11 +28,17 @@ impl Drop for UmaskGuard {
 /// nobody, then reads urandom and writes null through the complete helper,
 /// namespace, rootfs, cgroup, and seccomp path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires root, delegated cgroup v2, COOP_ROOTFS, and COOP_SANDBOX_HELPER"]
+#[ignore = "requires root, delegated cgroup v2, ROOKHOLD_ROOTFS, and ROOKHOLD_SANDBOX_HELPER"]
 async fn restrictive_umask_preserves_private_device_access() {
-    let rootfs = PathBuf::from(std::env::var("COOP_ROOTFS").expect("COOP_ROOTFS is required"));
+    let rootfs = PathBuf::from(
+        std::env::var("ROOKHOLD_ROOTFS")
+            .or_else(|_| std::env::var("COOP_ROOTFS"))
+            .expect("ROOKHOLD_ROOTFS is required"),
+    );
     let helper = PathBuf::from(
-        std::env::var("COOP_SANDBOX_HELPER").expect("COOP_SANDBOX_HELPER is required"),
+        std::env::var("ROOKHOLD_SANDBOX_HELPER")
+            .or_else(|_| std::env::var("COOP_SANDBOX_HELPER"))
+            .expect("ROOKHOLD_SANDBOX_HELPER is required"),
     );
     let jobs_root = std::env::temp_dir().join(format!(
         "coop-restrictive-umask-preflight-{}",

@@ -1,26 +1,26 @@
 # SDKs
 
-Coop ships small reference clients under `sdks/`. They intentionally mirror the HTTP API and are suitable for embedding in agent tool loops. The OpenAPI document remains the canonical contract for generated clients.
+Rookhold ships small reference clients under `sdks/`. They intentionally mirror the HTTP API and are suitable for embedding in agent tool loops. The OpenAPI document remains the canonical contract for generated clients.
 
-The v0.5 release workflow tests SDK source and installs both the built Python wheel and source distribution before including them, plus the npm package tarball, in the checksummed, attested GitHub release. It does not publish PyPI or npm registries. Use an exact GitHub release asset or the source-checkout paths below until a separately authenticated registry release is announced.
+The v0.6 release workflow tests SDK source and installs both the built Python wheel and source distribution before including them, plus the npm package tarball, in the checksummed, attested GitHub release. It does not publish PyPI or npm registries. Use an exact GitHub release asset or the source-checkout paths below until a separately authenticated registry release is announced.
 
-To install the v0.5.0 release, activate the intended Python virtual environment and download the exact release assets into an otherwise empty working directory. This example verifies both the checksum manifest and GitHub provenance before installation:
+To install the v0.6.0 release, activate the intended Python virtual environment and download the exact release assets into an otherwise empty working directory. This example verifies both the checksum manifest and GitHub provenance before installation:
 
 ```bash
 set -euo pipefail
-version=0.5.0
-python_asset="coop_sdk-${version}-py3-none-any.whl"
-typescript_asset="coop-sdk-${version}.tgz"
+version=0.6.0
+python_asset="rookhold_sdk-${version}-py3-none-any.whl"
+typescript_asset="rookhold-sdk-${version}.tgz"
 sdk_asset_dir="$PWD"
-gh release download "v${version}" --repo sambai-dev/coop \
+gh release download "v${version}" --repo sambai-dev/rookhold \
   --pattern "$python_asset" \
   --pattern "$typescript_asset" \
   --pattern SHA256SUMS
 verify_github_asset() {
-  gh release verify-asset "v${version}" "$1" --repo sambai-dev/coop
+  gh release verify-asset "v${version}" "$1" --repo sambai-dev/rookhold
   gh attestation verify "$1" \
-    --repo sambai-dev/coop \
-    --signer-workflow sambai-dev/coop/.github/workflows/release.yml \
+    --repo sambai-dev/rookhold \
+    --signer-workflow sambai-dev/rookhold/.github/workflows/release.yml \
     --source-ref "refs/tags/v${version}" \
     --predicate-type https://slsa.dev/provenance/v1 \
     --deny-self-hosted-runners
@@ -39,16 +39,16 @@ python -m pip install --no-deps "./$python_asset"
 npm install "${sdk_asset_dir}/${typescript_asset}"
 ```
 
-The release also includes `coop_sdk-0.5.0.tar.gz` for consumers that require a Python source distribution. On macOS or Windows, use the platform checksum commands shown in [deployment](deployment.md) in place of `sha256sum`; keep the same release-asset and constrained workflow-provenance verification.
+The release also includes `rookhold_sdk-0.6.0.tar.gz` for consumers that require a Python source distribution. On macOS or Windows, use the platform checksum commands shown in [deployment](deployment.md) in place of `sha256sum`; keep the same release-asset and constrained workflow-provenance verification.
 
 ## Python
 
 The Python client uses only the standard library. From a source checkout, install it with `python -m pip install --no-deps ./sdks/python`, then:
 
 ```python
-from coop import Coop, Limits
+from rookhold import Limits, Rookhold
 
-client = Coop("http://127.0.0.1:7300", "coop-dev-key")
+client = Rookhold("http://127.0.0.1:7300", "rookhold-dev-key")
 job = client.submit(
     "python",
     "print(6 * 7)",
@@ -96,10 +96,10 @@ Save both byte arrays directly and verify them offline with an independently
 pinned public key:
 
 ```bash
-coop-verify verify \
+rookhold-verify verify \
   --envelope job.dsse.json \
   --subject job-result.json \
-  --public-key trusted-coop-attestation.pub.pem \
+  --public-key trusted-rookhold-attestation.pub.pem \
   --tenant "$EXPECTED_TENANT" \
   --subject-name "coop://jobs/$JOB_ID/result" \
   --media-type application/vnd.coop.execution-result.v1+json
@@ -120,9 +120,9 @@ authenticates the claim and exact subject, not a successful execution outcome.
 Build and test the TypeScript package with `npm ci && npm test && npm run typecheck` under `sdks/typescript`; `npm pack` then creates an installable tarball for a consuming project. It uses platform `fetch` and `WebSocket`:
 
 ```ts
-import { Coop } from "coop-sdk";
+import { Rookhold } from "rookhold-sdk";
 
-const client = new Coop("http://127.0.0.1:7300", "coop-dev-key");
+const client = new Rookhold("http://127.0.0.1:7300", "rookhold-dev-key");
 const job = await client.submit("node", "console.log(6 * 7)", {
   limits: { wall_seconds: 10, mem_mb: 256 },
 });
@@ -130,12 +130,12 @@ const result = await client.result(job.job_id, 60_000);
 console.log(result.stdout);
 ```
 
-Browser clients must normally be served from the same origin as Coop. The
+Browser clients must normally be served from the same origin as Rookhold. The
 server does not enable permissive CORS. Cross-origin browser access requires an
 explicit origin allowlist at the reverse proxy, and exposes the bearer key to
 the frontend runtime.
 
-Node versions without a global `WebSocket` fall back to cursor replay. Both SDKs mint a one-use stream ticket before opening a WebSocket. Legacy API-key query compatibility is disabled by default and accepts only an explicit opt-in plus an unstructured v0.1 endpoint-missing response; structured Coop errors never put a key in a URL. Review [api.md](api.md) before enabling it for a trusted legacy server.
+Node versions without a global `WebSocket` fall back to cursor replay. Both SDKs mint a one-use stream ticket before opening a WebSocket. Legacy API-key query compatibility is disabled by default and accepts only an explicit opt-in plus an unstructured v0.1 endpoint-missing response; structured Rookhold errors never put a key in a URL. Review [api.md](api.md) before enabling it for a trusted legacy server.
 
 `wait` and `result` reject non-finite deadlines, treat a zero budget as an immediate timeout, and cap each in-flight request to the remaining overall budget. A structured `job_not_found` response is returned to the caller and is never mistaken for evidence that `/result` or `/stream-ticket` is a missing legacy route.
 
@@ -146,12 +146,12 @@ The server may deliberately close a response connection after 30 seconds with ze
 Expose one narrow tool to the model:
 
 1. validate the requested language and your application-level policy;
-2. submit to Coop with limits smaller than or equal to your tenant ceiling;
+2. submit to Rookhold with limits smaller than or equal to your tenant ceiling;
 3. wait through `/result` or consume the stream;
 4. return bounded stdout, stderr, terminal status, and violations to the agent;
-5. retain the Coop job ID in the parent trace for investigation.
+5. retain the Rookhold job ID in the parent trace for investigation.
 
-Do not give a model the Coop API key or let it choose the Coop base URL. Keep
+Do not give a model the Rookhold API key or let it choose the Rookhold base URL. Keep
 both in the trusted tool adapter. Configure the adapter's minimum isolation as
 operator policy and validate the terminal observed class. Do not transparently
 retry an unkeyed submission because a network timeout does not prove the server
@@ -159,4 +159,11 @@ rejected the first request.
 
 ## Compatibility
 
-The clients follow the additive v0.4 routes while retaining documented legacy fallbacks. Before upgrading either side independently, run its tests against the target server and compare `/openapi.json`. Coop does not yet promise a multi-major compatibility window.
+The clients follow the additive v0.4 routes while retaining documented legacy
+fallbacks. Python continues to export `Coop` and `CoopError` from `coop`; the
+TypeScript package provides the same aliases from `rookhold-sdk/coop`. The v1
+`coop://` subject and `application/vnd.coop...` media type in verification
+examples are intentional evidence identities. Before upgrading either side
+independently, run its tests against the target server and compare
+`/openapi.json`. Rookhold does not yet promise a multi-major compatibility
+window.

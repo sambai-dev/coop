@@ -3,11 +3,17 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
-  Coop,
-  CoopError,
+  Rookhold,
+  RookholdError,
   ISOLATION_CLASSES,
   isolationSatisfies,
-} from "../dist/coop.js";
+} from "../dist/rookhold.js";
+import { Coop, CoopError } from "../dist/coop.js";
+
+test("legacy Coop exports alias the Rookhold client", () => {
+  assert.equal(Coop, Rookhold);
+  assert.equal(CoopError, RookholdError);
+});
 
 function response(value, status = 200, headers = {}) {
   return new Response(value === undefined ? null : JSON.stringify(value), {
@@ -67,7 +73,7 @@ class FakeSocket {
 
 test("submit sends one correctly nested limits object", async () => {
   const transport = queuedFetch(response({ job_id: "j", status: "queued", stream_url: "/s", replay_url: "/r" }, 201));
-  const coop = new Coop("https://example.test/prefix/", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test/prefix/", "secret", { fetch: transport.fetch });
   await coop.submit("python", "print(1)", { stdin: "x", limits: { mem_mb: 128 } });
   assert.equal(transport.calls[0].url.toString(), "https://example.test/prefix/v1/jobs");
   assert.deepEqual(JSON.parse(transport.calls[0].init.body), {
@@ -82,7 +88,7 @@ test("submit sends a typed minimum-isolation requirement", async () => {
   const transport = queuedFetch(
     response({ job_id: "j", status: "queued", stream_url: "/s", replay_url: "/r" }, 201),
   );
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   await coop.submit("python", "print(1)", {
     requirements: { minimum_isolation: "linux-shared-kernel" },
   });
@@ -131,7 +137,7 @@ test("submitResult exposes Location and Idempotency-Replayed headers additively"
       "Idempotency-Replayed": "true",
     }),
   );
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   assert.deepEqual(await coop.submitResult("python", "pass", {
     idempotencyKey: "logical-request-result",
   }), {
@@ -154,7 +160,7 @@ test("submit preserves its body-only compatibility contract", async () => {
     Location: "/v1/jobs/j",
     "Idempotency-Replayed": "true",
   }));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   assert.deepEqual(await coop.submit("python", "pass"), body);
 });
 
@@ -164,10 +170,10 @@ test("submitResult rejects an invalid Idempotency-Replayed header", async () => 
     201,
     { "Idempotency-Replayed": "yes" },
   ));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   await assert.rejects(
     coop.submitResult("python", "pass", { idempotencyKey: "logical-request-invalid-header" }),
-    (error) => error instanceof CoopError && error.code === "invalid_response",
+    (error) => error instanceof RookholdError && error.code === "invalid_response",
   );
 });
 
@@ -176,7 +182,7 @@ test("ambiguous submission retry reuses one generated idempotency key", async ()
     new Error("connection reset after write"),
     response({ job_id: "j", status: "queued", stream_url: "/s", replay_url: "/r" }, 201),
   );
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   const submitted = await coop.submit("python", "print(1)", { retryAmbiguous: true });
   assert.equal(submitted.job_id, "j");
   assert.equal(transport.calls.length, 2);
@@ -188,9 +194,9 @@ test("ambiguous submission retry reuses one generated idempotency key", async ()
 
 test("submission ambiguity is not retryable without an idempotency key", async () => {
   const unkeyed = queuedFetch(new Error("connection reset"));
-  const coop = new Coop("https://example.test", "secret", { fetch: unkeyed.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: unkeyed.fetch });
   await assert.rejects(coop.submit("python", "print(1)"), (error) => {
-    assert(error instanceof CoopError);
+    assert(error instanceof RookholdError);
     assert.equal(error.code, "transport_error");
     assert.equal(error.retryable, false);
     assert.equal(error.idempotencyKey, undefined);
@@ -198,11 +204,11 @@ test("submission ambiguity is not retryable without an idempotency key", async (
   });
 
   const keyed = queuedFetch(new Error("connection reset"));
-  const keyedClient = new Coop("https://example.test", "secret", { fetch: keyed.fetch });
+  const keyedClient = new Rookhold("https://example.test", "secret", { fetch: keyed.fetch });
   await assert.rejects(
     keyedClient.submit("python", "print(1)", { idempotencyKey: "logical-request-1" }),
     (error) => {
-      assert(error instanceof CoopError);
+      assert(error instanceof RookholdError);
       assert.equal(error.retryable, true);
       assert.equal(error.idempotencyKey, "logical-request-1");
       return true;
@@ -216,20 +222,20 @@ test("ambiguous retry never repeats a structured HTTP rejection", async () => {
     response({ error: { code: "queue_full", message: "busy", retryable: true } }, 503),
     response({ job_id: "should-not-run" }, 201),
   );
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   await assert.rejects(
     coop.submit("python", "print(1)", {
       idempotencyKey: "logical-request-2",
       retryAmbiguous: true,
     }),
-    (error) => error instanceof CoopError && error.code === "queue_full",
+    (error) => error instanceof RookholdError && error.code === "queue_full",
   );
   assert.equal(transport.calls.length, 1);
 });
 
 test("submission idempotency keys reject controls, whitespace, and overlength", async () => {
   let calls = 0;
-  const coop = new Coop("https://example.test", "secret", {
+  const coop = new Rookhold("https://example.test", "secret", {
     fetch: async () => {
       calls += 1;
       return response({});
@@ -246,7 +252,7 @@ test("ambiguous retry does not repeat a client-side serialization failure", asyn
   let calls = 0;
   const cyclic = {};
   cyclic.self = cyclic;
-  const coop = new Coop("https://example.test", "secret", {
+  const coop = new Rookhold("https://example.test", "secret", {
     fetch: async () => {
       calls += 1;
       return response({});
@@ -259,7 +265,7 @@ test("ambiguous retry does not repeat a client-side serialization failure", asyn
       retryAmbiguous: true,
     }),
     (error) => {
-      assert(error instanceof CoopError);
+      assert(error instanceof RookholdError);
       assert.equal(error.code, "invalid_request");
       assert.equal(error.retryable, false);
       assert.equal(error.idempotencyKey, "logical-request-cyclic");
@@ -285,7 +291,7 @@ test("cancelResult returns the typed v0.4 cancellation outcome", async () => {
     already_terminal: false,
   };
   const transport = queuedFetch(response(cancellation));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   assert.deepEqual(await coop.cancelResult("j"), cancellation);
   assert.equal(transport.calls.length, 1);
   assert.equal(transport.calls[0].init.method, "DELETE");
@@ -293,7 +299,7 @@ test("cancelResult returns the typed v0.4 cancellation outcome", async () => {
 
 test("cancelResult adapts a legacy empty 200 without another request", async () => {
   const transport = queuedFetch(response(undefined));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   assert.deepEqual(await coop.cancelResult("j"), {
     job: null,
     cancellation_requested: true,
@@ -308,15 +314,15 @@ test("cancel remains a void compatibility wrapper", async () => {
     cancellation_requested: false,
     already_terminal: true,
   }));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   assert.equal(await coop.cancel("j"), undefined);
 });
 
 test("structured error preserves server diagnostics and retry delay", async () => {
   const transport = queuedFetch(response({ error: { code: "queue_full", message: "busy", request_id: "req-1", retryable: true } }, 503, { "retry-after": "2" }));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   await assert.rejects(coop.jobs(), (error) => {
-    assert(error instanceof CoopError);
+    assert(error instanceof RookholdError);
     assert.equal(error.status, 503);
     assert.equal(error.code, "queue_full");
     assert.equal(error.requestId, "req-1");
@@ -335,9 +341,9 @@ test("structured result 404 is not treated as a legacy route", async () => {
       retryable: false,
     },
   }, 404));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   await assert.rejects(coop.result("missing", 1_000), (error) => {
-    assert(error instanceof CoopError);
+    assert(error instanceof RookholdError);
     assert.equal(error.code, "job_not_found");
     return true;
   });
@@ -364,7 +370,7 @@ test("unstructured result 404 uses the legacy polling fallback", async () => {
     response({ events: [], next_cursor: null }),
     response({ events: [], next_cursor: null }),
   );
-  const result = await new Coop("https://example.test", "secret", {
+  const result = await new Rookhold("https://example.test", "secret", {
     fetch: transport.fetch,
   }).result("j", 1_000);
   assert.equal(result.stdout, "ok");
@@ -393,7 +399,7 @@ test("legacy result polling retries an empty terminal replay before folding", as
       next_cursor: null,
     }),
   );
-  const result = await new Coop("https://example.test", "secret", {
+  const result = await new Rookhold("https://example.test", "secret", {
     fetch: transport.fetch,
   }).result("j", 1_000);
   assert.equal(result.stdout, "late");
@@ -406,14 +412,14 @@ test("wait and result deadlines reject non-finite values and zero is immediate",
     calls += 1;
     return response({ status: "running" });
   };
-  const coop = new Coop("https://example.test", "secret", { fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch });
   await assert.rejects(coop.wait("j", 0), (error) => {
-    assert(error instanceof CoopError);
+    assert(error instanceof RookholdError);
     assert.equal(error.code, "job_wait_timeout");
     return true;
   });
   await assert.rejects(coop.result("j", 0), (error) => {
-    assert(error instanceof CoopError);
+    assert(error instanceof RookholdError);
     assert.equal(error.code, "job_wait_timeout");
     return true;
   });
@@ -427,7 +433,7 @@ test("list and replay use the v0.2 cursor envelopes", async () => {
     response({ items: [{ job_id: "j", status: "running" }], next_cursor: "opaque" }),
     response({ events: [{ seq: 4, kind: "stdout", data: { line: "x" }, ts_ms: 1 }], next_cursor: 4 }),
   );
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   const jobs = await coop.list({ limit: 10, cursor: "before", status: "running", language: "python" });
   const events = await coop.eventPage("job/id", { after: 3, limit: 20 });
   assert.equal(jobs.next_cursor, "opaque");
@@ -439,13 +445,13 @@ test("list and replay use the v0.2 cursor envelopes", async () => {
 
 test("legacy array replay filters events after the requested sequence", async () => {
   const transport = queuedFetch(response([{ seq: 1 }, { seq: 2 }]));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   assert.deepEqual((await coop.replay("j", 1)).map((event) => event.seq), [2]);
 });
 
 test("legacy minus-one cursor is normalized for v0.2 servers", async () => {
   const transport = queuedFetch(response([]));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   await coop.eventPage("j", { after: -1 });
   assert.equal(transport.calls[0].url.searchParams.get("after"), "0");
 });
@@ -455,17 +461,17 @@ test("replay follows every cursor page", async () => {
     response({ events: [{ seq: 1 }], next_cursor: 1 }),
     response({ events: [{ seq: 2 }], next_cursor: null }),
   );
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   assert.deepEqual((await coop.replay("j")).map((event) => event.seq), [1, 2]);
   assert.equal(transport.calls[1].url.searchParams.get("after"), "1");
 });
 
 test("replay rejects a non-advancing initial cursor", async () => {
   const transport = queuedFetch(response({ events: [], next_cursor: 0 }));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   await assert.rejects(
     coop.replay("j"),
-    (error) => error instanceof CoopError && error.code === "invalid_response",
+    (error) => error instanceof RookholdError && error.code === "invalid_response",
   );
   assert.equal(transport.calls.length, 1);
 });
@@ -488,7 +494,7 @@ test("whoami and capabilities expose the current discovery contract", async () =
       expires_at_ms: null,
     }),
     response({
-      version: "0.5.0",
+      version: "0.6.0",
       languages: ["python"],
       execution: {
         backend: "gvisor",
@@ -536,7 +542,7 @@ test("whoami and capabilities expose the current discovery contract", async () =
       trust_notice: "Pin this key out of band.",
     }),
   );
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   const identity = await coop.whoami();
   const capabilities = await coop.capabilities();
   const publicKey = await coop.attestationPublicKey();
@@ -565,7 +571,7 @@ test("attestation downloads preserve exact binary order and expose validated met
     binaryResponse(envelopeBytes, "application/vnd.dsse.envelope.v1+json"),
     binaryResponse(artifactBytes, "application/vnd.coop.execution-result.v1+json"),
   );
-  const coop = new Coop("https://example.test/prefix", "tenant-secret", {
+  const coop = new Rookhold("https://example.test/prefix", "tenant-secret", {
     fetch: transport.fetch,
   });
 
@@ -619,12 +625,12 @@ test("artifact downloads reject missing, malformed, and mismatched digests", asy
     },
   ];
   for (const { headers, code } of cases) {
-    const coop = new Coop("https://example.test", "secret", {
+    const coop = new Rookhold("https://example.test", "secret", {
       fetch: async () => new Response(content, { status: 200, headers }),
     });
     await assert.rejects(
       coop.downloadAttestation("job"),
-      (error) => error instanceof CoopError && error.code === code,
+      (error) => error instanceof RookholdError && error.code === code,
     );
   }
 });
@@ -638,10 +644,10 @@ test("artifact downloads preserve tenant-scoped structured 404s", async () => {
       retryable: false,
     },
   }, 404));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
 
   await assert.rejects(coop.downloadAttestation("foreign-or-missing"), (error) => {
-    assert(error instanceof CoopError);
+    assert(error instanceof RookholdError);
     assert.equal(error.status, 404);
     assert.equal(error.code, "attestation_unavailable");
     assert.equal(error.requestId, "req-attest");
@@ -659,16 +665,16 @@ test("artifact downloads reject redirected and cross-origin responses", async ()
   const crossOrigin = binaryResponse(bytes, "application/octet-stream");
   Object.defineProperty(crossOrigin, "url", { value: "https://attacker.example/evidence" });
   const transport = queuedFetch(redirected, crossOrigin);
-  const coop = new Coop("https://example.test", "tenant-secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "tenant-secret", { fetch: transport.fetch });
 
   await assert.rejects(
     coop.downloadAttestation("job"),
-    (error) => error instanceof CoopError && error.code === "unsafe_redirect" &&
+    (error) => error instanceof RookholdError && error.code === "unsafe_redirect" &&
       !String(error).includes("tenant-secret"),
   );
   await assert.rejects(
     coop.downloadResultArtifact("job"),
-    (error) => error instanceof CoopError && error.code === "unsafe_redirect" &&
+    (error) => error instanceof RookholdError && error.code === "unsafe_redirect" &&
       !String(error).includes("tenant-secret"),
   );
   assert.equal(transport.calls.every((call) => call.init.redirect === "error"), true);
@@ -678,10 +684,10 @@ test("artifact download deadlines and aborts stop active transfers", async () =>
   const hangingFetch = (_url, init) => new Promise((_resolve, reject) => {
     init.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
   });
-  const coop = new Coop("https://example.test", "secret", { fetch: hangingFetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: hangingFetch });
 
   await assert.rejects(coop.downloadAttestation("job", { timeoutMs: 5 }), (error) => {
-    assert(error instanceof CoopError);
+    assert(error instanceof RookholdError);
     assert.equal(error.code, "request_timeout");
     assert.equal(error.retryable, true);
     return true;
@@ -691,7 +697,7 @@ test("artifact download deadlines and aborts stop active transfers", async () =>
   const pending = coop.downloadResultArtifact("job", { signal: controller.signal });
   controller.abort();
   await assert.rejects(pending, (error) => {
-    assert(error instanceof CoopError);
+    assert(error instanceof RookholdError);
     assert.equal(error.code, "request_aborted");
     assert.equal(error.retryable, false);
     return true;
@@ -874,7 +880,7 @@ test("job detail distinguishes unknown policy from persisted and executor eviden
     },
   };
   const transport = queuedFetch(response(unknown), response(known), response(recovered));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
 
   const queued = await coop.get("queued");
   const complete = await coop.get("done");
@@ -905,13 +911,13 @@ test("job detail distinguishes unknown policy from persisted and executor eviden
   assert.deepEqual(restarted.receipt.requested_limits, { wall_seconds: 15 });
 });
 
-test("request timeout becomes a retryable CoopError", async () => {
+test("request timeout becomes a retryable RookholdError", async () => {
   const fetch = (_url, init) => new Promise((_resolve, reject) => {
     init.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
   });
-  const coop = new Coop("https://example.test", "secret", { fetch, timeoutMs: 5 });
+  const coop = new Rookhold("https://example.test", "secret", { fetch, timeoutMs: 5 });
   await assert.rejects(coop.get("j"), (error) => {
-    assert(error instanceof CoopError);
+    assert(error instanceof RookholdError);
     assert.equal(error.code, "request_timeout");
     assert.equal(error.retryable, true);
     return true;
@@ -923,11 +929,11 @@ test("an AbortController stops an active request", async () => {
     init.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
   });
   const controller = new AbortController();
-  const coop = new Coop("https://example.test", "secret", { fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch });
   const pending = coop.get("j", { signal: controller.signal });
   controller.abort();
   await assert.rejects(pending, (error) => {
-    assert(error instanceof CoopError);
+    assert(error instanceof RookholdError);
     assert.equal(error.code, "request_aborted");
     assert.equal(error.retryable, false);
     return true;
@@ -941,7 +947,7 @@ test("WebSocket streaming uses a one-use ticket and de-duplicates cursor replay"
   );
   const socket = new FakeSocket();
   let socketUrl;
-  const coop = new Coop("https://example.test/prefix", "secret", {
+  const coop = new Rookhold("https://example.test/prefix", "secret", {
     fetch: transport.fetch,
     webSocketFactory: (url) => {
       socketUrl = new URL(url);
@@ -968,7 +974,7 @@ test("WebSocket decoding preserves arrival order for asynchronous frame bodies",
     response({ events: [], next_cursor: null }),
   );
   const socket = new FakeSocket();
-  const coop = new Coop("https://example.test", "secret", {
+  const coop = new Rookhold("https://example.test", "secret", {
     fetch: transport.fetch,
     webSocketFactory: () => {
       queueMicrotask(() => {
@@ -1010,7 +1016,7 @@ test("terminal WebSocket event performs one durable tail replay", async () => {
     }),
   );
   const socket = new FakeSocket();
-  const coop = new Coop("https://example.test", "secret", {
+  const coop = new Rookhold("https://example.test", "secret", {
     fetch: transport.fetch,
     webSocketFactory: () => {
       queueMicrotask(() => socket.emit("message", {
@@ -1030,7 +1036,7 @@ test("stream stop fences already-buffered WebSocket callbacks", async () => {
     response({ ticket: "stop", stream_url: "/v1/jobs/j/stream", expires_at_ms: 1 }),
   );
   const socket = new FakeSocket();
-  const coop = new Coop("https://example.test", "secret", {
+  const coop = new Rookhold("https://example.test", "secret", {
     fetch: transport.fetch,
     webSocketFactory: () => {
       queueMicrotask(() => {
@@ -1070,7 +1076,7 @@ test("structured v0.2 ticket 404 never places a key in a URL", async () => {
     }),
   );
   const socketUrls = [];
-  const coop = new Coop("https://example.test", "secret", {
+  const coop = new Rookhold("https://example.test", "secret", {
     fetch: transport.fetch,
     webSocketFactory: (url) => {
       socketUrls.push(url);
@@ -1096,7 +1102,7 @@ test("legacy query-key streaming requires explicit opt-in", async () => {
     }),
   );
   const defaultSocketUrls = [];
-  const defaultClient = new Coop("https://example.test", "secret", {
+  const defaultClient = new Rookhold("https://example.test", "secret", {
     fetch: defaultTransport.fetch,
     webSocketFactory: (url) => {
       defaultSocketUrls.push(url);
@@ -1114,7 +1120,7 @@ test("legacy query-key streaming requires explicit opt-in", async () => {
   );
   const optedInSocket = new FakeSocket();
   let optedInUrl;
-  const optedInClient = new Coop("https://example.test", "secret", {
+  const optedInClient = new Rookhold("https://example.test", "secret", {
     fetch: optedInTransport.fetch,
     webSocketFactory: (url) => {
       optedInUrl = new URL(url);
@@ -1140,7 +1146,7 @@ test("legacy query-key streaming requires explicit opt-in", async () => {
 
   assert.throws(
     () => optedInClient.stream("j", () => {}, "secret"),
-    (error) => error instanceof CoopError && error.code === "legacy_query_key_opt_in_required",
+    (error) => error instanceof RookholdError && error.code === "legacy_query_key_opt_in_required",
   );
 });
 
@@ -1152,7 +1158,7 @@ test("polling stream yields the whole terminal replay page", async () => {
     ],
     next_cursor: null,
   }));
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   const events = [];
   for await (const event of coop.streamEvents("j", {
     preferWebSocket: false,
@@ -1185,7 +1191,7 @@ test("polling stream drains backlog before checking terminal status", async () =
     statusRequests += 1;
     return response({ job_id: "j", status: "succeeded" });
   };
-  const coop = new Coop("https://example.test", "secret", { fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch });
   const events = [];
   for await (const event of coop.streamEvents("j", {
     preferWebSocket: false,
@@ -1217,7 +1223,7 @@ test("terminal status is followed by a final catch-up replay", async () => {
     statusRequests += 1;
     return response({ job_id: "j", status: "succeeded" });
   };
-  const coop = new Coop("https://example.test", "secret", { fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch });
   const events = [];
   for await (const event of coop.streamEvents("j", {
     preferWebSocket: false,
@@ -1249,7 +1255,7 @@ test("an empty replay after terminal projection does not hide the terminal event
     statusRequests += 1;
     return response({ job_id: "j", status: "succeeded" });
   };
-  const coop = new Coop("https://example.test", "secret", { fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch });
   const events = [];
   for await (const event of coop.streamEvents("j", {
     preferWebSocket: false,
@@ -1270,7 +1276,7 @@ test("polling abort fences the remainder of a buffered replay page", async () =>
     next_cursor: 3,
   }));
   const controller = new AbortController();
-  const coop = new Coop("https://example.test", "secret", { fetch: transport.fetch });
+  const coop = new Rookhold("https://example.test", "secret", { fetch: transport.fetch });
   const events = [];
   await assert.rejects(async () => {
     for await (const event of coop.streamEvents("j", {
@@ -1280,7 +1286,7 @@ test("polling abort fences the remainder of a buffered replay page", async () =>
       events.push(event.seq);
       controller.abort();
     }
-  }, (error) => error instanceof CoopError && error.code === "request_aborted");
+  }, (error) => error instanceof RookholdError && error.code === "request_aborted");
   assert.deepEqual(events, [1]);
 });
 
@@ -1295,7 +1301,7 @@ test("polling stream rejects a full page that makes no cursor progress", async (
     })),
     next_cursor: 1,
   };
-  const coop = new Coop("https://example.test", "secret", {
+  const coop = new Rookhold("https://example.test", "secret", {
     fetch: async () => {
       calls += 1;
       return response(duplicatePage);
@@ -1309,12 +1315,12 @@ test("polling stream rejects a full page that makes no cursor progress", async (
     })) {
       // The duplicate page must not yield or spin.
     }
-  }, (error) => error instanceof CoopError && error.code === "invalid_response");
+  }, (error) => error instanceof RookholdError && error.code === "invalid_response");
   assert.equal(calls, 1);
 });
 
 test("client serialization and object spread do not expose the API key", () => {
-  const coop = new Coop("https://example.test", "super-secret", {
+  const coop = new Rookhold("https://example.test", "super-secret", {
     fetch: async () => response({}),
   });
   assert.equal(coop.apiKey, "super-secret");
@@ -1324,7 +1330,7 @@ test("client serialization and object spread do not expose the API key", () => {
 });
 
 test("base URL rejects credentials and query confusion", () => {
-  assert.throws(() => new Coop("ftp://example.test", "secret"));
-  assert.throws(() => new Coop("https://user@example.test", "secret"));
-  assert.throws(() => new Coop("https://example.test?q=1", "secret"));
+  assert.throws(() => new Rookhold("ftp://example.test", "secret"));
+  assert.throws(() => new Rookhold("https://user@example.test", "secret"));
+  assert.throws(() => new Rookhold("https://example.test?q=1", "secret"));
 });

@@ -1,12 +1,29 @@
 [package]
 name = "coop-exec"
+autobins = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Policy-bound execution backends for the Coop execution gateway"
+description = "Policy-bound execution backends for the Rookhold execution gateway"
 readme = "../../README.md"
+
+[[bin]]
+name = "rookhold-sandbox-init"
+path = "src/bin/rookhold-sandbox-init.rs"
+
+[[bin]]
+name = "coop-sandbox-init"
+path = "src/bin/coop-sandbox-init.rs"
+
+[[bin]]
+name = "rookhold-oci-init"
+path = "src/bin/rookhold-oci-init.rs"
+
+[[bin]]
+name = "coop-oci-init"
+path = "src/bin/coop-oci-init.rs"
 
 [dependencies]
 coop-types = { workspace = true }

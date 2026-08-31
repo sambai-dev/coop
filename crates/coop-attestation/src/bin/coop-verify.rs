@@ -20,9 +20,9 @@ const MAX_SUBJECT_FILE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "coop-verify",
+    name = env!("CARGO_BIN_NAME"),
     version,
-    about = "Generate Coop attestation keys and verify portable execution attestations"
+    about = "Generate Rookhold attestation keys and verify portable execution attestations"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -95,7 +95,7 @@ fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("coop-verify: {error}");
+            eprintln!("{}: {error}", env!("CARGO_BIN_NAME"));
             ExitCode::FAILURE
         }
     }

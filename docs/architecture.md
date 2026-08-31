@@ -1,6 +1,6 @@
 # Architecture
 
-Coop is an execution gateway, scheduler, executor, and evidence store in one Rust process. It is optimized for short, stateless agent jobs on one node. SQLite is the persistence boundary; horizontal scheduling and persistent workspaces are outside the current contract.
+Rookhold is an execution gateway, scheduler, executor, and evidence store in one Rust process. It is optimized for short, stateless agent jobs on one node. SQLite is the persistence boundary; horizontal scheduling and persistent workspaces are outside the current contract.
 
 ```text
 agent / SDK / dashboard
@@ -94,7 +94,7 @@ See [security-boundary.md](security-boundary.md) for the complete trust-tier sta
 
 ## Scale characteristics
 
-v0.5 remains a single-node design:
+v0.6 remains a single-node design:
 
 - atomic global/per-tenant queued leases and fair tenant dispatch
 - a configured worker pool
@@ -103,9 +103,9 @@ v0.5 remains a single-node design:
 - SQLite WAL for concurrent readers and serialized writes
 - an in-process live event fan-out, backed by persisted history for reconnects
 
-Running multiple Coop servers against the same SQLite file is unsupported. A multi-node design requires a durable queue, distributed admission control, a network database, and an external stream bus.
+Running multiple Rookhold servers against the same SQLite file is unsupported. A multi-node design requires a durable queue, distributed admission control, a network database, and an external stream bus.
 
-## Non-goals in v0.5
+## Non-goals in v0.6
 
 - persistent or resumable sandboxes
 - file upload/download or artifact stores

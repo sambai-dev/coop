@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared API and evidence types for the Coop execution gateway"
+description = "Shared API and evidence types for the Rookhold execution gateway"
 readme = "../../README.md"
 
 [dependencies]

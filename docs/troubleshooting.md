@@ -4,20 +4,20 @@
 
 Read the first error line; startup checks are intentionally fail closed.
 
-- `COOP_API_KEYS`: use `tenant:key`, a nonblank tenant, and a random key of at least the enforced minimum length.
+- `ROOKHOLD_API_KEYS`: use `tenant:key`, a nonblank tenant, and a random key of at least the enforced minimum length.
 - attestation rejected: production needs an absolute owner-only canonical
-  Ed25519 PKCS#8 `COOP_ATTESTATION_KEY_FILE`, unless
-  `COOP_ATTESTATION_MODE=off` was an explicit unsigned-evidence decision.
+  Ed25519 PKCS#8 `ROOKHOLD_ATTESTATION_KEY_FILE`, unless
+  `ROOKHOLD_ATTESTATION_MODE=off` was an explicit unsigned-evidence decision.
 - gVisor rejected: verify the absolute `runsc` version/SHA-256, executable
   ownership, `vm.max_map_count`, rootfs manifest, its configured SHA-256, and
-  matching `coop-oci-init` before retrying.
+  matching `rookhold-oci-init` before retrying.
 - namespace unavailable: confirm x86_64 Linux 5.14+, effective UID 0, unified cgroup v2, `cgroup.kill`, recursive `mount_setattr`, and a writable delegated cgroup subtree. The current backend does not support non-root delegation; macOS, Windows, and non-x86_64 Linux are unsupported for containment.
-- helper rejected: install `coop-sandbox-init` from the exact same build as `coop`, set `COOP_SANDBOX_HELPER`, and keep it root-owned/non-writable by jobs.
-- rootfs rejected: set `COOP_ROOTFS` to a dedicated absolute directory; never `/`, the jobs root, or a symlink.
-- jobs root rejected: choose a dedicated absolute child such as `/var/lib/coop/jobs`, not `/tmp`, `/var`, a home root, or a symlinked path.
-- database/instance lock rejected: use one dedicated regular `COOP_DB` file. Symlinks and hard-linked SQLite aliases are intentionally unsupported, and a second Coop process cannot own the same database.
-- seccomp rejected: production does not permit `COOP_SECCOMP=off`.
-- subprocess rejected: do not use it for untrusted work; the explicit acknowledgement is `COOP_UNSAFE_ALLOW_NAIVE=true`.
+- helper rejected: install `rookhold-sandbox-init` from the exact same build as `rookhold`, set `ROOKHOLD_SANDBOX_HELPER`, and keep it root-owned/non-writable by jobs.
+- rootfs rejected: set `ROOKHOLD_ROOTFS` to a dedicated absolute directory; never `/`, the jobs root, or a symlink.
+- jobs root rejected: choose a dedicated absolute child such as `/var/lib/rookhold/jobs`, not `/tmp`, `/var`, a home root, or a symlinked path.
+- database/instance lock rejected: use one dedicated regular `ROOKHOLD_DB` file. Symlinks and hard-linked SQLite aliases are intentionally unsupported, and a second Rookhold process cannot own the same database.
+- seccomp rejected: production does not permit `ROOKHOLD_SECCOMP=off`.
+- subprocess rejected: do not use it for untrusted work; the explicit acknowledgement is `ROOKHOLD_UNSAFE_ALLOW_NAIVE=true`.
 
 For Compose, do not point the server directly at the host-owned private key or
 `runsc`. File-backed secrets and bind mounts preserve the host UID, while the
@@ -47,7 +47,7 @@ Use `/result?wait_seconds=N`; do not poll `/v1/jobs/{id}` every few milliseconds
 
 ## WebSocket connects but output is missing or duplicated
 
-Persisted history is sent before live events. Deduplicate by job ID and event sequence, not by line text. Make sure the proxy supports WebSocket upgrades and has an idle timeout longer than the job budget. Coop intentionally expires every connection after 10 minutes; mint a new stream ticket and resume from the last accepted sequence. On credential rotation, close the old socket before opening a new tenant session.
+Persisted history is sent before live events. Deduplicate by job ID and event sequence, not by line text. Make sure the proxy supports WebSocket upgrades and has an idle timeout longer than the job budget. Rookhold intentionally expires every connection after 10 minutes; mint a new stream ticket and resume from the last accepted sequence. On credential rotation, close the old socket before opening a new tenant session.
 
 ## Job reports output truncation
 
@@ -66,17 +66,17 @@ and must not run untrusted code.
 Signing is durable but asynchronous. Retry job detail briefly and require
 `attestation.available: true` before downloading. If it stays false, inspect
 attestation retry/key/storage warnings and the signer capability. Do not call
-an unavailable envelope “verified.” `COOP_ATTESTATION_MODE=off` intentionally
+an unavailable envelope “verified.” `ROOKHOLD_ATTESTATION_MODE=off` intentionally
 produces no signature; after enabling a key, only retained terminal jobs can be
 backfilled. Preserve historical public keys when rotating.
 
 ## Production verification rejects the attestation
 
 `scripts/verify-production.py` requires an absolute
-`COOP_VERIFY_PUBLIC_KEY_FILE` obtained independently of the server. For the
+`ROOKHOLD_VERIFY_PUBLIC_KEY_FILE` obtained independently of the server. For the
 Compose bootstrap, use `.coop-runtime/attestation-public-key.pem` and set
-`COOP_VERIFY_CONTAINER_IMAGE` to the immutable built image ID. For a binary
-installation, set `COOP_VERIFY_BIN` to the packaged verifier. A missing pin,
+`ROOKHOLD_VERIFY_CONTAINER_IMAGE` to the immutable built image ID. For a binary
+installation, set `ROOKHOLD_VERIFY_BIN` to the packaged verifier. A missing pin,
 nonzero verifier exit, wrong key, modified envelope/result byte, unexpected
 subject, or incomplete authenticated event chain fails the gate. Do not fix a
 failure by downloading `/v1/attestation/public-key` from the deployment being
@@ -84,7 +84,7 @@ checked; that endpoint is discovery material, not a trust anchor.
 
 ## SQLite is busy or disk is full
 
-Stop new submissions, preserve logs, and check the database, WAL/SHM files, backups, and job staging. Do not delete WAL/SHM files from a live database. Use SQLite's online backup/checkpoint tools or stop Coop before filesystem manipulation. Review retention only after preserving required evidence.
+Stop new submissions, preserve logs, and check the database, WAL/SHM files, backups, and job staging. Do not delete WAL/SHM files from a live database. Use SQLite's online backup/checkpoint tools or stop Rookhold before filesystem manipulation. Review retention only after preserving required evidence.
 
 ## Cgroup directories remain after jobs
 
@@ -96,8 +96,8 @@ The tests are intentionally ignored by ordinary test runs and require x86_64 Lin
 
 ```bash
 sudo env \
-  COOP_ROOTFS=/opt/coop/rootfs \
-  COOP_SANDBOX_HELPER=/usr/local/bin/coop-sandbox-init \
+  ROOKHOLD_ROOTFS=/opt/rookhold/rootfs \
+  ROOKHOLD_SANDBOX_HELPER=/usr/local/bin/rookhold-sandbox-init \
   cargo test --locked -p coop-server --test hostile -- --ignored --nocapture
 ```
 

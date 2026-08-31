@@ -6,12 +6,12 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from coop import CoopError, isolation_satisfies
-from coop_mcp import (
+from rookhold import RookholdError, isolation_satisfies
+from rookhold_mcp import (
     MODERN_PROTOCOL_VERSION,
     TASKS_EXTENSION,
-    CoopMcpServer,
     McpConfig,
+    RookholdMcpServer,
     _submission_fingerprint,
     _SubmissionReconciler,
     serve,
@@ -211,7 +211,7 @@ def initialized_server(fake=None, **config_overrides):
         "require_isolation": False,
     }
     values.update(config_overrides)
-    server = CoopMcpServer(
+    server = RookholdMcpServer(
         McpConfig(**values),
         client=fake or FakeCoop(),  # type: ignore[arg-type]
     )
@@ -347,17 +347,17 @@ class McpTests(unittest.TestCase):
         self.assertEqual(
             names,
             [
-                "coop_run_code",
-                "coop_job_result",
-                "coop_job_events",
-                "coop_cancel_job",
+                "rookhold_run_code",
+                "rookhold_job_result",
+                "rookhold_job_events",
+                "rookhold_cancel_job",
             ],
         )
         self.assertNotIn("super-secret-key", json.dumps(listed))
         self.assertNotIn("base_url", json.dumps(listed))
 
     def test_modern_discovery_is_stateless_and_tasks_are_modern_only(self):
-        server = CoopMcpServer(
+        server = RookholdMcpServer(
             McpConfig(
                 base_url="https://coop.example.test",
                 api_key="super-secret-key",
@@ -457,7 +457,7 @@ class McpTests(unittest.TestCase):
                 "id": 2,
                 "method": "tools/call",
                 "params": {
-                    "name": "coop_job_result",
+                    "name": "rookhold_job_result",
                     "arguments": {"job_id": "job-1", "wait_seconds": 0},
                     "_meta": modern_meta(),
                 },
@@ -481,7 +481,7 @@ class McpTests(unittest.TestCase):
         fake = FakeCoop()
         result = tool_call(
             initialized_server(fake),
-            "coop_run_code",
+            "rookhold_run_code",
             {
                 "language": "python",
                 "code": "print(6 * 7)",
@@ -532,7 +532,7 @@ class McpTests(unittest.TestCase):
                 if self.lose_next_submission:
                     self.lose_next_submission = False
                     self.idempotency_keys.extend([idempotency_key, idempotency_key])
-                    raise CoopError(
+                    raise RookholdError(
                         "both submission acknowledgements were lost",
                         code="request_timeout",
                         retryable=True,
@@ -552,14 +552,14 @@ class McpTests(unittest.TestCase):
         server = initialized_server(fake)
         original = {"language": "python", "code": "print(42)"}
 
-        lost = tool_call(server, "coop_run_code", original)
+        lost = tool_call(server, "rookhold_run_code", original)
         self.assertTrue(lost["isError"])
         first_key = fake.idempotency_keys[0]
         self.assertEqual(fake.idempotency_keys, [first_key, first_key])
 
         changed = tool_call(
             server,
-            "coop_run_code",
+            "rookhold_run_code",
             {"language": "python", "code": "print(43)"},
         )
         self.assertFalse(changed["isError"])
@@ -568,7 +568,7 @@ class McpTests(unittest.TestCase):
 
         recovered = tool_call(
             server,
-            "coop_run_code",
+            "rookhold_run_code",
             {
                 "language": "python",
                 "code": "print(42)",
@@ -578,7 +578,7 @@ class McpTests(unittest.TestCase):
         self.assertFalse(recovered["isError"])
         self.assertEqual(fake.idempotency_keys[3], first_key)
 
-        repeated_after_success = tool_call(server, "coop_run_code", original)
+        repeated_after_success = tool_call(server, "rookhold_run_code", original)
         self.assertFalse(repeated_after_success["isError"])
         self.assertNotEqual(fake.idempotency_keys[4], first_key)
 
@@ -601,7 +601,7 @@ class McpTests(unittest.TestCase):
                 if self.fail_next_submission:
                     self.fail_next_submission = False
                     self.idempotency_keys.extend([idempotency_key, idempotency_key])
-                    raise CoopError(
+                    raise RookholdError(
                         "the retry failed after an ambiguous first attempt",
                         status=500,
                         code="internal_error",
@@ -621,11 +621,11 @@ class McpTests(unittest.TestCase):
         server = initialized_server(fake)
         arguments = {"language": "python", "code": "print(42)"}
 
-        failed = tool_call(server, "coop_run_code", arguments)
+        failed = tool_call(server, "rookhold_run_code", arguments)
         self.assertTrue(failed["isError"])
         first_key = fake.idempotency_keys[0]
         self.assertEqual(fake.idempotency_keys, [first_key, first_key])
-        recovered = tool_call(server, "coop_run_code", arguments)
+        recovered = tool_call(server, "rookhold_run_code", arguments)
         self.assertFalse(recovered["isError"])
         self.assertEqual(fake.idempotency_keys[2], first_key)
 
@@ -725,7 +725,7 @@ class McpTests(unittest.TestCase):
                 "id": 1,
                 "method": "tools/call",
                 "params": {
-                    "name": "coop_run_code",
+                    "name": "rookhold_run_code",
                     "arguments": {"language": "python", "code": "print(42)"},
                     "_meta": modern_meta(tasks=True),
                 },
@@ -795,7 +795,7 @@ class McpTests(unittest.TestCase):
 
         class MissingTaskFake(FakeCoop):
             def get(self, job_id):
-                raise CoopError("job not found", status=404, code="job_not_found")
+                raise RookholdError("job not found", status=404, code="job_not_found")
 
         missing = initialized_server(MissingTaskFake(), enable_tasks=True).handle(
             {
@@ -810,7 +810,7 @@ class McpTests(unittest.TestCase):
     def test_wait_timeout_returns_a_resumable_job_instead_of_losing_it(self):
         result = tool_call(
             initialized_server(FakeCoop(result_error=TimeoutError("late"))),
-            "coop_run_code",
+            "rookhold_run_code",
             {"language": "python", "code": "while True: pass", "wait_seconds": 1},
         )
         self.assertFalse(result["isError"])
@@ -821,14 +821,14 @@ class McpTests(unittest.TestCase):
         result = tool_call(
             initialized_server(
                 FakeCoop(
-                    result_error=CoopError(
+                    result_error=RookholdError(
                         "socket wait expired",
                         code="request_timeout",
                         retryable=True,
                     )
                 )
             ),
-            "coop_run_code",
+            "rookhold_run_code",
             {"language": "python", "code": "pass", "wait_seconds": 1},
         )
         self.assertFalse(result["isError"])
@@ -839,7 +839,7 @@ class McpTests(unittest.TestCase):
     def test_operator_policy_rejects_unisolated_execution(self):
         result = tool_call(
             initialized_server(FakeCoop(isolated=False), require_isolation=True),
-            "coop_run_code",
+            "rookhold_run_code",
             {"language": "python", "code": "print(1)"},
         )
         self.assertTrue(result["isError"])
@@ -848,7 +848,7 @@ class McpTests(unittest.TestCase):
         isolated = FakeCoop(isolated=True)
         accepted = tool_call(
             initialized_server(isolated, require_isolation=True),
-            "coop_run_code",
+            "rookhold_run_code",
             {"language": "python", "code": "print(1)"},
         )
         self.assertFalse(accepted["isError"])
@@ -866,7 +866,7 @@ class McpTests(unittest.TestCase):
         )
         accepted = tool_call(
             initialized_server(gvisor, require_isolation=True),
-            "coop_run_code",
+            "rookhold_run_code",
             {"language": "python", "code": "print(1)"},
         )
         self.assertFalse(accepted["isError"])
@@ -886,7 +886,7 @@ class McpTests(unittest.TestCase):
                 hardware,
                 minimum_isolation="gvisor-application-kernel",
             ),
-            "coop_run_code",
+            "rookhold_run_code",
             {"language": "python", "code": "print(1)"},
         )
         self.assertFalse(stronger["isError"])
@@ -897,7 +897,7 @@ class McpTests(unittest.TestCase):
                 FakeCoop(isolated=True, isolation_class="hardware-vm"),
                 minimum_isolation="wasm-capability",
             ),
-            "coop_run_code",
+            "rookhold_run_code",
             {"language": "python", "code": "print(1)"},
         )
         self.assertTrue(hardware["isError"])
@@ -905,7 +905,7 @@ class McpTests(unittest.TestCase):
         wasm = FakeCoop(isolated=True, isolation_class="wasm-capability")
         wasm_result = tool_call(
             initialized_server(wasm, minimum_isolation="wasm-capability"),
-            "coop_run_code",
+            "rookhold_run_code",
             {"language": "python", "code": "print(1)"},
         )
         self.assertFalse(wasm_result["isError"])
@@ -926,7 +926,7 @@ class McpTests(unittest.TestCase):
                 ),
                 minimum_isolation="gvisor-application-kernel",
             ),
-            "coop_run_code",
+            "rookhold_run_code",
             {"language": "python", "code": "print(1)"},
         )
         self.assertTrue(result["isError"])
@@ -947,14 +947,14 @@ class McpTests(unittest.TestCase):
         self.assertEqual(run_schema["properties"]["language"]["enum"], ["python"])
         self.assertEqual(run_schema["properties"]["wait_seconds"]["maximum"], 5)
         denied = tool_call(
-            server, "coop_run_code", {"language": "bash", "code": "true"}
+            server, "rookhold_run_code", {"language": "bash", "code": "true"}
         )
         oversized = tool_call(
-            server, "coop_run_code", {"language": "python", "code": "12345"}
+            server, "rookhold_run_code", {"language": "python", "code": "12345"}
         )
         unknown = tool_call(
             server,
-            "coop_run_code",
+            "rookhold_run_code",
             {"language": "python", "code": "1", "base_url": "https://evil.test"},
         )
         self.assertTrue(denied["isError"])
@@ -964,17 +964,19 @@ class McpTests(unittest.TestCase):
     def test_events_cancel_and_immediate_status(self):
         server = initialized_server()
         status = tool_call(
-            server, "coop_job_result", {"job_id": "job-1", "wait_seconds": 0}
+            server, "rookhold_job_result", {"job_id": "job-1", "wait_seconds": 0}
         )
         events = tool_call(
-            server, "coop_job_events", {"job_id": "job-1", "after": -1, "limit": 10}
+            server, "rookhold_job_events", {"job_id": "job-1", "after": -1, "limit": 10}
         )
-        cancelled = tool_call(server, "coop_cancel_job", {"job_id": "job-1"})
+        cancelled = tool_call(server, "rookhold_cancel_job", {"job_id": "job-1"})
+        legacy_cancelled = tool_call(server, "coop_cancel_job", {"job_id": "job-1"})
         self.assertFalse(status["structuredContent"]["complete"])
         self.assertEqual(events["structuredContent"]["events"][0]["kind"], "started")
         self.assertTrue(cancelled["structuredContent"]["cancelled"])
         self.assertTrue(cancelled["structuredContent"]["cancellation_requested"])
         self.assertFalse(cancelled["structuredContent"]["already_terminal"])
+        self.assertTrue(legacy_cancelled["structuredContent"]["cancelled"])
 
     def test_empty_cancel_ack_is_reported_as_accepted(self):
         class EmptyCancelFake(FakeCoop):
@@ -987,7 +989,7 @@ class McpTests(unittest.TestCase):
 
         result = tool_call(
             initialized_server(EmptyCancelFake()),
-            "coop_cancel_job",
+            "rookhold_cancel_job",
             {"job_id": "job-1"},
         )
         self.assertTrue(result["structuredContent"]["cancelled"])
@@ -1006,7 +1008,7 @@ class McpTests(unittest.TestCase):
 
         result = tool_call(
             initialized_server(TerminalCancelFake()),
-            "coop_cancel_job",
+            "rookhold_cancel_job",
             {"job_id": "job-1"},
         )
         self.assertTrue(result["structuredContent"]["cancelled"])
@@ -1053,7 +1055,7 @@ class McpTests(unittest.TestCase):
                 "id": 1,
                 "method": "tools/call",
                 "params": {
-                    "name": "coop_run_code",
+                    "name": "rookhold_run_code",
                     "arguments": {"language": "python", "code": "pass"},
                 },
             }
@@ -1087,7 +1089,7 @@ class McpTests(unittest.TestCase):
                 "id": "run",
                 "method": "tools/call",
                 "params": {
-                    "name": "coop_run_code",
+                    "name": "rookhold_run_code",
                     "arguments": {"language": "python", "code": "pass"},
                 },
             }
@@ -1112,17 +1114,17 @@ class McpTests(unittest.TestCase):
 
     def test_environment_config_requires_explicit_key(self):
         with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(ValueError, "COOP_API_KEY is required"):
+            with self.assertRaisesRegex(ValueError, "ROOKHOLD_API_KEY is required"):
                 McpConfig.from_env()
         with patch.dict(
             os.environ,
             {
-                "COOP_API_KEY": "key",
-                "COOP_MCP_ALLOWED_LANGUAGES": "python",
-                "COOP_MCP_REQUIRE_ISOLATION": "true",
-                "COOP_MCP_MINIMUM_ISOLATION": "gvisor-application-kernel",
-                "COOP_MCP_ENABLE_TASKS": "true",
-                "COOP_MCP_TASK_TTL_MS": "600000",
+                "ROOKHOLD_API_KEY": "key",
+                "ROOKHOLD_MCP_ALLOWED_LANGUAGES": "python",
+                "ROOKHOLD_MCP_REQUIRE_ISOLATION": "true",
+                "ROOKHOLD_MCP_MINIMUM_ISOLATION": "gvisor-application-kernel",
+                "ROOKHOLD_MCP_ENABLE_TASKS": "true",
+                "ROOKHOLD_MCP_TASK_TTL_MS": "600000",
             },
             clear=True,
         ):
@@ -1132,6 +1134,21 @@ class McpTests(unittest.TestCase):
         self.assertEqual(config.minimum_isolation, "gvisor-application-kernel")
         self.assertTrue(config.enable_tasks)
         self.assertEqual(config.task_ttl_ms, 600000)
+        with patch.dict(
+            os.environ,
+            {"COOP_API_KEY": "legacy-key", "COOP_MCP_ALLOWED_LANGUAGES": "node"},
+            clear=True,
+        ):
+            legacy = McpConfig.from_env()
+        self.assertEqual(legacy.api_key, "legacy-key")
+        self.assertEqual(legacy.allowed_languages, frozenset({"node"}))
+        with patch.dict(
+            os.environ,
+            {"ROOKHOLD_API_KEY": "new", "COOP_API_KEY": "old"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "conflicts with legacy"):
+                McpConfig.from_env()
 
     def test_errors_redact_the_tenant_key(self):
         class LeakyFake(FakeCoop):
@@ -1140,7 +1157,7 @@ class McpTests(unittest.TestCase):
 
         result = tool_call(
             initialized_server(LeakyFake()),
-            "coop_run_code",
+            "rookhold_run_code",
             {"language": "python", "code": "print(1)"},
         )
         serialized = json.dumps(result)

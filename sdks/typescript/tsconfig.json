@@ -16,5 +16,5 @@
     "rootDir": ".",
     "skipLibCheck": true
   },
-  "include": ["coop.ts"]
+  "include": ["rookhold.ts", "coop.ts"]
 }

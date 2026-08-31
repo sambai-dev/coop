@@ -163,7 +163,8 @@ pub struct ExecContext {
     /// Host `/` is never used as an implicit sandbox root.
     pub rootfs: Option<PathBuf>,
     /// Absolute path to the dedicated single-threaded sandbox bootstrap
-    /// executable. When absent, a sibling `coop-sandbox-init` is resolved.
+    /// executable. When absent, a sibling `rookhold-sandbox-init` is resolved,
+    /// with `coop-sandbox-init` retained as a compatibility fallback.
     pub helper_path: Option<PathBuf>,
     /// Cancellation signal. When the referenced flag flips to true, the
     /// executor kills the job (whole process group) at its next poll tick
@@ -176,7 +177,7 @@ pub struct ExecContext {
     /// it to retain an always-open launch boundary.
     pub start_gate: Option<Arc<ExecutionStartGate>>,
     /// Install a seccomp-BPF allowlist before exec (Linux namespace backend
-    /// only). Default on: F-005 mitigation. `COOP_SECCOMP=off` disables it.
+    /// only). Default on: F-005 mitigation. `ROOKHOLD_SECCOMP=off` disables it.
     pub seccomp: bool,
 }
 

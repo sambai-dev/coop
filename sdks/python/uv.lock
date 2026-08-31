@@ -72,32 +72,6 @@ wheels = [
 ]
 
 [[package]]
-name = "coop-sdk"
-version = "0.5.0"
-source = { editable = "." }
-
-[package.optional-dependencies]
-dev = [
-    { name = "mypy", version = "1.19.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
-    { name = "mypy", version = "2.3.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
-    { name = "pyright" },
-    { name = "ruff" },
-]
-stream = [
-    { name = "websocket-client" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mypy", marker = "python_full_version >= '3.10' and extra == 'dev'", specifier = "==2.3.1" },
-    { name = "mypy", marker = "python_full_version < '3.10' and extra == 'dev'", specifier = "==1.19.1" },
-    { name = "pyright", marker = "extra == 'dev'", specifier = "==1.1.411" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.4" },
-    { name = "websocket-client", marker = "extra == 'stream'", specifier = ">=1.6,<2" },
-]
-provides-extras = ["dev", "stream"]
-
-[[package]]
 name = "librt"
 version = "0.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -406,6 +380,32 @@ sdist = { url = "https://files.pythonhosted.org/packages/7e/ab/265f7dc69d28113eb
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0a/49/385be530a6a5b78d1cbcd5c2e38debc8959a2fc6bdb716f4e581002979fc/pyright-1.1.411-py3-none-any.whl", hash = "sha256:dc7c72a8e2700c55baa127554040e067041ea53ccfd50bf96308cc4291c7d5d9", size = 6181526, upload-time = "2026-06-25T02:14:04.691Z" },
 ]
+
+[[package]]
+name = "rookhold-sdk"
+version = "0.6.0"
+source = { editable = "." }
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy", version = "1.19.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "mypy", version = "2.3.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "pyright" },
+    { name = "ruff" },
+]
+stream = [
+    { name = "websocket-client" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mypy", marker = "python_full_version >= '3.10' and extra == 'dev'", specifier = "==2.3.1" },
+    { name = "mypy", marker = "python_full_version < '3.10' and extra == 'dev'", specifier = "==1.19.1" },
+    { name = "pyright", marker = "extra == 'dev'", specifier = "==1.1.411" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.4" },
+    { name = "websocket-client", marker = "extra == 'stream'", specifier = ">=1.6,<2" },
+]
+provides-extras = ["dev", "stream"]
 
 [[package]]
 name = "ruff"

@@ -1,4 +1,4 @@
-# Caddy handles WebSocket upgrades automatically. Keep the Coop upstream on
+# Caddy handles WebSocket upgrades automatically. Keep the Rookhold upstream on
 # loopback, disable sensitive request/query logging, and restrict clients at
 # the network or identity-aware proxy layer.
 {
@@ -14,7 +14,7 @@
 	}
 }
 
-coop.example.internal {
+rookhold.example.internal {
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:7300
 }

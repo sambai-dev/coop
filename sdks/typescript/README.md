@@ -1,10 +1,10 @@
-# Coop TypeScript SDK
+# Rookhold TypeScript SDK
 
 The typed client runs in modern browsers and Node.js 18+. It uses the
 platform `fetch`, supports `AbortSignal` and per-request deadlines, and has no
 runtime dependencies.
 
-Browser use is same-origin by default. Coop intentionally does not emit
+Browser use is same-origin by default. Rookhold intentionally does not emit
 permissive CORS headers; a cross-origin frontend needs an explicitly
 allowlisted reverse-proxy policy, and its bearer key will be available to that
 frontend's JavaScript.
@@ -12,40 +12,40 @@ frontend's JavaScript.
 Install from a source checkout (available now):
 
 ```bash
-git clone https://github.com/sambai-dev/coop.git
-cd coop/sdks/typescript
+git clone https://github.com/sambai-dev/rookhold.git
+cd rookhold/sdks/typescript
 npm ci
 npm run build
 npm pack
 # Then, from your application:
-npm install /path/to/coop/sdks/typescript/coop-sdk-0.5.0.tgz
+npm install /path/to/rookhold/sdks/typescript/rookhold-sdk-0.6.0.tgz
 ```
 
 The npm package is not published yet. After it is published, install it with:
 
 ```bash
-npm install coop-sdk
+npm install rookhold-sdk
 ```
 
-The exact v0.5.0 GitHub release package is
-`coop-sdk-0.5.0.tgz`; follow the
+The exact v0.6.0 GitHub release package is
+`rookhold-sdk-0.6.0.tgz`; follow the
 [checksum, attestation, and installation commands](../../docs/sdks.md) rather
 than using a moving release URL.
 
 ```ts
-import { Coop } from "coop-sdk";
+import { Rookhold } from "rookhold-sdk";
 
-const coop = new Coop("http://127.0.0.1:7300", "tenant-api-key");
-const job = await coop.submit("node", "console.log(6 * 7)", {
+const client = new Rookhold("http://127.0.0.1:7300", "tenant-api-key");
+const job = await client.submit("node", "console.log(6 * 7)", {
   limits: { wall_seconds: 10, mem_mb: 256 },
   requirements: { minimum_isolation: "linux-shared-kernel" },
 });
 
-for await (const event of coop.streamEvents(job.job_id)) {
+for await (const event of client.streamEvents(job.job_id)) {
   console.log(event.kind, event.data);
 }
 
-const result = await coop.result(job.job_id, 60_000);
+const result = await client.result(job.job_id, 60_000);
 console.log(result.status, result.stdout);
 ```
 
@@ -55,10 +55,10 @@ exact DSSE envelope and signed result subject. In Node.js:
 ```ts
 import { writeFile } from "node:fs/promises";
 
-const detail = await coop.get(job.job_id);
+const detail = await client.get(job.job_id);
 if (detail.attestation.available) {
-  const envelope = await coop.downloadAttestation(job.job_id);
-  const subject = await coop.downloadResultArtifact(job.job_id);
+  const envelope = await client.downloadAttestation(job.job_id);
+  const subject = await client.downloadResultArtifact(job.job_id);
   await writeFile("job.dsse.json", envelope.content);
   await writeFile("job-result.json", subject.content);
 }
@@ -71,10 +71,10 @@ not mean the DSSE signature was verified. Pin the operator's Ed25519 public key
 through an authenticated out-of-band channel, then run:
 
 ```bash
-coop-verify verify \
+rookhold-verify verify \
   --envelope job.dsse.json \
   --subject job-result.json \
-  --public-key trusted-coop-attestation.pub.pem \
+  --public-key trusted-rookhold-attestation.pub.pem \
   --tenant "$EXPECTED_TENANT" \
   --subject-name "coop://jobs/$JOB_ID/result" \
   --media-type application/vnd.coop.execution-result.v1+json
@@ -94,7 +94,7 @@ ordinary response body under `job` and also exposes the `Location` and
 `Idempotency-Replayed` response headers:
 
 ```ts
-const accepted = await coop.submitResult("python", "print('once')", {
+const accepted = await client.submitResult("python", "print('once')", {
   idempotencyKey: "workflow-run-018f6f8d", // 1-128 visible ASCII bytes
   retryAmbiguous: true,
   requirements: { minimum_isolation: "gvisor-application-kernel" },
@@ -104,7 +104,7 @@ console.log(accepted.job.job_id, accepted.location, accepted.idempotency_replaye
 
 `retryAmbiguous` makes at most one automatic retry and reuses the same key. Use
 it only with a server that enforces v0.4 idempotency semantics. An ambiguous
-failure carries the stable key on `CoopError.idempotencyKey` so a caller can
+failure carries the stable key on `RookholdError.idempotencyKey` so a caller can
 persist it and reconcile the logical request later. `cancelResult()` returns
 the typed v0.4 cancellation state; `cancel()` remains the body-discarding
 compatibility wrapper.
@@ -116,7 +116,7 @@ ordering: `wasm-capability` satisfies only that capability requirement and is
 not silently interchangeable with a shared-kernel or VM class.
 
 Every network method accepts an `AbortSignal` directly or through its options.
-`CoopError` exposes `status`, `code`, `requestId`, `retryable`, and
+`RookholdError` exposes `status`, `code`, `requestId`, `retryable`, and
 `retryAfterMs`.
 
 Streaming obtains a short-lived, one-use ticket before opening a
@@ -124,7 +124,7 @@ WebSocket. On runtimes without `WebSocket`, `streamEvents()` uses the cursor
 replay endpoint. A v0.1 query-key fallback remains available for compatibility
 but is disabled by default because URLs leak into logs and history. Enable it
 only for a trusted legacy server with `allowLegacyQueryKey: true`; structured
-Coop errors never trigger that fallback.
+Rookhold errors never trigger that fallback.
 
 `submit()` accepts the sparse `JobSpec` shape, while `get()` and `wait()`
 return `JobDetail`. The requested `StoredJobSpec` is complete.
@@ -133,10 +133,10 @@ was not enforced, and `LimitEnforcement` supplies the explicit booleans. The
 whole effective spec and policy fields are nullable when a queued, migrated,
 or restart-recovered row has no execution evidence. `Receipt`,
 `EventChainReceipt`, `OutputEvidence`, `ExecutorOutputEvidence`,
-`ResourceUsage`, and `HashedCoopEvent` are exported for typed
+`ResourceUsage`, and `HashedRookholdEvent` are exported for typed
 evidence-processing code. Receipt `output` covers canonical durable event
 strings; `executor_output` separately describes raw executor telemetry.
-Keep accepting `CoopEvent` when reading migrated v0.1 history because its hash
+Keep accepting `RookholdEvent` when reading migrated v0.1 history because its hash
 fields may be absent or null.
 The receipt core and event chain are always present; execution-specific receipt
 fields are optional because restart recovery creates a minimal receipt with
@@ -145,3 +145,6 @@ fields are optional because restart recovery creates a minimal receipt with
 The deprecated callback `stream(jobId, onEvent, key)` form is rejected so a
 credential cannot silently enter a URL. For a trusted v0.1 server, use the
 explicit `{ allowLegacyQueryKey: true, legacyApiKey: key }` options object.
+
+Existing imports can migrate in stages: `rookhold-sdk/coop` exports `Coop`,
+`CoopError`, and the legacy event type names as aliases of the Rookhold API.

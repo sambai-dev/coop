@@ -1,57 +1,60 @@
 services:
-  coop:
+  rookhold:
     build:
       context: .
       args:
-        VERSION: "0.5.0"
-        VCS_REF: "${COOP_GIT_REVISION:-local}"
+        VERSION: "0.6.0"
+        VCS_REF: "${ROOKHOLD_GIT_REVISION:-${COOP_GIT_REVISION:-local}}"
     restart: unless-stopped
     stop_grace_period: 45s
     ports:
-      # Coop serves plain HTTP. Keep this loopback-only and terminate TLS in a
+      # Rookhold serves plain HTTP. Keep this loopback-only and terminate TLS in a
       # reverse proxy if remote clients need access.
       - "127.0.0.1:7300:7300"
     environment:
-      COOP_ENV: production
-      COOP_API_KEYS: "${COOP_API_KEYS:?copy .env.example to .env and replace the key}"
-      COOP_METRICS_TOKEN: "${COOP_METRICS_TOKEN:-}"
-      COOP_SANDBOX: "${COOP_SANDBOX:-gvisor}"
-      COOP_ROOTFS: /opt/coop/rootfs
-      COOP_SANDBOX_HELPER: /usr/local/bin/coop-sandbox-init
-      COOP_GVISOR_RUNSC_SOURCE: /run/coop-bootstrap/runsc
-      COOP_GVISOR_RUNSC: /run/coop-runtime/runsc
-      COOP_GVISOR_ROOTFS_SHA256: "${COOP_GVISOR_ROOTFS_SHA256:-}"
-      COOP_GVISOR_PLATFORM: "${COOP_GVISOR_PLATFORM:-systrap}"
-      COOP_ATTESTATION_MODE: sign
-      COOP_ATTESTATION_KEY_SOURCE: /run/secrets/coop-attestation-key.pem
-      COOP_ATTESTATION_KEY_FILE: /run/coop-secrets/attestation-key.pem
-      COOP_SECCOMP: auto
-      COOP_WORKERS: "${COOP_WORKERS:-4}"
-      COOP_TENANT_CONCURRENCY: "${COOP_TENANT_CONCURRENCY:-2}"
-      COOP_TENANT_QUEUE_CAPACITY: "${COOP_TENANT_QUEUE_CAPACITY:-64}"
-      COOP_RATE_PER_MIN: "${COOP_RATE_PER_MIN:-120}"
-      COOP_MAX_JOB_MEM_MB: "${COOP_MAX_JOB_MEM_MB:-1024}"
-      COOP_MEMORY_BUDGET_MB: "${COOP_MEMORY_BUDGET_MB:-4096}"
-      COOP_STORAGE_TENANT_MB: "${COOP_STORAGE_TENANT_MB:-4096}"
-      COOP_STORAGE_GLOBAL_MB: "${COOP_STORAGE_GLOBAL_MB:-16384}"
-      COOP_STORAGE_FREE_RESERVE_MB: "${COOP_STORAGE_FREE_RESERVE_MB:-1024}"
-      COOP_RETENTION_HOURS: "${COOP_RETENTION_HOURS:-168}"
-      COOP_SWEEP_INTERVAL_SECS: "${COOP_SWEEP_INTERVAL_SECS:-3600}"
-      COOP_LOG_FORMAT: "${COOP_LOG_FORMAT:-json}"
+      ROOKHOLD_ENV: production
+      # Compose eagerly evaluates nested required-variable expressions on some
+      # platforms. Pass either name through and let Rookhold's production
+      # config reject an empty result consistently.
+      ROOKHOLD_API_KEYS: "${ROOKHOLD_API_KEYS:-${COOP_API_KEYS:-}}"
+      ROOKHOLD_METRICS_TOKEN: "${ROOKHOLD_METRICS_TOKEN:-${COOP_METRICS_TOKEN:-}}"
+      ROOKHOLD_SANDBOX: "${ROOKHOLD_SANDBOX:-${COOP_SANDBOX:-gvisor}}"
+      ROOKHOLD_ROOTFS: /opt/rookhold/rootfs
+      ROOKHOLD_SANDBOX_HELPER: /usr/local/bin/rookhold-sandbox-init
+      ROOKHOLD_GVISOR_RUNSC_SOURCE: /run/rookhold-bootstrap/runsc
+      ROOKHOLD_GVISOR_RUNSC: /run/rookhold-runtime/runsc
+      ROOKHOLD_GVISOR_ROOTFS_SHA256: "${ROOKHOLD_GVISOR_ROOTFS_SHA256:-${COOP_GVISOR_ROOTFS_SHA256:-}}"
+      ROOKHOLD_GVISOR_PLATFORM: "${ROOKHOLD_GVISOR_PLATFORM:-${COOP_GVISOR_PLATFORM:-systrap}}"
+      ROOKHOLD_ATTESTATION_MODE: sign
+      ROOKHOLD_ATTESTATION_KEY_SOURCE: /run/secrets/rookhold-attestation-key.pem
+      ROOKHOLD_ATTESTATION_KEY_FILE: /run/rookhold-secrets/attestation-key.pem
+      ROOKHOLD_SECCOMP: auto
+      ROOKHOLD_WORKERS: "${ROOKHOLD_WORKERS:-${COOP_WORKERS:-4}}"
+      ROOKHOLD_TENANT_CONCURRENCY: "${ROOKHOLD_TENANT_CONCURRENCY:-${COOP_TENANT_CONCURRENCY:-2}}"
+      ROOKHOLD_TENANT_QUEUE_CAPACITY: "${ROOKHOLD_TENANT_QUEUE_CAPACITY:-${COOP_TENANT_QUEUE_CAPACITY:-64}}"
+      ROOKHOLD_RATE_PER_MIN: "${ROOKHOLD_RATE_PER_MIN:-${COOP_RATE_PER_MIN:-120}}"
+      ROOKHOLD_MAX_JOB_MEM_MB: "${ROOKHOLD_MAX_JOB_MEM_MB:-${COOP_MAX_JOB_MEM_MB:-1024}}"
+      ROOKHOLD_MEMORY_BUDGET_MB: "${ROOKHOLD_MEMORY_BUDGET_MB:-${COOP_MEMORY_BUDGET_MB:-4096}}"
+      ROOKHOLD_STORAGE_TENANT_MB: "${ROOKHOLD_STORAGE_TENANT_MB:-${COOP_STORAGE_TENANT_MB:-4096}}"
+      ROOKHOLD_STORAGE_GLOBAL_MB: "${ROOKHOLD_STORAGE_GLOBAL_MB:-${COOP_STORAGE_GLOBAL_MB:-16384}}"
+      ROOKHOLD_STORAGE_FREE_RESERVE_MB: "${ROOKHOLD_STORAGE_FREE_RESERVE_MB:-${COOP_STORAGE_FREE_RESERVE_MB:-1024}}"
+      ROOKHOLD_RETENTION_HOURS: "${ROOKHOLD_RETENTION_HOURS:-${COOP_RETENTION_HOURS:-168}}"
+      ROOKHOLD_SWEEP_INTERVAL_SECS: "${ROOKHOLD_SWEEP_INTERVAL_SECS:-${COOP_SWEEP_INTERVAL_SECS:-3600}}"
+      ROOKHOLD_LOG_FORMAT: "${ROOKHOLD_LOG_FORMAT:-${COOP_LOG_FORMAT:-json}}"
       RUST_LOG: "${RUST_LOG:-info,coop_server=info}"
     volumes:
       - coop-data:/data
       - type: bind
         source: ./.coop-runtime/runsc
-        target: /run/coop-bootstrap/runsc
+        target: /run/rookhold-bootstrap/runsc
         read_only: true
     secrets:
       - source: coop_attestation_key
-        target: coop-attestation-key.pem
+        target: rookhold-attestation-key.pem
     tmpfs:
-      - /run/coop-runtime:rw,exec,nosuid,nodev,mode=0700,uid=0,gid=0
-      - /run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0
-    mem_limit: "${COOP_CONTAINER_MEMORY_LIMIT:-8g}"
+      - /run/rookhold-runtime:rw,exec,nosuid,nodev,mode=0700,uid=0,gid=0
+      - /run/rookhold-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0
+    mem_limit: "${ROOKHOLD_CONTAINER_MEMORY_LIMIT:-${COOP_CONTAINER_MEMORY_LIMIT:-8g}}"
     # Per-job gVisor still needs host cgroup/runtime setup from the outer
     # container. The outer service is host-equivalent even though each tenant
     # job crosses a separate runsc application-kernel boundary. Run this
@@ -70,8 +73,10 @@ services:
       start_period: 10s
 
 volumes:
+  # Retain the v0.5 key so an in-place Compose upgrade reuses the existing DB.
   coop-data:
 
 secrets:
+  # Retain the v0.5 host-state directory and secret key during the v0.6 rename.
   coop_attestation_key:
     file: ./.coop-runtime/attestation-key.pem

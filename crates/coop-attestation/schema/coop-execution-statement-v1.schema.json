@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/sambai-dev/coop/blob/main/crates/coop-attestation/schema/coop-execution-statement-v1.schema.json",
   "$comment": "Runtime verification additionally requires JSON integer tokens to deserialize exactly as Rust u32/u64 values, cross-field equality, receipt canonical-hash validity, signature policy, and actual subject bytes.",
-  "title": "Coop execution attestation Statement v1",
+  "title": "Rookhold execution attestation Statement v1",
   "type": "object",
   "required": ["_type", "subject", "predicateType", "predicate"],
   "properties": {

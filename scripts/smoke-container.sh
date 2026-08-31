@@ -10,9 +10,9 @@ if [[ ! "$image" =~ ^[A-Za-z0-9][A-Za-z0-9._/@:-]*$ ]]; then
   echo "refusing invalid Docker image reference: $image" >&2
   exit 1
 fi
-if [[ "${CI:-}" != true && "${COOP_SMOKE_ALLOW_PRIVILEGED:-}" != true ]]; then
+if [[ "${CI:-}" != true && "${ROOKHOLD_SMOKE_ALLOW_PRIVILEGED:-}" != true ]]; then
   echo "this smoke runs a host-equivalent privileged container; use only an ephemeral CI runner or dedicated VM" >&2
-  echo "set COOP_SMOKE_ALLOW_PRIVILEGED=true to acknowledge a deliberate local run" >&2
+  echo "set ROOKHOLD_SMOKE_ALLOW_PRIVILEGED=true to acknowledge a deliberate local run" >&2
   exit 1
 fi
 test "$(uname -m)" = x86_64
@@ -27,11 +27,11 @@ if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
 fi
 
 suffix="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$$"
-name="coop-container-smoke-${suffix}"
+name="rookhold-container-smoke-${suffix}"
 key="ci-smoke-key-0123456789abcdef"
-secrets_dir=$(mktemp -d "${TMPDIR:-/tmp}/coop-container-smoke.XXXXXX")
+secrets_dir=$(mktemp -d "${TMPDIR:-/tmp}/rookhold-container-smoke.XXXXXX")
 case "$secrets_dir" in
-  "${TMPDIR:-/tmp}"/coop-container-smoke.*) ;;
+  "${TMPDIR:-/tmp}"/rookhold-container-smoke.*) ;;
   *) echo "unsafe smoke secret directory: $secrets_dir" >&2; exit 1 ;;
 esac
 umask 0077
@@ -47,17 +47,17 @@ docker run --rm \
   --user "$host_uid:$host_gid" \
   --cap-drop ALL \
   --security-opt no-new-privileges \
-  --tmpfs "/run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=$host_uid,gid=$host_gid" \
+  --tmpfs "/run/rookhold-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=$host_uid,gid=$host_gid" \
   --mount "type=bind,src=$secrets_dir,dst=/keys" \
   --entrypoint /bin/sh \
   "$image_id" -ec '
-    /usr/local/bin/coop-verify generate-key \
-      --output /run/coop-secrets/attestation.pem >/dev/null
-    /usr/local/bin/coop-verify public-key \
-      --private-key /run/coop-secrets/attestation.pem \
-      --output /run/coop-secrets/attestation-public-key.pem >/dev/null
-    install -m 0600 /run/coop-secrets/attestation.pem /keys/attestation.pem
-    install -m 0644 /run/coop-secrets/attestation-public-key.pem \
+    /usr/local/bin/rookhold-verify generate-key \
+      --output /run/rookhold-secrets/attestation.pem >/dev/null
+    /usr/local/bin/rookhold-verify public-key \
+      --private-key /run/rookhold-secrets/attestation.pem \
+      --output /run/rookhold-secrets/attestation-public-key.pem >/dev/null
+    install -m 0600 /run/rookhold-secrets/attestation.pem /keys/attestation.pem
+    install -m 0644 /run/rookhold-secrets/attestation-public-key.pem \
       /keys/attestation-public-key.pem
   '
 test "$(stat -c %a "$secrets_dir/attestation.pem")" = 600
@@ -80,15 +80,15 @@ docker run --detach \
   --privileged \
   --cgroupns=host \
   --publish 127.0.0.1::7300 \
-  --env "COOP_API_KEYS=smoke:${key}" \
-  --env COOP_ATTESTATION_MODE=sign \
-  --env COOP_ATTESTATION_KEY_SOURCE=/run/coop-bootstrap/attestation-key.pem \
-  --env COOP_ATTESTATION_KEY_FILE=/run/coop-secrets/attestation-key.pem \
-  --env COOP_SANDBOX=ns \
-  --env COOP_SECCOMP=auto \
-  --env COOP_WORKERS=1 \
-  --tmpfs /run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0 \
-  --volume "$secrets_dir/attestation.pem:/run/coop-bootstrap/attestation-key.pem:ro" \
+  --env "ROOKHOLD_API_KEYS=smoke:${key}" \
+  --env ROOKHOLD_ATTESTATION_MODE=sign \
+  --env ROOKHOLD_ATTESTATION_KEY_SOURCE=/run/rookhold-bootstrap/attestation-key.pem \
+  --env ROOKHOLD_ATTESTATION_KEY_FILE=/run/rookhold-secrets/attestation-key.pem \
+  --env ROOKHOLD_SANDBOX=ns \
+  --env ROOKHOLD_SECCOMP=auto \
+  --env ROOKHOLD_WORKERS=1 \
+  --tmpfs /run/rookhold-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0 \
+  --volume "$secrets_dir/attestation.pem:/run/rookhold-bootstrap/attestation-key.pem:ro" \
   "$image_id" >/dev/null
 
 mapping=$(docker port "$name" 7300/tcp)
@@ -110,17 +110,17 @@ for _ in $(seq 1 60); do
 done
 test "$ready" = true
 
-COOP_CLIENT_KEY="$key" \
-COOP_VERIFY_BASE_URL="$base" \
-COOP_VERIFY_LANGUAGES=python,node,bash \
-COOP_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel \
-COOP_VERIFY_CONTAINER_IMAGE="$image_id" \
-COOP_VERIFY_PUBLIC_KEY_FILE="$secrets_dir/attestation-public-key.pem" \
+ROOKHOLD_CLIENT_KEY="$key" \
+ROOKHOLD_VERIFY_BASE_URL="$base" \
+ROOKHOLD_VERIFY_LANGUAGES=python,node,bash \
+ROOKHOLD_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel \
+ROOKHOLD_VERIFY_CONTAINER_IMAGE="$image_id" \
+ROOKHOLD_VERIFY_PUBLIC_KEY_FILE="$secrets_dir/attestation-public-key.pem" \
 python3 scripts/verify-production.py
 
-COOP_CLIENT_KEY="$key" \
-COOP_VERIFY_BASE_URL="$base" \
-COOP_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel \
+ROOKHOLD_CLIENT_KEY="$key" \
+ROOKHOLD_VERIFY_BASE_URL="$base" \
+ROOKHOLD_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel \
 PYTHONPATH=sdks/python \
 python3 scripts/verify-python-adapter.py
 

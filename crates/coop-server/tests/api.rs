@@ -923,7 +923,9 @@ async fn rejects_missing_api_key() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         response.headers().get(header::WWW_AUTHENTICATE),
-        Some(&header::HeaderValue::from_static("Bearer realm=\"coop\""))
+        Some(&header::HeaderValue::from_static(
+            "Bearer realm=\"rookhold\""
+        ))
     );
     assert_eq!(
         response.headers().get(header::CACHE_CONTROL),
@@ -950,7 +952,7 @@ async fn invalid_and_malformed_bearers_return_rfc6750_challenges() {
     assert_eq!(
         invalid.headers().get(header::WWW_AUTHENTICATE),
         Some(&header::HeaderValue::from_static(
-            "Bearer realm=\"coop\", error=\"invalid_token\""
+            "Bearer realm=\"rookhold\", error=\"invalid_token\""
         ))
     );
 
@@ -968,7 +970,7 @@ async fn invalid_and_malformed_bearers_return_rfc6750_challenges() {
     assert_eq!(
         malformed.headers().get(header::WWW_AUTHENTICATE),
         Some(&header::HeaderValue::from_static(
-            "Bearer realm=\"coop\", error=\"invalid_request\""
+            "Bearer realm=\"rookhold\", error=\"invalid_request\""
         ))
     );
 }
@@ -1174,7 +1176,7 @@ async fn indexed_credentials_enforce_every_route_scope_and_preserve_tenant_404s(
     assert_eq!(
         denied.headers().get(header::WWW_AUTHENTICATE),
         Some(&header::HeaderValue::from_static(
-            "Bearer realm=\"coop\", error=\"insufficient_scope\", scope=\"jobs:submit\""
+            "Bearer realm=\"rookhold\", error=\"insufficient_scope\", scope=\"jobs:submit\""
         ))
     );
 
@@ -2693,7 +2695,7 @@ async fn global_metrics_are_separately_authorized_bounded_and_negotiated() {
                 .headers()
                 .get(header::WWW_AUTHENTICATE)
                 .and_then(|value| value.to_str().ok()),
-            Some("Bearer realm=\"coop-metrics\"")
+            Some("Bearer realm=\"rookhold-metrics\"")
         );
     }
 

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copy host-owned bootstrap inputs across the container ownership boundary
-# before starting Coop or the packaged offline verifier.
+# before starting Rookhold or the packaged offline verifier.
 set -eu
 
 temporary=
@@ -26,14 +26,14 @@ stage_file() {
     exit 1
   fi
   case "$target_path" in
-    /run/coop-runtime/*)
-      target_name=${target_path#/run/coop-runtime/}
+    /run/rookhold-runtime/*)
+      target_name=${target_path#/run/rookhold-runtime/}
       ;;
-    /run/coop-secrets/*)
-      target_name=${target_path#/run/coop-secrets/}
+    /run/rookhold-secrets/*)
+      target_name=${target_path#/run/rookhold-secrets/}
       ;;
     *)
-      echo "$label target must be below /run/coop-runtime or /run/coop-secrets" >&2
+      echo "$label target must be below /run/rookhold-runtime or /run/rookhold-secrets" >&2
       exit 1
       ;;
   esac
@@ -65,26 +65,26 @@ stage_file() {
   fi
 }
 
-if [ -n "${COOP_GVISOR_RUNSC_SOURCE:-}" ]; then
+if [ -n "${ROOKHOLD_GVISOR_RUNSC_SOURCE:-}" ]; then
   stage_file \
-    "$COOP_GVISOR_RUNSC_SOURCE" \
-    "${COOP_GVISOR_RUNSC:-/run/coop-runtime/runsc}" \
+    "$ROOKHOLD_GVISOR_RUNSC_SOURCE" \
+    "${ROOKHOLD_GVISOR_RUNSC:-/run/rookhold-runtime/runsc}" \
     755 \
     "gVisor runtime"
 fi
 
-if [ -n "${COOP_ATTESTATION_KEY_SOURCE:-}" ]; then
+if [ -n "${ROOKHOLD_ATTESTATION_KEY_SOURCE:-}" ]; then
   stage_file \
-    "$COOP_ATTESTATION_KEY_SOURCE" \
-    "${COOP_ATTESTATION_KEY_FILE:-/run/coop-secrets/attestation-key.pem}" \
+    "$ROOKHOLD_ATTESTATION_KEY_SOURCE" \
+    "${ROOKHOLD_ATTESTATION_KEY_FILE:-/run/rookhold-secrets/attestation-key.pem}" \
     600 \
     "attestation private key"
 fi
 
-if [ -n "${COOP_VERIFY_PUBLIC_KEY_SOURCE:-}" ]; then
+if [ -n "${ROOKHOLD_VERIFY_PUBLIC_KEY_SOURCE:-}" ]; then
   stage_file \
-    "$COOP_VERIFY_PUBLIC_KEY_SOURCE" \
-    "${COOP_VERIFY_PUBLIC_KEY_FILE:-/run/coop-secrets/trusted-attestation-public-key.pem}" \
+    "$ROOKHOLD_VERIFY_PUBLIC_KEY_SOURCE" \
+    "${ROOKHOLD_VERIFY_PUBLIC_KEY_FILE:-/run/rookhold-secrets/trusted-attestation-public-key.pem}" \
     644 \
     "trusted attestation public key"
 fi
@@ -95,6 +95,6 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 case "$1" in
-  -*) set -- /usr/local/bin/coop "$@" ;;
+  -*) set -- /usr/local/bin/rookhold "$@" ;;
 esac
 exec "$@"

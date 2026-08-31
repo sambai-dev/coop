@@ -258,35 +258,35 @@ impl CredentialStore {
         pepper_path: &Path,
         production: bool,
     ) -> Result<Self, String> {
-        validate_credential_file(credentials_path, "COOP_CREDENTIALS_FILE", production)?;
-        validate_credential_file(pepper_path, "COOP_CREDENTIAL_PEPPER_FILE", production)?;
+        validate_credential_file(credentials_path, "ROOKHOLD_CREDENTIALS_FILE", production)?;
+        validate_credential_file(pepper_path, "ROOKHOLD_CREDENTIAL_PEPPER_FILE", production)?;
 
         let pepper_text = read_bounded_utf8(
             pepper_path,
-            "COOP_CREDENTIAL_PEPPER_FILE",
+            "ROOKHOLD_CREDENTIAL_PEPPER_FILE",
             PEPPER_FILE_MAX_BYTES,
         )?;
         let pepper = decode_hex_32(pepper_text.trim())
-            .map_err(|error| format!("COOP_CREDENTIAL_PEPPER_FILE {error}"))?;
+            .map_err(|error| format!("ROOKHOLD_CREDENTIAL_PEPPER_FILE {error}"))?;
         let credentials_text = read_bounded_utf8(
             credentials_path,
-            "COOP_CREDENTIALS_FILE",
+            "ROOKHOLD_CREDENTIALS_FILE",
             CREDENTIALS_FILE_MAX_BYTES,
         )?;
         let document: CredentialsDocument = serde_json::from_str(&credentials_text)
-            .map_err(|error| format!("invalid COOP_CREDENTIALS_FILE JSON: {error}"))?;
+            .map_err(|error| format!("invalid ROOKHOLD_CREDENTIALS_FILE JSON: {error}"))?;
         if document.version != 1 {
             return Err(format!(
-                "unsupported COOP_CREDENTIALS_FILE version {}; expected 1",
+                "unsupported ROOKHOLD_CREDENTIALS_FILE version {}; expected 1",
                 document.version
             ));
         }
         if document.credentials.is_empty() {
-            return Err("COOP_CREDENTIALS_FILE contains no credentials".to_string());
+            return Err("ROOKHOLD_CREDENTIALS_FILE contains no credentials".to_string());
         }
         if document.credentials.len() > MAX_CREDENTIALS {
             return Err(format!(
-                "COOP_CREDENTIALS_FILE contains too many credentials (maximum {MAX_CREDENTIALS})"
+                "ROOKHOLD_CREDENTIALS_FILE contains too many credentials (maximum {MAX_CREDENTIALS})"
             ));
         }
 
@@ -336,7 +336,7 @@ impl CredentialStore {
             };
             if by_id.insert(key_id.clone(), credential).is_some() {
                 return Err(format!(
-                    "COOP_CREDENTIALS_FILE contains duplicate key_id {key_id:?}"
+                    "ROOKHOLD_CREDENTIALS_FILE contains duplicate key_id {key_id:?}"
                 ));
             }
         }
@@ -425,15 +425,15 @@ impl JwtConfig {
         jwks_ttl_seconds: u64,
         max_token_age_seconds: u64,
     ) -> Result<Self, String> {
-        validate_https_url("COOP_OIDC_ISSUER", issuer)?;
-        validate_https_url("COOP_OIDC_AUDIENCE", audience)?;
-        let jwks_url = validate_https_url("COOP_OIDC_JWKS_URL", jwks_url)?;
+        validate_https_url("ROOKHOLD_OIDC_ISSUER", issuer)?;
+        validate_https_url("ROOKHOLD_OIDC_AUDIENCE", audience)?;
+        let jwks_url = validate_https_url("ROOKHOLD_OIDC_JWKS_URL", jwks_url)?;
         validate_claim_name(tenant_claim)?;
         if matches!(
             tenant_claim,
             "iss" | "sub" | "aud" | "exp" | "nbf" | "iat" | "jti" | "client_id" | "scope"
         ) {
-            return Err("COOP_OIDC_TENANT_CLAIM must be a distinct private claim".to_string());
+            return Err("ROOKHOLD_OIDC_TENANT_CLAIM must be a distinct private claim".to_string());
         }
 
         let mut parsed_map = HashMap::new();
@@ -443,7 +443,7 @@ impl JwtConfig {
                 continue;
             }
             let (external, internal) = mapping.split_once('=').ok_or_else(|| {
-                "COOP_OIDC_TENANT_MAP entries must use external=internal syntax".to_string()
+                "ROOKHOLD_OIDC_TENANT_MAP entries must use external=internal syntax".to_string()
             })?;
             let external = external.trim();
             let internal = internal.trim();
@@ -454,12 +454,12 @@ impl JwtConfig {
                 .is_some()
             {
                 return Err(format!(
-                    "COOP_OIDC_TENANT_MAP contains duplicate external tenant {external:?}"
+                    "ROOKHOLD_OIDC_TENANT_MAP contains duplicate external tenant {external:?}"
                 ));
             }
         }
         if parsed_map.is_empty() {
-            return Err("COOP_OIDC_TENANT_MAP must contain at least one mapping".to_string());
+            return Err("ROOKHOLD_OIDC_TENANT_MAP must contain at least one mapping".to_string());
         }
 
         let mut parsed_algorithms = Vec::new();
@@ -469,25 +469,27 @@ impl JwtConfig {
             .filter(|name| !name.is_empty())
         {
             let algorithm = Algorithm::from_str(name)
-                .map_err(|_| format!("unsupported COOP_OIDC_ALGORITHMS value {name:?}"))?;
+                .map_err(|_| format!("unsupported ROOKHOLD_OIDC_ALGORITHMS value {name:?}"))?;
             if matches!(
                 algorithm,
                 Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512
             ) {
-                return Err("COOP_OIDC_ALGORITHMS must use asymmetric algorithms".to_string());
+                return Err("ROOKHOLD_OIDC_ALGORITHMS must use asymmetric algorithms".to_string());
             }
             if !parsed_algorithms.contains(&algorithm) {
                 parsed_algorithms.push(algorithm);
             }
         }
         if parsed_algorithms.is_empty() {
-            return Err("COOP_OIDC_ALGORITHMS must not be empty".to_string());
+            return Err("ROOKHOLD_OIDC_ALGORITHMS must not be empty".to_string());
         }
         if !(60..=3600).contains(&jwks_ttl_seconds) {
-            return Err("COOP_OIDC_JWKS_TTL_SECONDS must be between 60 and 3600".to_string());
+            return Err("ROOKHOLD_OIDC_JWKS_TTL_SECONDS must be between 60 and 3600".to_string());
         }
         if !(60..=86_400).contains(&max_token_age_seconds) {
-            return Err("COOP_OIDC_MAX_TOKEN_AGE_SECONDS must be between 60 and 86400".to_string());
+            return Err(
+                "ROOKHOLD_OIDC_MAX_TOKEN_AGE_SECONDS must be between 60 and 86400".to_string(),
+            );
         }
 
         Ok(Self {
@@ -508,7 +510,7 @@ impl JwtConfig {
             "authorization_servers": [self.issuer],
             "bearer_methods_supported": ["header"],
             "scopes_supported": Scope::ALL.map(Scope::as_str),
-            "resource_name": "Coop execution gateway"
+            "resource_name": "Rookhold execution gateway"
         })
     }
 }
@@ -625,7 +627,7 @@ impl JwtVerifier {
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(5))
             .redirect(Policy::none())
-            .user_agent(concat!("coop/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("rookhold/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| format!("cannot build OIDC JWKS client: {error}"))?;
         let source = Arc::new(HttpJwksSource {
@@ -926,7 +928,7 @@ fn validate_claim_name(value: &str) -> Result<(), String> {
             byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b':' | b'/' | b'_' | b'-')
         })
     {
-        return Err("COOP_OIDC_TENANT_CLAIM is not a safe claim name".to_string());
+        return Err("ROOKHOLD_OIDC_TENANT_CLAIM is not a safe claim name".to_string());
     }
     Ok(())
 }
@@ -1284,8 +1286,8 @@ pub async fn require_metrics_read(req: Request, next: Next) -> Response {
 pub(crate) fn unauthorized(code: &str, message: &str, error: Option<&str>) -> Response {
     let mut response = crate::routes::api_error(StatusCode::UNAUTHORIZED, code, message, false);
     let challenge = error.map_or_else(
-        || "Bearer realm=\"coop\"".to_string(),
-        |error| format!("Bearer realm=\"coop\", error=\"{error}\""),
+        || "Bearer realm=\"rookhold\"".to_string(),
+        |error| format!("Bearer realm=\"rookhold\", error=\"{error}\""),
     );
     if let Ok(value) = HeaderValue::from_str(&challenge) {
         response
@@ -1303,7 +1305,7 @@ fn insufficient_scope(scope: Scope) -> Response {
         false,
     );
     let challenge = format!(
-        "Bearer realm=\"coop\", error=\"insufficient_scope\", scope=\"{}\"",
+        "Bearer realm=\"rookhold\", error=\"insufficient_scope\", scope=\"{}\"",
         scope.as_str()
     );
     if let Ok(value) = HeaderValue::from_str(&challenge) {
