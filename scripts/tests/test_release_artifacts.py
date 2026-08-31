@@ -53,6 +53,9 @@ def write_zip(path: Path, entries: dict[str, bytes | None]) -> None:
 
 
 def write_payload(path: Path) -> None:
+    if path.name.startswith("rookhold-cli-"):
+        path.write_bytes(b"standalone-cli-fixture")
+        return
     entries = archive_entries(path.name)
     if path.name.endswith((".tar.gz", ".tgz")):
         write_tar(path, entries)
@@ -61,6 +64,30 @@ def write_payload(path: Path) -> None:
 
 
 class ReleaseArtifactsTests(unittest.TestCase):
+    def test_release_exposes_one_direct_cli_file_per_platform(self) -> None:
+        payloads = set(RELEASE["payload_names"](VERSION))
+        self.assertTrue(
+            {
+                "rookhold-cli-aarch64-apple-darwin",
+                "rookhold-cli-x86_64-pc-windows-msvc.exe",
+                "rookhold-cli-x86_64-unknown-linux-musl",
+            }
+            <= payloads
+        )
+
+    def test_platform_archives_require_standalone_cli_and_mcp_apps(self) -> None:
+        expected = {
+            "rookhold-aarch64-apple-darwin.tar.gz": {"rookhold-cli", "rookhold-mcp"},
+            "rookhold-x86_64-unknown-linux-musl.tar.gz": {"rookhold-cli", "rookhold-mcp"},
+            "rookhold-x86_64-pc-windows-msvc.zip": {"rookhold-cli.exe", "rookhold-mcp.exe"},
+        }
+        for asset, names in expected.items():
+            packaged = {
+                PurePosixPath(path).name
+                for path in RELEASE["required_paths"](asset, VERSION)
+            }
+            self.assertTrue(names <= packaged, f"{asset} is missing {names - packaged}")
+
     def test_exact_contract_prepare_finalize_and_remote_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -71,10 +98,17 @@ class ReleaseArtifactsTests(unittest.TestCase):
                     f"rookhold_sdk-{VERSION}-py3-none-any.whl",
                     f"rookhold_sdk-{VERSION}.tar.gz",
                 ),
-                "rookhold-aarch64-apple-darwin": ("rookhold-aarch64-apple-darwin.tar.gz",),
-                "rookhold-x86_64-pc-windows-msvc": ("rookhold-x86_64-pc-windows-msvc.zip",),
+                "rookhold-aarch64-apple-darwin": (
+                    "rookhold-aarch64-apple-darwin.tar.gz",
+                    "rookhold-cli-aarch64-apple-darwin",
+                ),
+                "rookhold-x86_64-pc-windows-msvc": (
+                    "rookhold-x86_64-pc-windows-msvc.zip",
+                    "rookhold-cli-x86_64-pc-windows-msvc.exe",
+                ),
                 "rookhold-x86_64-unknown-linux-musl": (
                     "rookhold-x86_64-unknown-linux-musl.tar.gz",
+                    "rookhold-cli-x86_64-unknown-linux-musl",
                 ),
             }
             for container, assets in containers.items():
@@ -88,7 +122,7 @@ class ReleaseArtifactsTests(unittest.TestCase):
             sbom_input = root / "sbom-input"
             payload_checksums = root / "payloads.sha256"
             RELEASE["prepare"](dist, sbom_input, payload_checksums, VERSION)
-            self.assertEqual(len(payload_checksums.read_text().splitlines()), 6)
+            self.assertEqual(len(payload_checksums.read_text().splitlines()), 9)
 
             sbom = dist / RELEASE["sbom_name"](VERSION)
             document = {
@@ -108,8 +142,8 @@ class ReleaseArtifactsTests(unittest.TestCase):
 
             all_checksums = root / "all.sha256"
             RELEASE["finalize"](dist, all_checksums, VERSION)
-            self.assertEqual(len((dist / "SHA256SUMS").read_text().splitlines()), 7)
-            self.assertEqual(len(all_checksums.read_text().splitlines()), 8)
+            self.assertEqual(len((dist / "SHA256SUMS").read_text().splitlines()), 10)
+            self.assertEqual(len(all_checksums.read_text().splitlines()), 11)
 
             metadata = root / "release.json"
             metadata.write_text(

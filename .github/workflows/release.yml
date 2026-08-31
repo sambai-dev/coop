@@ -339,19 +339,27 @@ jobs:
             os: ubuntu-24.04
             binary: rookhold
             archive: tar.gz
+            cli_asset: rookhold-cli-x86_64-unknown-linux-musl
           - target: aarch64-apple-darwin
             os: macos-15
             binary: rookhold
             archive: tar.gz
+            cli_asset: rookhold-cli-aarch64-apple-darwin
           - target: x86_64-pc-windows-msvc
             os: windows-2025
             binary: rookhold.exe
             archive: zip
+            cli_asset: rookhold-cli-x86_64-pc-windows-msvc.exe
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python for standalone terminal apps
+        if: matrix.target != 'x86_64-unknown-linux-musl'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
       - name: Install pinned Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable action
         with:
@@ -362,6 +370,64 @@ jobs:
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Install pinned standalone app builder
+        if: matrix.target != 'x86_64-unknown-linux-musl'
+        run: >-
+          python -m pip install --disable-pip-version-check
+          pyinstaller==6.22.2 pyinstaller-hooks-contrib==2026.7
+      - name: Build standalone CLI and MCP apps
+        if: matrix.target != 'x86_64-unknown-linux-musl'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m PyInstaller --noconfirm --clean --onefile \
+            --name rookhold-cli --paths sdks/python \
+            --distpath standalone-dist --workpath standalone-build/cli \
+            --specpath standalone-spec sdks/python/rookhold_cli.py
+          python -m PyInstaller --noconfirm --clean --onefile \
+            --name rookhold-mcp --paths sdks/python \
+            --distpath standalone-dist --workpath standalone-build/mcp \
+            --specpath standalone-spec sdks/python/rookhold_mcp.py
+      - name: Build musl-native standalone CLI and MCP apps
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/amd64 \
+            --volume "$PWD:/src" --workdir /src \
+            python:3.12-alpine@sha256:285a71327884a4d50efbea30104473b0fa43ecefa499458899670ca30dae76e5 \
+            sh -ec '
+              python -m pip install --disable-pip-version-check pyinstaller==6.22.2 pyinstaller-hooks-contrib==2026.7
+              python -m PyInstaller --noconfirm --clean --onefile \
+                --name rookhold-cli --paths sdks/python \
+                --distpath standalone-dist --workpath standalone-build/cli \
+                --specpath standalone-spec sdks/python/rookhold_cli.py
+              python -m PyInstaller --noconfirm --clean --onefile \
+                --name rookhold-mcp --paths sdks/python \
+                --distpath standalone-dist --workpath standalone-build/mcp \
+                --specpath standalone-spec sdks/python/rookhold_mcp.py
+            '
+      - name: Smoke standalone terminal apps without Python packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix=
+          python_cmd=python
+          if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
+          if [ "$RUNNER_OS" = Linux ]; then python_cmd=python3; fi
+          test "$("standalone-dist/rookhold-cli${suffix}" --version)" = "rookhold-cli ${{ needs.preflight.outputs.version }}"
+          test "$("standalone-dist/rookhold-mcp${suffix}" --version)" = "rookhold-mcp ${{ needs.preflight.outputs.version }}"
+          response=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}' | \
+            ROOKHOLD_API_KEY=standalone-smoke "standalone-dist/rookhold-cli${suffix}" mcp-server)
+          MCP_RESPONSE="$response" "$python_cmd" -c \
+            'import json, os; value=json.loads(os.environ["MCP_RESPONSE"]); assert value["id"] == 1 and "result" in value'
+      - name: Stage the direct single-file CLI download
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix=
+          if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
+          cp "standalone-dist/rookhold-cli${suffix}" "${{ matrix.cli_asset }}"
       - name: Build locked release binary
         run: cargo build --locked --release -p coop-server -p coop-exec -p coop-attestation --bins --target ${{ matrix.target }}
       - name: Validate release target
@@ -385,6 +451,7 @@ jobs:
           dir="rookhold-${{ matrix.target }}"
           mkdir "$dir"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$dir/"
+          cp standalone-dist/rookhold-cli standalone-dist/rookhold-mcp "$dir/"
           cp "target/${{ matrix.target }}/release/rookhold-verify" "$dir/"
           cp "target/${{ matrix.target }}/release/coop" "$dir/"
           cp "target/${{ matrix.target }}/release/coop-verify" "$dir/"
@@ -395,6 +462,7 @@ jobs:
             cp "target/${{ matrix.target }}/release/coop-oci-init" "$dir/"
           fi
           cp README.md LICENSE SECURITY.md AUDIT.md CHANGELOG.md "$dir/"
+          cp docs/standalone-cli.md "$dir/QUICKSTART.md"
           cp -R docs deploy sdks integrations "$dir/"
           mkdir "$dir/scripts"
           cp scripts/build-rootfs-manifest.py scripts/smoke-gvisor.sh "$dir/scripts/"
@@ -406,17 +474,21 @@ jobs:
           $dir = "rookhold-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $dir | Out-Null
           Copy-Item -LiteralPath "target/${{ matrix.target }}/release/${{ matrix.binary }}" -Destination $dir
+          Copy-Item -LiteralPath standalone-dist/rookhold-cli.exe, standalone-dist/rookhold-mcp.exe -Destination $dir
           Copy-Item -LiteralPath "target/${{ matrix.target }}/release/rookhold-verify.exe" -Destination $dir
           Copy-Item -LiteralPath "target/${{ matrix.target }}/release/coop.exe" -Destination $dir
           Copy-Item -LiteralPath "target/${{ matrix.target }}/release/coop-verify.exe" -Destination $dir
           Copy-Item -LiteralPath README.md, LICENSE, SECURITY.md, AUDIT.md, CHANGELOG.md -Destination $dir
+          Copy-Item -LiteralPath docs/standalone-cli.md -Destination "$dir/QUICKSTART.md"
           Copy-Item -LiteralPath docs, deploy, sdks, integrations -Destination $dir -Recurse
           Compress-Archive -Path $dir -DestinationPath "${dir}.zip"
       - name: Upload packaged artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rookhold-${{ matrix.target }}
-          path: rookhold-${{ matrix.target }}.${{ matrix.archive }}
+          path: |
+            rookhold-${{ matrix.target }}.${{ matrix.archive }}
+            ${{ matrix.cli_asset }}
           if-no-files-found: error
           retention-days: 7
 
@@ -456,7 +528,7 @@ jobs:
         with:
           name: rookhold-x86_64-pc-windows-msvc
           path: artifact-downloads/rookhold-x86_64-pc-windows-msvc
-      - name: Assemble the exact six-payload release set
+      - name: Assemble the exact nine-payload release set
         shell: bash
         run: >-
           python3 scripts/release-artifacts.py assemble
@@ -492,12 +564,12 @@ jobs:
           python3 scripts/release-artifacts.py verify-sbom
           --sbom "dist/rookhold-${{ needs.preflight.outputs.version }}.spdx.json"
           --version "${{ needs.preflight.outputs.version }}"
-      - name: Bind the SPDX SBOM to all six payload digests
+      - name: Bind the SPDX SBOM to all nine payload digests
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/rookhold-payload-subjects.sha256
           sbom-path: dist/rookhold-${{ needs.preflight.outputs.version }}.spdx.json
-      - name: Finalize and checksum the exact eight-asset contract
+      - name: Finalize and checksum the exact eleven-asset contract
         shell: bash
         run: >-
           python3 scripts/release-artifacts.py finalize
@@ -537,6 +609,9 @@ jobs:
             dist/rookhold-x86_64-unknown-linux-musl.tar.gz
             dist/rookhold-aarch64-apple-darwin.tar.gz
             dist/rookhold-x86_64-pc-windows-msvc.zip
+            dist/rookhold-cli-x86_64-unknown-linux-musl
+            dist/rookhold-cli-aarch64-apple-darwin
+            dist/rookhold-cli-x86_64-pc-windows-msvc.exe
             dist/rookhold_sdk-${{ needs.preflight.outputs.version }}-py3-none-any.whl
             dist/rookhold_sdk-${{ needs.preflight.outputs.version }}.tar.gz
             dist/rookhold-sdk-${{ needs.preflight.outputs.version }}.tgz

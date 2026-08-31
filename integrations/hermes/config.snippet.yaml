@@ -2,8 +2,8 @@
 # ~/.hermes/.env as ROOKHOLD_BASE_URL and ROOKHOLD_API_KEY; do not commit them here.
 mcp_servers:
   rookhold:
-    command: "rookhold-mcp"
-    args: []
+    command: "rookhold-cli"
+    args: ["mcp-server"]
     env:
       ROOKHOLD_BASE_URL: "${ROOKHOLD_BASE_URL}"
       ROOKHOLD_API_KEY: "${ROOKHOLD_API_KEY}"

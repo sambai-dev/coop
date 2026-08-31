@@ -29,6 +29,9 @@ def payload_names(version: str) -> tuple[str, ...]:
     require_version(version)
     return (
         "rookhold-aarch64-apple-darwin.tar.gz",
+        "rookhold-cli-aarch64-apple-darwin",
+        "rookhold-cli-x86_64-pc-windows-msvc.exe",
+        "rookhold-cli-x86_64-unknown-linux-musl",
         "rookhold-sdk-" + version + ".tgz",
         "rookhold-x86_64-pc-windows-msvc.zip",
         "rookhold-x86_64-unknown-linux-musl.tar.gz",
@@ -214,6 +217,12 @@ def extract_zip(archive_path: Path, destination: Path) -> None:
 
 
 def required_paths(asset: str, version: str) -> tuple[str, ...]:
+    if asset in {
+        "rookhold-cli-aarch64-apple-darwin",
+        "rookhold-cli-x86_64-pc-windows-msvc.exe",
+        "rookhold-cli-x86_64-unknown-linux-musl",
+    }:
+        return (asset,)
     if asset == "rookhold-x86_64-unknown-linux-musl.tar.gz":
         root = "rookhold-x86_64-unknown-linux-musl"
         return tuple(
@@ -221,6 +230,8 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
             for name in (
                 "rookhold",
                 "coop",
+                "rookhold-cli",
+                "rookhold-mcp",
                 "rookhold-verify",
                 "coop-verify",
                 "rookhold-sandbox-init",
@@ -232,6 +243,7 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
                 "SECURITY.md",
                 "AUDIT.md",
                 "CHANGELOG.md",
+                "QUICKSTART.md",
                 "docs",
                 "deploy",
                 "sdks",
@@ -247,6 +259,8 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
             for name in (
                 "rookhold",
                 "coop",
+                "rookhold-cli",
+                "rookhold-mcp",
                 "rookhold-verify",
                 "coop-verify",
                 "README.md",
@@ -254,6 +268,7 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
                 "SECURITY.md",
                 "AUDIT.md",
                 "CHANGELOG.md",
+                "QUICKSTART.md",
                 "docs",
                 "deploy",
                 "sdks",
@@ -269,6 +284,8 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
             for name in (
                 "rookhold.exe",
                 "coop.exe",
+                "rookhold-cli.exe",
+                "rookhold-mcp.exe",
                 "rookhold-verify.exe",
                 "coop-verify.exe",
                 "README.md",
@@ -276,6 +293,7 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
                 "SECURITY.md",
                 "AUDIT.md",
                 "CHANGELOG.md",
+                "QUICKSTART.md",
                 "docs",
                 "deploy",
                 "sdks",
@@ -348,9 +366,18 @@ def assemble(downloads: Path, dist: Path, version: str) -> None:
             "rookhold_sdk-" + version + "-py3-none-any.whl",
             "rookhold_sdk-" + version + ".tar.gz",
         ),
-        "rookhold-aarch64-apple-darwin": ("rookhold-aarch64-apple-darwin.tar.gz",),
-        "rookhold-x86_64-pc-windows-msvc": ("rookhold-x86_64-pc-windows-msvc.zip",),
-        "rookhold-x86_64-unknown-linux-musl": ("rookhold-x86_64-unknown-linux-musl.tar.gz",),
+        "rookhold-aarch64-apple-darwin": (
+            "rookhold-aarch64-apple-darwin.tar.gz",
+            "rookhold-cli-aarch64-apple-darwin",
+        ),
+        "rookhold-x86_64-pc-windows-msvc": (
+            "rookhold-x86_64-pc-windows-msvc.zip",
+            "rookhold-cli-x86_64-pc-windows-msvc.exe",
+        ),
+        "rookhold-x86_64-unknown-linux-musl": (
+            "rookhold-x86_64-unknown-linux-musl.tar.gz",
+            "rookhold-cli-x86_64-unknown-linux-musl",
+        ),
     }
     if not downloads.is_dir() or downloads.is_symlink():
         raise ValueError(f"artifact-download root is not a real directory: {downloads}")
@@ -394,6 +421,9 @@ def prepare(dist: Path, output: Path, checksums: Path, version: str) -> None:
             extract_tar(asset, payload_root)
         elif name.endswith((".zip", ".whl")):
             extract_zip(asset, payload_root)
+        elif name.startswith("rookhold-cli-"):
+            with asset.open("rb") as source:
+                copy_exact(source, payload_root / name, asset.stat().st_size)
         else:
             raise ValueError(f"unsupported release archive: {name}")
 
@@ -425,7 +455,7 @@ def prepare(dist: Path, output: Path, checksums: Path, version: str) -> None:
                 json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n"
             )
         print(
-            f"inventoried {name}: {len(files)} files, {asset.stat().st_size} compressed bytes, "
+            f"inventoried {name}: {len(files)} files, {asset.stat().st_size} payload bytes, "
             f"sha256:{marker['sha256']}"
         )
 

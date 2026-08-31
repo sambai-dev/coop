@@ -45,6 +45,8 @@ pub const ROOTFS_MANIFEST_PATH: &str = "/.coop-rootfs.manifest";
 const CONTROL_TICK: Duration = Duration::from_millis(20);
 const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(3);
+const CONTROL_EXECUTABLE_BUSY_RETRIES: usize = 4;
+const CONTROL_EXECUTABLE_BUSY_BACKOFF: Duration = Duration::from_millis(10);
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 const MAX_READY_FRAME: usize = 128;
 const PRE_READY_OUTPUT_LIMIT: usize = 64 * 1024;
@@ -933,16 +935,37 @@ impl GvisorProvider {
         runtime_dir: &Path,
         arguments: &[&str],
     ) -> io::Result<std::process::Output> {
-        let mut command = self.run_command(state_root, runtime_dir);
-        command
-            .args(arguments)
-            .stdin(Stdio::null())
-            .kill_on_drop(true);
-        tokio::time::timeout(CONTROL_TIMEOUT, command.output())
-            .await
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::TimedOut, "runsc control command timed out")
-            })?
+        let deadline = tokio::time::Instant::now() + CONTROL_TIMEOUT;
+        for attempt in 0..=CONTROL_EXECUTABLE_BUSY_RETRIES {
+            let mut command = self.run_command(state_root, runtime_dir);
+            command
+                .args(arguments)
+                .stdin(Stdio::null())
+                .kill_on_drop(true);
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "runsc control command timed out",
+                ));
+            }
+            match tokio::time::timeout(remaining, command.output()).await {
+                Err(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "runsc control command timed out",
+                    ));
+                }
+                Ok(Err(error))
+                    if error.kind() == io::ErrorKind::ExecutableFileBusy
+                        && attempt < CONTROL_EXECUTABLE_BUSY_RETRIES =>
+                {
+                    tokio::time::sleep(CONTROL_EXECUTABLE_BUSY_BACKOFF).await;
+                }
+                Ok(result) => return result,
+            }
+        }
+        unreachable!("bounded runsc control retries always return")
     }
 
     fn run_command(&self, state_root: &Path, runtime_dir: &Path) -> Command {
