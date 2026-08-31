@@ -61,6 +61,8 @@ class CliConfig:
 
 
 class Palette:
+    """High-contrast terminal roles for the black, white, and electric-blue CLI."""
+
     def __init__(self, enabled: bool) -> None:
         self.enabled = enabled
 
@@ -69,19 +71,22 @@ class Palette:
         return f"\x1b[{code}m{value}\x1b[0m" if self.enabled else value
 
     def accent(self, text: object) -> str:
-        return self.paint("38;2;155;171;255", text)
+        return self.paint("38;2;121;160;255", text)
 
     def success(self, text: object) -> str:
-        return self.paint("38;2;101;214;162", text)
+        return self.paint("38;2;93;211;158", text)
 
     def warning(self, text: object) -> str:
-        return self.paint("38;2;233;185;110", text)
+        return self.paint("38;2;244;189;106", text)
+
+    def danger(self, text: object) -> str:
+        return self.paint("38;2;255;107;122", text)
 
     def muted(self, text: object) -> str:
-        return self.paint("38;2;125;132;151", text)
+        return self.paint("38;2;142;150;166", text)
 
     def strong(self, text: object) -> str:
-        return self.paint("1;38;2;245;247;255", text)
+        return self.paint("1;38;2;245;245;245", text)
 
 
 class RookholdCli:
@@ -191,7 +196,7 @@ class RookholdCli:
             "    ██████\n"
             "  ██████████"
         )
-        self._write(self.colors.strong(logo))
+        self._write(self.colors.accent(logo))
         self._write(self.colors.strong(f"Rookhold CLI v{__version__}"))
         self._write(self.colors.muted("Controlled execution for AI agents"))
         self._write()
@@ -221,11 +226,14 @@ class RookholdCli:
 
     def _print_result(self, result: Mapping[str, Any]) -> None:
         status = result.get("status", "unknown")
-        status_text = (
-            self.colors.success(f"✓ {status}")
-            if status == "succeeded"
-            else self.colors.warning(status)
-        )
+        if status == "succeeded":
+            status_text = self.colors.success(f"✓ {status}")
+        elif status == "failed":
+            status_text = self.colors.danger(f"× {status}")
+        elif status == "cancelled":
+            status_text = self.colors.muted(f"■ {status}")
+        else:
+            status_text = self.colors.warning(str(status))
         self._write(
             f"  {status_text} · exit {result.get('exit_code', '—')} · "
             f"{result.get('duration_ms', '—')} ms"
@@ -336,7 +344,14 @@ class RookholdCli:
             if not isinstance(job, dict):
                 continue
             status = job.get("status", "unknown")
-            marker = self.colors.success("●") if status == "succeeded" else "●"
+            if status == "succeeded":
+                marker = self.colors.success("●")
+            elif status == "failed":
+                marker = self.colors.danger("●")
+            elif status == "cancelled":
+                marker = self.colors.muted("■")
+            else:
+                marker = self.colors.warning("●")
             self._write(
                 f"  {marker} {str(job.get('job_id', ''))[:18]:18} "
                 f"{str(status):12} {job.get('language', 'unknown')}"
@@ -495,7 +510,7 @@ class RookholdCli:
                 TypeError,
                 ValueError,
             ) as exc:
-                self._write(self.colors.warning(f"  error · {self._redact(exc)}"))
+                self._write(self.colors.danger(f"  error · {self._redact(exc)}"))
 
 
 def _parser() -> argparse.ArgumentParser:

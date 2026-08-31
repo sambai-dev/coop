@@ -129,7 +129,7 @@ jobs:
             target="sdks/python/.verify-dist/${kind}-install"
             rm -rf "$target"
             python -m pip install --no-deps --target "$target" "$artifact"
-            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp, rookhold, rookhold_cli, rookhold_mcp; assert rookhold.__version__ == '0.7.0'; assert rookhold_mcp.__version__ == rookhold.__version__; assert coop.Coop is rookhold.Rookhold; assert coop_mcp.CoopMcpServer is rookhold_mcp.RookholdMcpServer; assert callable(rookhold_cli.main); assert Path(rookhold.__file__).with_name('py.typed').is_file(); assert Path(coop.__file__).with_name('py.typed').is_file()"
+            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp, rookhold, rookhold_cli, rookhold_mcp; assert rookhold.__version__ == '0.7.1'; assert rookhold_mcp.__version__ == rookhold.__version__; assert coop.Coop is rookhold.Rookhold; assert coop_mcp.CoopMcpServer is rookhold_mcp.RookholdMcpServer; assert callable(rookhold_cli.main); assert Path(rookhold.__file__).with_name('py.typed').is_file(); assert Path(coop.__file__).with_name('py.typed').is_file()"
             PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v
           done
       - name: Install TypeScript SDK dependencies

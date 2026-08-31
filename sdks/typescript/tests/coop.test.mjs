@@ -494,7 +494,7 @@ test("whoami and capabilities expose the current discovery contract", async () =
       expires_at_ms: null,
     }),
     response({
-      version: "0.7.0",
+      version: "0.7.1",
       languages: ["python"],
       execution: {
         backend: "gvisor",

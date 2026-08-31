@@ -17,8 +17,8 @@ The PyPI package is not published yet. After it is published, install it with:
 python -m pip install "rookhold-sdk[stream]"
 ```
 
-The exact v0.7.0 GitHub release wheel is
-`rookhold_sdk-0.7.0-py3-none-any.whl`; follow the
+The exact v0.7.1 GitHub release wheel is
+`rookhold_sdk-0.7.1-py3-none-any.whl`; follow the
 [checksum, attestation, and installation commands](../../docs/sdks.md) rather
 than using a moving release URL.
 

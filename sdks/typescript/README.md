@@ -18,7 +18,7 @@ npm ci
 npm run build
 npm pack
 # Then, from your application:
-npm install /path/to/rookhold/sdks/typescript/rookhold-sdk-0.7.0.tgz
+npm install /path/to/rookhold/sdks/typescript/rookhold-sdk-0.7.1.tgz
 ```
 
 The npm package is not published yet. After it is published, install it with:
@@ -27,8 +27,8 @@ The npm package is not published yet. After it is published, install it with:
 npm install rookhold-sdk
 ```
 
-The exact v0.7.0 GitHub release package is
-`rookhold-sdk-0.7.0.tgz`; follow the
+The exact v0.7.1 GitHub release package is
+`rookhold-sdk-0.7.1.tgz`; follow the
 [checksum, attestation, and installation commands](../../docs/sdks.md) rather
 than using a moving release URL.
 

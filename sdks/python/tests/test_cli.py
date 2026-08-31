@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from rookhold_cli import CliConfig, RookholdCli, _compatible_env, main
+from rookhold_cli import CliConfig, Palette, RookholdCli, _compatible_env, main
 
 
 class FakeRookhold:
@@ -23,7 +23,7 @@ class FakeRookhold:
 
     def capabilities(self):
         return {
-            "version": "0.7.0",
+            "version": "0.7.1",
             "languages": ["python", "node", "bash"],
             "execution": {
                 "backend": "off",
@@ -130,6 +130,13 @@ def config() -> CliConfig:
 
 
 class RookholdCliTests(unittest.TestCase):
+    def test_terminal_palette_uses_accessible_electric_blue_and_semantic_roles(self):
+        colors = Palette(True)
+        self.assertEqual(colors.accent("prompt"), "\x1b[38;2;121;160;255mprompt\x1b[0m")
+        self.assertEqual(colors.strong("title"), "\x1b[1;38;2;245;245;245mtitle\x1b[0m")
+        self.assertEqual(colors.danger("error"), "\x1b[38;2;255;107;122merror\x1b[0m")
+        self.assertEqual(Palette(False).accent("prompt"), "prompt")
+
     def test_banner_reports_live_posture_and_real_mcp_tools_without_key(self):
         output = io.StringIO()
         fake = FakeRookhold()

@@ -204,13 +204,13 @@ On PowerShell, set `$env:ROOKHOLD_SANDBOX = "off"` and `$env:ROOKHOLD_JOBS_ROOT 
 
 ## Prebuilt archives
 
-Before using a moving `releases/latest` URL, verify that it resolves to v0.7.0 or newer. Older release lines are unsupported for new deployments. Release archives are named by Rust target and include documentation, deploy templates, integration templates, SDK source, and `rookhold-verify`. The Linux archive also includes both execution init helpers and the legacy `coop*` executable aliases.
+Before using a moving `releases/latest` URL, verify that it resolves to v0.7.1 or newer. Older release lines are unsupported for new deployments. Release archives are named by Rust target and include documentation, deploy templates, integration templates, SDK source, and `rookhold-verify`. The Linux archive also includes both execution init helpers and the legacy `coop*` executable aliases.
 
 The following commands require a current [GitHub CLI](https://cli.github.com/) with artifact-attestation support; authenticate it according to your organization's policy before downloading. For Linux x86_64:
 
 ```bash
 set -euo pipefail
-version=0.7.0
+version=0.7.1
 asset=rookhold-x86_64-unknown-linux-musl.tar.gz
 gh release download "v${version}" --repo sambai-dev/rookhold \
   --pattern "$asset" --pattern SHA256SUMS
@@ -250,7 +250,7 @@ For an Apple-silicon macOS development installation:
 
 ```bash
 set -euo pipefail
-version=0.7.0
+version=0.7.1
 asset=rookhold-aarch64-apple-darwin.tar.gz
 gh release download "v${version}" --repo sambai-dev/rookhold \
   --pattern "$asset" --pattern SHA256SUMS
@@ -281,7 +281,7 @@ For an x86_64 Windows development installation in PowerShell:
 
 ```powershell
 $ErrorActionPreference = "Stop"
-$version = "0.7.0"
+$version = "0.7.1"
 $asset = "rookhold-x86_64-pc-windows-msvc.zip"
 gh release download "v$version" --repo sambai-dev/rookhold `
     --pattern $asset --pattern SHA256SUMS
