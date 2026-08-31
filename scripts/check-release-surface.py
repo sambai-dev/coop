@@ -805,6 +805,44 @@ def check_transport_guards() -> None:
         require(claim in api, f"API docs omit transport invariant: {claim}")
 
 
+def check_contribution_contract() -> None:
+    contributing = read("CONTRIBUTING.md")
+    for claim in [
+        "Definition of technically done",
+        "The regression proves RED",
+        "Adversarial cases are considered",
+        "The final exact diff is rescanned",
+        "Implementation incomplete",
+        "Validation incomplete",
+        "Review incomplete",
+        "Integration incomplete",
+        "Scoped complete",
+        "Stale/unverified",
+    ]:
+        require(claim in contributing, f"contribution lifecycle guidance missing: {claim}")
+
+    template = read(".github/PULL_REQUEST_TEMPLATE.md")
+    for heading in [
+        "## Declared scope",
+        "## Root invariant",
+        "## Reproduction and RED evidence",
+        "## Adversarial coverage",
+        "## Validation on final head",
+        "## Non-goals and remaining work",
+        "## Completion state",
+    ]:
+        require(heading in template, f"pull request template missing: {heading}")
+
+    ci = read(".github/workflows/ci.yml")
+    for contract in [
+        "Verify the exact workflow revision",
+        "git rev-parse --verify 'HEAD^{commit}'",
+        "python3 scripts/check-pr-description.py --event",
+        "scripts/check-pr-description.py",
+    ]:
+        require(contract in ci, f"CI completion-evidence contract missing: {contract}")
+
+
 def check_hostile_count() -> int:
     source = read("crates/coop-server/tests/hostile.rs")
     count = len(re.findall(r"#\[(?:tokio::)?test\]\s*#\[ignore\]", source))
@@ -822,6 +860,7 @@ def main() -> int:
         actions = check_pins_and_packaging()
         check_documented_boundary()
         check_transport_guards()
+        check_contribution_contract()
         hostile = check_hostile_count()
     except (AssertionError, KeyError, OSError, json.JSONDecodeError) as error:
         print(f"release-surface check failed: {error}", file=sys.stderr)

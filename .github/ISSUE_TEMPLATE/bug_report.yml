@@ -23,6 +23,13 @@ body:
       render: shell
     validations:
       required: true
+  - type: textarea
+    id: variants
+    attributes:
+      label: Related and adversarial cases
+      description: Note missing, empty, null-like, annotated, reordered, retry/fallback, sibling-path, or platform variants you tried. Explain when a category does not apply.
+    validations:
+      required: true
   - type: dropdown
     id: sandbox
     attributes:

@@ -25,6 +25,12 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify the exact workflow revision
+        shell: bash
+        run: test "$(git rev-parse --verify 'HEAD^{commit}')" = "$ROOKHOLD_GIT_REVISION"
+      - name: Validate pull request scope and evidence
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/check-pr-description.py --event "$GITHUB_EVENT_PATH"
       - name: Validate version, docs, pins, and packaging contracts
         run: python3 scripts/check-release-surface.py
       - name: Validate release shell support
@@ -36,7 +42,7 @@ jobs:
         run: >-
           python3 -m py_compile scripts/verify-production.py
           scripts/verify-python-adapter.py scripts/build-rootfs-manifest.py
-          scripts/release-artifacts.py
+          scripts/release-artifacts.py scripts/check-pr-description.py
       - name: Test production verifier provider fixtures
         run: python3 -m unittest discover -s scripts/tests -v
 
