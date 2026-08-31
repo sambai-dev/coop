@@ -120,14 +120,10 @@ Adding the MCP server does not disable the host's built-in shell, terminal, or
 code-execution tools. Deny those alternate routes in the host when every job
 must cross Rookhold.
 
-## Design provenance
+## Terminal design
 
-The compact logo, posture summary, command prompt, and progressive output
-hierarchy were informed by the MIT-licensed
-[OpenCode](https://github.com/anomalyco/opencode) and its OpenTUI terminal
-experience. The black, off-white, and electric-blue palette takes visual cues
-from the official [Hermes Agent](https://hermes-agent.nousresearch.com/) identity;
-Rookhold lifts the blue for readable text on black terminals and reserves
-green, amber, and red for real execution or security state. Rookhold does not
-vendor either product's runtime or source tree: the terminal remains a small
-client over Rookhold's own API and MCP contracts.
+The terminal uses a compact posture summary, progressive output hierarchy,
+near-black surface, off-white text, and one accessible electric-blue action
+voice. Green, amber, red, and slate are reserved for explicit execution or
+security states. The terminal remains a small client over Rookhold's own API
+and MCP contracts.
