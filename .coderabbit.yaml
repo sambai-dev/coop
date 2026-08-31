@@ -1,0 +1,156 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: en-US
+early_access: false
+enable_free_tier: true
+tone_instructions: >-
+  Be direct and evidence-based. Report only actionable issues introduced by
+  the pull request. Ignore pre-existing behavior unless the change worsens it.
+  Treat security, tenant isolation, evidence integrity, and fail-closed
+  behavior as release-critical.
+
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  review_details: true
+  collapse_walkthrough: false
+  changed_files_summary: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 10
+    base_branches:
+      - main
+    ignore_title_keywords:
+      - WIP
+      - "[skip review]"
+
+  path_filters:
+    - "!docs/assets/**"
+    - "!**/*.png"
+    - "!**/*.gif"
+    - "!**/*.mp4"
+    - "!Cargo.lock"
+    - "!sdks/python/uv.lock"
+    - "!sdks/typescript/package-lock.json"
+    - "!**/dist/**"
+
+  path_instructions:
+    - path: "crates/coop-server/**"
+      instructions: |
+        Review authentication, authorization, tenant scoping, admission,
+        cancellation, request/response bounds, WebSocket lifetimes, and
+        evidence exposure. Flag any path that trusts caller-supplied identity,
+        reports stronger posture than observed, leaks secrets, weakens exact
+        media/digest behavior, or fails open after shutdown or partial failure.
+
+    - path: "crates/coop-exec/**"
+      instructions: |
+        Treat execution-provider claims as security boundaries. Reject silent
+        fallback, incomplete process-tree cancellation, unbounded output or
+        startup, host environment leakage, mutable runtime/rootfs inputs, and
+        requested-versus-effective policy mismatches. Require native-platform
+        evidence for platform-specific fixes.
+
+    - path: "crates/coop-store/**"
+      instructions: |
+        Check tenant isolation, transaction atomicity, quota accounting,
+        retention, recovery, idempotency, event ordering/hash chains, and exact
+        attestation bytes. Consider concurrent writers, restart, partial
+        commits, malformed legacy data, overflow, and boundary-sized payloads.
+
+    - path: "crates/coop-attestation/**"
+      instructions: |
+        Preserve verify-before-parse, strict JSON, canonical receipt bindings,
+        exact DSSE bytes, threshold semantics, trusted-key handling, tenant and
+        subject binding, allocation limits, and frozen compatibility vectors.
+        Do not accept cosmetic normalization that changes authenticated bytes.
+
+    - path: "sdks/python/**"
+      instructions: |
+        Check credential redaction, redirect/origin rules, finite deadlines,
+        typed contracts, idempotency and ambiguity semantics, compatibility
+        aliases, JSON output stability, and Python 3.9-3.14 support. Tests must
+        cover malformed responses, cancellation, retry/fallback, and exact
+        terminal state.
+
+    - path: "sdks/typescript/**"
+      instructions: |
+        Check credential secrecy, AbortSignal/deadline behavior, redirect and
+        origin validation, typed wire compatibility, idempotency semantics,
+        streaming ordering, package exports, and browser/Node parity.
+
+    - path: ".github/workflows/**"
+      instructions: |
+        Require least privilege, immutable action and container pins, exact
+        current-head checkout, non-skipping security gates, bounded timeouts,
+        explicit artifact names, and fail-closed publication. Release changes
+        must preserve the exact allowlisted asset set, SBOM/provenance binding,
+        draft reconciliation, protected approval, and atomic publish.
+
+    - path: "scripts/**"
+      instructions: |
+        Review destructive target validation, archive traversal/collision
+        defenses, exact allowlists, checksum/digest coverage, secret handling,
+        finite resource limits, platform shell behavior, and failure cleanup.
+        Standard-library verification scripts must fail closed on malformed or
+        ambiguous input.
+
+    - path: "**/*test*"
+      instructions: |
+        Confirm each regression test proves the reported decision boundary and
+        would fail on unchanged source for the stated reason. Look for missing,
+        null-like, annotated, reordered, zero/partial/all-state, concurrency,
+        retry, fallback, sibling-path, and native-platform cases.
+
+    - path: "**/*.md"
+      instructions: |
+        Check commands, links, versions, file names, security claims, and
+        requested-versus-observed wording against the code. Reject overstated
+        isolation, verification, attestation, compatibility, or release claims.
+        Preserve the declared scope and non-goals.
+
+  tools:
+    ast-grep:
+      essential_rules: true
+
+chat:
+  auto_reply: true
+
+issue_enrichment:
+  auto_enrich:
+    enabled: false
+  planning:
+    enabled: false
+    auto_planning:
+      enabled: false
+  labeling:
+    auto_apply_labels: false
+
+knowledge_base:
+  opt_out: false
+  learnings:
+    scope: local
+  issues:
+    scope: local
+  pull_requests:
+    scope: local
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - CONTRIBUTING.md
+      - SECURITY.md
+      - PRODUCT.md
+      - DESIGN.md
+      - docs/contribution-lifecycle.md
