@@ -13,8 +13,9 @@ starts the MCP adapter with `rookhold-cli mcp-server`; the separate
 Windows executables end in `.exe`. Python, Rust, `pip`, and a source checkout are
 not required.
 
-The Linux x86_64 terminal apps are musl-native, matching the service archive,
-so they do not depend on a host Python installation or glibc runtime.
+The direct Linux x86_64 CLI is built and smoked on GNU/Linux for mainstream
+Ubuntu, Debian, and RHEL-class systems. The self-hosting service binary in the
+complete Linux archive remains statically linked with musl.
 
 The current community binaries are covered by release checksums, an SBOM, and
 GitHub provenance attestations, but not yet by commercial Windows or Apple

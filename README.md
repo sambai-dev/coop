@@ -51,7 +51,7 @@ runs the MCP server for Claude Code, OpenCode, and other agent CLIs.
 |---|---|
 | Windows, 64-bit | [`rookhold-cli-x86_64-pc-windows-msvc.exe`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-pc-windows-msvc.exe) |
 | Mac with Apple silicon | [`rookhold-cli-aarch64-apple-darwin`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-aarch64-apple-darwin) |
-| Linux x86_64 | [`rookhold-cli-x86_64-unknown-linux-musl`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-unknown-linux-musl) |
+| Linux x86_64 | [`rookhold-cli-x86_64-unknown-linux-gnu`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-unknown-linux-gnu) |
 
 Run it normally for the interactive CLI. Register the same path plus the
 `mcp-server` argument in an MCP host. On macOS or Linux, mark the download
