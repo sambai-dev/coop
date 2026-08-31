@@ -137,6 +137,18 @@ class RookholdCliTests(unittest.TestCase):
         self.assertEqual(colors.danger("error"), "\x1b[38;2;255;107;122merror\x1b[0m")
         self.assertEqual(Palette(False).accent("prompt"), "prompt")
 
+    def test_version_does_not_require_connection_configuration(self):
+        output = io.StringIO()
+        with self.assertRaises(SystemExit) as caught, patch("sys.stdout", output):
+            main(["--version"])
+        self.assertEqual(caught.exception.code, 0)
+        self.assertEqual(output.getvalue(), "rookhold-cli 0.7.1\n")
+
+    def test_same_cli_executable_can_launch_the_mcp_server(self):
+        with patch("rookhold_cli.mcp_main") as mcp:
+            self.assertEqual(main(["mcp-server"]), 0)
+        mcp.assert_called_once_with([])
+
     def test_banner_reports_live_posture_and_real_mcp_tools_without_key(self):
         output = io.StringIO()
         fake = FakeRookhold()

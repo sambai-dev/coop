@@ -502,9 +502,10 @@ def check_pins_and_packaging() -> int:
     claude_rookhold = claude_mcp.get("mcpServers", {}).get("rookhold", {})
     require(
         claude_rookhold.get("type") == "stdio"
-        and claude_rookhold.get("command") == "rookhold-mcp"
+        and claude_rookhold.get("command") == "rookhold-cli"
+        and claude_rookhold.get("args") == ["mcp-server"]
         and "${ROOKHOLD_API_KEY}" in claude_rookhold.get("env", {}).values(),
-        "Claude Code template must launch stdio rookhold-mcp with an environment reference",
+        "Claude Code template must launch the single-file CLI MCP mode with an environment reference",
     )
     opencode_mcp = json.loads(read("integrations/opencode/opencode.snippet.json"))
     opencode_rookhold = (
@@ -512,10 +513,10 @@ def check_pins_and_packaging() -> int:
     )
     require(
         opencode_rookhold.get("type") == "local"
-        and opencode_rookhold.get("command") == ["rookhold-mcp"]
+        and opencode_rookhold.get("command") == ["rookhold-cli", "mcp-server"]
         and "{env:ROOKHOLD_API_KEY}"
         in opencode_rookhold.get("environment", {}).values(),
-        "OpenCode v2 template must launch local rookhold-mcp with an environment reference",
+        "OpenCode v2 template must launch the single-file CLI MCP mode with an environment reference",
     )
     root_license = read("LICENSE")
     for relative in ["sdks/python/LICENSE", "sdks/typescript/LICENSE"]:
@@ -616,14 +617,31 @@ def check_pins_and_packaging() -> int:
         "docs deploy sdks integrations" in release,
         "release archives omit docs, deploy templates, SDKs, or integrations",
     )
+    for standalone_contract in [
+        "pyinstaller==6.22.2",
+        "pyinstaller-hooks-contrib==2026.7",
+        "--name rookhold-cli",
+        "--name rookhold-mcp",
+        "Build musl-native standalone CLI and MCP apps",
+        "python:3.12-alpine@sha256:285a71327884a4d50efbea30104473b0fa43ecefa499458899670ca30dae76e5",
+        "Smoke standalone terminal apps without Python packaging",
+        "Stage the direct single-file CLI download",
+        "mcp-server",
+        "standalone-dist/rookhold-cli",
+        "standalone-dist/rookhold-mcp",
+    ]:
+        require(
+            standalone_contract in release,
+            f"standalone terminal release contract missing: {standalone_contract}",
+        )
     require("path: sdk-dist/*" in release, "release workflow does not upload every SDK distribution")
     require("npm pack --pack-destination" in release, "release workflow omits the npm tarball")
     release_helper_source = read("scripts/release-artifacts.py")
     release_helper = runpy.run_path(str(ROOT / "scripts" / "release-artifacts.py"))
     payload_names = release_helper["payload_names"](version)
     release_names = release_helper["release_names"](version)
-    require(len(payload_names) == 6, "release payload contract must contain exactly six files")
-    require(len(release_names) == 8, "public release contract must contain exactly eight assets")
+    require(len(payload_names) == 9, "release payload contract must contain exactly nine files")
+    require(len(release_names) == 11, "public release contract must contain exactly eleven assets")
     for asset in release_names:
         workflow_asset = asset.replace(version, "${{ needs.preflight.outputs.version }}")
         require(

@@ -1642,7 +1642,14 @@ def serve(
         cancellations.shutdown(wait=True, cancel_futures=False)
 
 
-def main() -> None:
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["--version"]:
+        print(f"rookhold-mcp {__version__}")
+        return
+    if arguments:
+        print("rookhold-mcp: no positional arguments are supported", file=sys.stderr)
+        raise SystemExit(2)
     try:
         config = McpConfig.from_env()
         serve(RookholdMcpServer(config))

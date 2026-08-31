@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, TextIO, cast
 
 from rookhold import IsolationClass, Rookhold, RookholdError, __version__
 from rookhold_mcp import McpConfig, RookholdMcpServer
+from rookhold_mcp import main as mcp_main
 
 DEFAULT_BASE_URL = "http://127.0.0.1:7300"
 LANGUAGES = ("python", "node", "bash")
@@ -538,6 +539,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--wait-seconds", type=int, default=60)
     parser.add_argument("--json", action="store_true", dest="json_output")
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     parser.add_argument("--no-color", action="store_true")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("shell", help="open the interactive terminal (default)")
@@ -558,6 +562,7 @@ def _parser() -> argparse.ArgumentParser:
     cancel.add_argument("job_id")
     commands.add_parser("posture", help="show observed server posture")
     commands.add_parser("mcp", help="inspect the live rookhold-mcp tools")
+    commands.add_parser("mcp-server", help="serve the Rookhold MCP adapter over stdio")
     return parser
 
 
@@ -581,8 +586,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         parser = _parser()
         args = parser.parse_args(argv)
-        cli = RookholdCli(_config(args, sys.stdout))
         command = args.command or "shell"
+        if command == "mcp-server":
+            mcp_main([])
+            return 0
+        cli = RookholdCli(_config(args, sys.stdout))
         if command == "shell":
             return cli.shell()
         cli.connect()

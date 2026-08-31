@@ -11,9 +11,32 @@ Rookhold ships two terminal commands in the verified Python wheel:
 Both call the same authenticated Rookhold service. Neither command is the
 execution boundary by itself.
 
-## Install
+## Download the standalone apps
 
-Download the exact `rookhold_sdk-0.7.1-py3-none-any.whl` release asset and
+The normal consumer path is the platform archive on the
+[v0.7.1 release](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1).
+Each Windows, Apple-silicon macOS, and Linux x86_64 archive contains both
+`rookhold-cli` and `rookhold-mcp` as self-contained executables. Extract the
+archive and run them directly; Python and `pip` are not required.
+
+If the Rookhold service already exists elsewhere, download only the standalone
+`rookhold-cli-*` file for the current platform. That one file serves both human
+and agent hosts: run it normally for the interactive terminal or add
+`mcp-server` to start the stdio MCP adapter. Rename the download to
+`rookhold-cli` (`rookhold-cli.exe` on Windows) and place it on `PATH`, or use its
+absolute path in the host configuration.
+
+```bash
+./rookhold-cli --version
+./rookhold-cli
+```
+
+On Windows, use `rookhold-cli.exe` and `rookhold-mcp.exe`.
+
+## Install the Python package for development
+
+SDK authors who specifically want importable Python modules can download the
+exact `rookhold_sdk-0.7.1-py3-none-any.whl` release asset and
 verify it using [the SDK release procedure](sdks.md). Install it into an
 operator-owned virtual environment:
 
@@ -80,8 +103,8 @@ another program consumes output.
 
 ## Agent CLIs
 
-Do not point Claude Code or OpenCode at `rookhold-cli`; register
-`rookhold-mcp` as a local stdio MCP server instead:
+Register the same standalone CLI file as a local stdio MCP server with the
+`mcp-server` argument:
 
 - [Claude Code template](../integrations/claude-code/mcp.json)
 - [OpenCode v2 template](../integrations/opencode/opencode.snippet.json)

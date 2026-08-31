@@ -1,25 +1,24 @@
 # Agent integrations
 
-Rookhold ships one universal integration surface: the `rookhold-mcp` stdio server in
-the Python SDK wheel. Claude Code, OpenCode, Codex, Hermes, OpenClaw, and other MCP hosts
-can all launch the same executable. The adapter does not call an LLM and does
-not expose the Rookhold URL or bearer key as model-selectable arguments.
+Rookhold ships one universal consumer file: `rookhold-cli`. Claude Code,
+OpenCode, Codex, Hermes, OpenClaw, and other MCP hosts launch that same file
+with the `mcp-server` argument. The adapter does not call an LLM and does not
+expose the Rookhold URL or bearer key as model-selectable arguments.
 
-Install it into an operator-owned virtual environment:
+Download the single file for the current operating system from the release,
+put it at a stable absolute path, and mark it executable on macOS or Linux:
 
 ```bash
-python -m venv ~/.local/share/rookhold-mcp
-~/.local/share/rookhold-mcp/bin/python -m pip install --no-deps ./sdks/python
+chmod +x ~/.local/bin/rookhold-cli
+~/.local/bin/rookhold-cli --version
 ```
 
-On Windows, the executable is
-`%USERPROFILE%\.local\share\rookhold-mcp\Scripts\rookhold-mcp.exe`. Use that absolute
-path as the MCP `command` when the harness does not inherit the virtual
-environment's `PATH`.
+On Windows, keep the downloaded `.exe` extension. Python, `pip`, Rust, and a
+source checkout are not required. The Python wheel remains available for SDK
+authors who want importable modules.
 
-The same installed wheel also provides `rookhold-cli`, a human/operator terminal
-for direct runs and evidence inspection. Agent CLIs should launch
-`rookhold-mcp`, which exposes four tools:
+Running the file normally opens the human/operator terminal. Agent CLIs launch
+`rookhold-cli mcp-server`, which exposes four tools:
 
 | Tool | Purpose |
 |---|---|
@@ -71,7 +70,7 @@ claude mcp add --transport stdio --scope user \
   --env ROOKHOLD_BASE_URL="$ROOKHOLD_BASE_URL" \
   --env ROOKHOLD_API_KEY="$ROOKHOLD_API_KEY" \
   --env ROOKHOLD_MCP_MINIMUM_ISOLATION="$ROOKHOLD_MCP_MINIMUM_ISOLATION" \
-  rookhold -- rookhold-mcp
+  rookhold -- rookhold-cli mcp-server
 ```
 
 That command records the expanded credential in Claude Code's user
@@ -105,8 +104,8 @@ through OpenCode's default Code Mode.
    ```
 
 2. Merge [`hermes/config.snippet.yaml`](hermes/config.snippet.yaml) into
-   `~/.hermes/config.yaml`. Replace `command: "rookhold-mcp"` with the absolute
-   virtual-environment executable if necessary.
+   `~/.hermes/config.yaml`. Replace `command: "rookhold-cli"` with the absolute
+   downloaded executable path if necessary.
 3. Restart Hermes and use its MCP test/reload surface. Parallel tool calls are
    supported through the adapter's bounded concurrent dispatcher; Rookhold remains
    authoritative for tenant and global admission limits.
@@ -120,7 +119,7 @@ through OpenCode's default Code Mode.
    `ROOKHOLD_MCP_MINIMUM_ISOLATION=gvisor-application-kernel`, and the language allowlist into the
    Gateway service environment.
 2. Merge [`openclaw/openclaw.snippet.json5`](openclaw/openclaw.snippet.json5)
-   into `~/.openclaw/openclaw.json`, using the absolute `rookhold-mcp` path when
+   into `~/.openclaw/openclaw.json`, using the absolute `rookhold-cli` path when
    required.
 3. Run `openclaw mcp doctor rookhold --probe`, restart the Gateway, and inspect the
    effective tool policy. Sandboxed OpenClaw sessions need `bundle-mcp` (or the
@@ -138,8 +137,8 @@ needed:
 {
   "mcpServers": {
     "rookhold": {
-      "command": "rookhold-mcp",
-      "args": [],
+      "command": "rookhold-cli",
+      "args": ["mcp-server"],
       "env": {
         "ROOKHOLD_BASE_URL": "https://rookhold.internal.example",
         "ROOKHOLD_API_KEY": "replace-me",
@@ -168,7 +167,7 @@ for reads and cancellation.
 ## Where Rookhold fits
 
 ```text
-user → LLM → agent harness → rookhold-mcp → Rookhold API → policy executor
+user → LLM → agent harness → rookhold-cli mcp-server → Rookhold API → policy executor
                      ↑                      │
                      └── result + job id + receipt ──┘
 ```

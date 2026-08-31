@@ -38,8 +38,26 @@ Your agent—or any application—sends Rookhold a short job. Rookhold then:
 5. keeps a result and evidence record you can inspect later.
 
 You do **not** need to understand Rust or the Rookhold source code to use the
-prebuilt app. You only need a supported computer, a runtime such as Python,
-and either a terminal or a browser.
+prebuilt app. You only need a supported computer and a terminal. A self-hosted
+service also needs at least one job runtime, such as Python, Node.js, or Bash.
+
+## Download one CLI file
+
+Already have a Rookhold endpoint? Download one self-contained file—no archive,
+Python, `pip`, or source checkout. The same file opens the human terminal and
+runs the MCP server for Claude Code, OpenCode, and other agent CLIs.
+
+| Your computer | Single-file CLI |
+|---|---|
+| Windows, 64-bit | [`rookhold-cli-x86_64-pc-windows-msvc.exe`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-pc-windows-msvc.exe) |
+| Mac with Apple silicon | [`rookhold-cli-aarch64-apple-darwin`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-aarch64-apple-darwin) |
+| Linux x86_64 | [`rookhold-cli-x86_64-unknown-linux-musl`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-unknown-linux-musl) |
+
+Run it normally for the interactive CLI. Register the same path plus the
+`mcp-server` argument in an MCP host. On macOS or Linux, mark the download
+executable once with `chmod +x ./rookhold-cli-*`. Rename it to `rookhold-cli`
+(`rookhold-cli.exe` on Windows) and place it on `PATH` for the copy-ready agent
+configurations to work unchanged.
 
 ## Try Rookhold in five minutes
 
@@ -55,15 +73,17 @@ understanding of Rookhold's internals.
 Open the [v0.7.1 release](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1),
 then choose the archive for your computer:
 
-| Your computer | Download |
+| Your computer | Download the complete app bundle |
 |---|---|
 | Windows, 64-bit | [`rookhold-x86_64-pc-windows-msvc.zip`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-x86_64-pc-windows-msvc.zip) |
 | Mac with Apple silicon | [`rookhold-aarch64-apple-darwin.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-aarch64-apple-darwin.tar.gz) |
 | Linux x86_64 | [`rookhold-x86_64-unknown-linux-musl.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-x86_64-unknown-linux-musl.tar.gz) |
 
-Extract the archive. For the terminal client or MCP adapter, also download
-`rookhold_sdk-0.7.1-py3-none-any.whl` from the same release. Rookhold
-automatically shows only the runtimes that work on your machine.
+Extract the archive. It contains the Rookhold service, `rookhold-cli`,
+`rookhold-mcp`, verification tools, and the copy-ready agent configurations.
+You do not need Python, Rust, or a separate SDK package to use the terminal
+apps. Rookhold automatically shows only the job runtimes that work on your
+machine.
 
 ### 2. Start Rookhold
 
@@ -88,31 +108,34 @@ Leave that terminal open. Rookhold is now running only on your computer.
 
 ### 3. Use it from your terminal
 
-Install the wheel, point it at the local service, and open the interactive
-client.
+Point the included terminal app at the local service and open it.
 
 Windows PowerShell:
 
 ```powershell
-python -m pip install --no-deps .\rookhold_sdk-0.7.1-py3-none-any.whl
 $env:ROOKHOLD_BASE_URL = "http://127.0.0.1:7300"
 $env:ROOKHOLD_API_KEY = "rookhold-dev-key"
-rookhold-cli
+.\rookhold-cli.exe
 ```
 
 macOS or Linux:
 
 ```bash
-python -m pip install --no-deps ./rookhold_sdk-0.7.1-py3-none-any.whl
 ROOKHOLD_BASE_URL=http://127.0.0.1:7300 \
 ROOKHOLD_API_KEY=rookhold-dev-key \
-  rookhold-cli
+  ./rookhold-cli
 ```
 
 The terminal shows the authenticated tenant, actual backend, observed
 isolation, required minimum, and live MCP tool count before accepting work.
 Try `/mcp`, then `/run python "print(6 * 7)"`. Type `/help` for jobs, results,
 events, cancellation, posture, and multiline paste commands.
+
+The included `QUICKSTART.md` repeats these commands next to the executables.
+If your operating system warns about an unidentified publisher, verify the
+archive against `SHA256SUMS` and the GitHub provenance before allowing it. The
+current community release is not yet backed by commercial Windows or Apple
+code-signing certificates.
 
 ### 4. Or use the web console
 
@@ -140,11 +163,13 @@ the local process is **not sandboxed**.
 ## Connect an AI agent
 
 Rookhold works with Claude Code, OpenCode, Codex, Hermes, OpenClaw, and other
-MCP-compatible CLIs through the included `rookhold-mcp` adapter.
+MCP-compatible CLIs through `rookhold-cli mcp-server`.
 
 1. Start Rookhold using the demo above or the production deployment.
-2. Install the verified Python wheel from the same release.
-3. Copy the configuration for your agent and restart it.
+2. Put the single-file `rookhold-cli` download in a stable path or keep the
+   extracted app folder where it is.
+3. Copy the configuration for your agent, set its command to that file with
+   `mcp-server` as the argument, and restart the agent.
 
 Use the copy-ready guides for [Claude Code](integrations/claude-code/mcp.json),
 [OpenCode](integrations/opencode/opencode.snippet.json),
@@ -179,7 +204,7 @@ complete every deployment check.
 
 > [!NOTE]
 > **Current release:** [v0.7.1](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1).
-> Its exact eight-asset set includes checksums, a combined artifact-scoped SPDX
+> Its exact eleven-asset set includes checksums, a combined artifact-scoped SPDX
 > SBOM, GitHub SBOM/provenance attestations, and the offline `rookhold-verify`
 > verifier inside each platform archive. Older release lines are unsupported
 > for new deployments.
@@ -215,12 +240,13 @@ actually became effective, what output or violations were observed, and how
 the run ended. Evidence survives failure, timeout, OOM, and cancellation.
 
 ```text
-you → AI agent or app → rookhold-mcp or SDK → Rookhold → short job
-       decides what      submits safely    policy + evidence
+you → AI agent or app → rookhold-cli mcp-server or SDK → Rookhold → short job
+       decides what      submits safely                 policy + evidence
 ```
 
 ### What ships
 
+- standalone `rookhold-cli` and `rookhold-mcp` executables in every platform archive—no Python installation required
 - one authenticated HTTP API for submit, inspect, cancel, wait, and event history
 - live WebSocket output with one-use stream tickets and persisted history before live frames
 - scoped indexed credentials or RFC 9068 JWTs, with legacy per-tenant keys retained for migration
@@ -234,7 +260,7 @@ you → AI agent or app → rookhold-mcp or SDK → Rookhold → short job
 - bounded OpenMetrics telemetry plus W3C Trace Context correlation
 - stdlib-only Python and dependency-free TypeScript clients
 - a dependency-free `rookhold-cli` interactive terminal and one-shot operator client
-- a dependency-free, concurrent `rookhold-mcp` stdio server supporting MCP 2026 Tasks and legacy hosts
+- a dependency-free, concurrent MCP mode in the same `rookhold-cli` file, plus the `rookhold-mcp` compatibility entry point
 
 The event chain remains server-verifiable operational evidence. A signed envelope additionally proves that the configured Rookhold key asserted the authoritative tenant, exact receipt, and result digest. It does **not** prove deterministic re-execution, trusted hardware, remote attestation, or WORM storage; distribute or pin the public key out of band rather than trusting its API `key_id` hint.
 
@@ -439,23 +465,19 @@ See [API and streaming](docs/api.md) and [SDK usage](docs/sdks.md). The dashboar
 
 ## Agent and harness integration
 
-Installing the Python SDK also installs `rookhold-mcp`. It exposes four narrow
-tools—run, result, events, and cancel—while keeping credentials and policy in
-the trusted adapter process. It supports the stateless MCP 2026 discovery and
-opt-in Tasks contract while retaining the legacy initialize flow. Concurrent
-stdio requests remain responsive, cancellation is durable, and a timed-out
-wait returns the job ID instead of losing ownership of the still-running job.
+The same single-file `rookhold-cli` download starts MCP mode with
+`mcp-server`. It exposes four narrow tools—run, result, events, and
+cancel—while keeping credentials and policy in the trusted adapter process.
+It supports the stateless MCP 2026 discovery and opt-in Tasks contract while
+retaining the legacy initialize flow. Concurrent stdio requests remain
+responsive, cancellation is durable, and a timed-out wait returns the job ID
+instead of losing ownership of the still-running job.
 
 ### Connect a harness
 
 1. Start Rookhold locally or deploy it on the dedicated VM.
-2. Follow the [checksum, release-attestation, and constrained workflow-provenance checks](docs/sdks.md), then install the verified wheel in an operator-owned environment:
-
-   ```bash
-   python -m venv ~/.local/share/rookhold-mcp
-   ~/.local/share/rookhold-mcp/bin/python -m pip install --no-deps \
-     ./rookhold_sdk-0.7.1-py3-none-any.whl
-   ```
+2. Download and verify the single `rookhold-cli-*` file for the harness host,
+   then put it at a stable absolute path. No Python environment is needed.
 
 3. Give the harness process—not the model—the connection and policy settings:
 
@@ -466,12 +488,11 @@ wait returns the job ID instead of losing ownership of the still-running job.
    ROOKHOLD_MCP_ALLOWED_LANGUAGES=python,node
    ```
 
-4. Point the harness's stdio MCP configuration at
-   `~/.local/share/rookhold-mcp/bin/rookhold-mcp`, merge the matching snippet below,
-   and restart or reload the harness.
+4. Point the harness's stdio MCP configuration at the downloaded
+   `rookhold-cli` file with `mcp-server` as its argument, merge the matching
+   snippet below, and restart or reload the harness.
 
-On Windows, the executable is
-`%USERPROFILE%\.local\share\rookhold-mcp\Scripts\rookhold-mcp.exe`.
+On Windows, keep the downloaded `.exe` extension.
 `ROOKHOLD_MCP_MINIMUM_ISOLATION` may be omitted or set to `none` only for the
 explicitly unisolated local demo. Production integrations should specify the
 exact minimum isolation class and fail closed.

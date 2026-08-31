@@ -9,6 +9,8 @@ All notable changes are documented here. Rookhold follows semantic versioning wh
 - Restyle the human CLI around a true black surface, off-white hierarchy, and one accessible electric-blue action voice informed by Hermes Agent's current visual identity.
 - Lift the reference blue for readable text on dark terminals, keep `NO_COLOR` behavior unchanged, and reserve green, amber, red, and slate for explicit execution and security state.
 - Regenerate the README CLI/MCP recording from the same palette and document the visual provenance without importing or vendoring another agent runtime.
+- Ship `rookhold-cli` and `rookhold-mcp` as standalone executables inside every Windows, Apple-silicon macOS, and Linux x86_64 app archive; consumers no longer need Python or a separate wheel for terminal use.
+- Publish one direct `rookhold-cli` file per platform; that same file opens the human terminal or serves MCP with `rookhold-cli mcp-server`, matching the one-download workflow used by modern agent CLIs.
 
 ## 0.7.0 — 2026-08-31
 

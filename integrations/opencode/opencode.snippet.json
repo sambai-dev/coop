@@ -4,7 +4,7 @@
     "servers": {
       "rookhold": {
         "type": "local",
-        "command": ["rookhold-mcp"],
+        "command": ["rookhold-cli", "mcp-server"],
         "environment": {
           "ROOKHOLD_BASE_URL": "{env:ROOKHOLD_BASE_URL}",
           "ROOKHOLD_API_KEY": "{env:ROOKHOLD_API_KEY}",
