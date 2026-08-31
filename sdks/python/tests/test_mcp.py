@@ -330,7 +330,7 @@ class McpTests(unittest.TestCase):
         output = io.StringIO()
         with patch("sys.stdout", output):
             main(["--version"])
-        self.assertEqual(output.getvalue(), "rookhold-mcp 0.7.1\n")
+        self.assertEqual(output.getvalue(), "rookhold-mcp 0.8.0\n")
 
     def test_initialize_and_list_tools_without_exposing_credentials(self):
         server = initialized_server()

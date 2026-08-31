@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const scratch = await mkdtemp(path.join(tmpdir(), "rookhold-sdk-pack-smoke-"));
+const scratch = await mkdtemp(path.join(tmpdir(), "rookhold-pack-smoke-"));
 
 function npm(args, cwd) {
   const npmCli = process.env.npm_execpath;
@@ -35,8 +35,8 @@ try {
   );
   await writeFile(
     path.join(scratch, "smoke.mjs"),
-    'import { Rookhold, RookholdError, ISOLATION_CLASSES, JOB_STATUSES, isolationSatisfies } from "rookhold-sdk";\n' +
-      'import { Coop, CoopError } from "rookhold-sdk/coop";\n' +
+    'import { Rookhold, RookholdError, ISOLATION_CLASSES, JOB_STATUSES, isolationSatisfies } from "rookhold";\n' +
+      'import { Coop, CoopError } from "rookhold/coop";\n' +
       'if (typeof Rookhold !== "function" || typeof RookholdError !== "function" || Coop !== Rookhold || CoopError !== RookholdError || typeof Rookhold.prototype.downloadAttestation !== "function" || typeof Rookhold.prototype.downloadResultArtifact !== "function" || typeof Rookhold.prototype.attestationPublicKey !== "function" || !Array.isArray(JOB_STATUSES) || !Array.isArray(ISOLATION_CLASSES) || !isolationSatisfies("gvisor-application-kernel", "linux-shared-kernel")) process.exit(1);\n',
   );
   // Install with lifecycle scripts disabled so this verifies the contents of

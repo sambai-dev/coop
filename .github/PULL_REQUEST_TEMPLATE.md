@@ -1,14 +1,18 @@
+## Contribution tier
+
+<!-- Write Tier A (docs/examples/integrations), Tier B (SDK/CLI/public API), or Tier C (executor/auth/storage/receipts/isolation). -->
+
 ## Declared scope
 
 <!-- State the independently useful behavior this PR promises. Do not restate a broad issue unless this PR fully solves it. -->
 
 ## Root invariant
 
-<!-- Name the contract or state that first became invalid and that this change restores. -->
+<!-- Tier C required. Tier B when repairing a regression. Tier A may remove this section. -->
 
 ## Reproduction and RED evidence
 
-<!-- Write "RED: ..." with the command and failure reason observed on unchanged source. For non-regression work, write "Not applicable because ...". -->
+<!-- Tier C required. Tier B when repairing a regression. Tier A may remove this section. -->
 
 ## Changes
 
@@ -16,7 +20,7 @@
 
 ## Adversarial coverage
 
-<!-- Check every applicable case and add domain-specific cases. If none apply, explain "Not applicable because ...". -->
+<!-- Tier C required. Tier B should list relevant API edge cases. Tier A may remove this section. -->
 
 - [ ] missing, empty, null-like, or annotated inputs
 - [ ] alternate valid layouts or orderings
@@ -24,9 +28,9 @@
 - [ ] sibling classifiers, handlers, or call sites with the same invariant
 - [ ] platform-specific behavior
 
-## Validation on final head
+## Validation
 
-<!-- Re-run after the last code change. Include the exact current commit and attached CI, not evidence from an older diff. -->
+<!-- Tier A: relevant formatter and example/configuration check. Tier B: tests, types, package smoke. Tier C: exact head and all required gates. -->
 
 - Head: <!-- commit SHA -->
 - Checks: <!-- focused test, affected suite, lint/type/format, full required CI, platform evidence -->
@@ -37,11 +41,11 @@
 
 ## Safety and compatibility
 
-<!-- Effects on isolation, tenant boundaries, replayability, API/evidence compatibility, deployment, and rollback. -->
+<!-- Tier B and C required. Tier A may remove this section. -->
 
 ## Completion state
 
-<!-- Keep technical completion distinct from repository lifecycle state. -->
+<!-- Tier C required. Other tiers may remove this section. -->
 
 - Implementation: <!-- complete or incomplete for the declared scope, with reason -->
 - Validation: <!-- complete on this head or pending, with reason -->

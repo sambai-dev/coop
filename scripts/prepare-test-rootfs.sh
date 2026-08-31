@@ -77,6 +77,8 @@ install -d -o root -g root -m 0755 \
   "$rootfs/dev" \
   "$rootfs/sys" \
   "$rootfs/work" \
+  "$rootfs/input" \
+  "$rootfs/output" \
   "$rootfs/var"
 install -d -o root -g root -m 1777 "$rootfs/tmp" "$rootfs/var/tmp"
 install -d -o root -g root -m 0755 "$rootfs/tmp/home"

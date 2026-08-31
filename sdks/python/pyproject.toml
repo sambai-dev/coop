@@ -3,8 +3,8 @@ requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "rookhold-sdk"
-version = "0.7.1"
+name = "rookhold"
+version = "0.8.0"
 description = "Typed, dependency-free Python client for the Rookhold execution gateway"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -35,7 +35,7 @@ dev = [
 stream = ["websocket-client>=1.6,<2"]
 
 [project.urls]
-Homepage = "https://github.com/sambai-dev/rookhold"
+Homepage = "https://sambai-dev.github.io/rookhold/"
 Repository = "https://github.com/sambai-dev/rookhold"
 Issues = "https://github.com/sambai-dev/rookhold/issues"
 

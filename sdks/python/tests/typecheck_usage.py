@@ -22,6 +22,7 @@ from rookhold import (
     Receipt,
     Rookhold,
     RookholdEvent,
+    RunResult,
     SubmitResponse,
     SubmitResult,
     isolation_satisfies,
@@ -71,6 +72,7 @@ receipt: Optional[Receipt] = detail["receipt"]
 terminal: JobDetail = client.wait(submitted["job_id"])
 events: Iterator[RookholdEvent] = client.stream(submitted["job_id"])
 result: JobResult = client.result(submitted["job_id"])
+run_result: RunResult = client.run("python", "print(42)")
 cancelled: CancellationResponse = client.cancel_result(submitted["job_id"])
 hashed: HashedRookholdEvent = cast(HashedRookholdEvent, next(events))
 observed_isolation: IsolationClass = "gvisor-application-kernel"
@@ -96,6 +98,7 @@ _ = (
     terminal,
     events,
     result,
+    run_result,
     cancelled,
     hashed,
     submitted_with_metadata,

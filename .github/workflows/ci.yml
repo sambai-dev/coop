@@ -43,6 +43,12 @@ jobs:
           python3 -m py_compile scripts/verify-production.py
           scripts/verify-python-adapter.py scripts/build-rootfs-manifest.py
           scripts/release-artifacts.py scripts/check-pr-description.py
+      - name: Validate copyable recipes and starter source
+        run: |
+          python3 -m compileall -q examples templates/fastapi-code-runner scripts/render-cli-demo.py
+          node --check examples/typescript-basic/hello.mjs
+          test -f templates/nextjs-code-runner/app/page.tsx
+          test -f templates/nextjs-code-runner/app/api/run/route.ts
       - name: Test production verifier provider fixtures
         run: python3 -m unittest discover -s scripts/tests -v
 
@@ -124,8 +130,8 @@ jobs:
           artifacts=sdks/python/.verify-dist/artifacts
           rm -rf "$artifacts"
           python -m build --wheel --sdist --outdir "$artifacts" ./sdks/python
-          wheel=$(find "$artifacts" -maxdepth 1 -type f -name 'rookhold_sdk-*.whl')
-          sdist=$(find "$artifacts" -maxdepth 1 -type f -name 'rookhold_sdk-*.tar.gz')
+          wheel=$(find "$artifacts" -maxdepth 1 -type f -name 'rookhold-*.whl')
+          sdist=$(find "$artifacts" -maxdepth 1 -type f -name 'rookhold-*.tar.gz')
           test "$(printf '%s\n' "$wheel" | grep -c .)" -eq 1
           test "$(printf '%s\n' "$sdist" | grep -c .)" -eq 1
           python -m twine check "$wheel" "$sdist"
@@ -135,7 +141,7 @@ jobs:
             target="sdks/python/.verify-dist/${kind}-install"
             rm -rf "$target"
             python -m pip install --no-deps --target "$target" "$artifact"
-            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp, rookhold, rookhold_cli, rookhold_mcp; assert rookhold.__version__ == '0.7.1'; assert rookhold_mcp.__version__ == rookhold.__version__; assert coop.Coop is rookhold.Rookhold; assert coop_mcp.CoopMcpServer is rookhold_mcp.RookholdMcpServer; assert callable(rookhold_cli.main); assert Path(rookhold.__file__).with_name('py.typed').is_file(); assert Path(coop.__file__).with_name('py.typed').is_file()"
+            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp, rookhold, rookhold_cli, rookhold_mcp; assert rookhold.__version__ == '0.8.0'; assert rookhold_mcp.__version__ == rookhold.__version__; assert coop.Coop is rookhold.Rookhold; assert coop_mcp.CoopMcpServer is rookhold_mcp.RookholdMcpServer; assert callable(rookhold_cli.main); assert Path(rookhold.__file__).with_name('py.typed').is_file(); assert Path(coop.__file__).with_name('py.typed').is_file()"
             PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v
           done
       - name: Install TypeScript SDK dependencies

@@ -8,20 +8,23 @@ web, terminal
 
 ## Users
 
-Rookhold is primarily for operators and platform engineers who need to run short agent-generated or user-supplied programs behind a separately operated policy boundary. SDK and MCP integrators are a secondary audience; they need the execution contract to stay predictable without exposing credentials or policy controls to a model.
+Rookhold is primarily for individual developers building agents that execute generated snippets, code-interpreter features, user-defined transforms, evaluators, graders, automation, and small self-hosted tools.
+
+Developers connecting Claude Code, Hermes, OpenCode, or another MCP host to a separate executor are the secondary audience. Platform and security engineers who need gVisor hardening, signing-key controls, deployment evidence, and detailed policy are the tertiary audience.
 
 ## Product Purpose
 
-Rookhold authenticates a caller, clamps a short Python, Node.js, or Bash job to configured policy, runs it through the selected execution provider, bounds its output, and records durable evidence of what happened. Success means an operator can quickly submit or inspect a run and answer: what ran, who submitted it, which controls became effective, what output or violations were observed, and how the run ended.
+Rookhold runs short Python, Node.js, and Bash jobs with hard limits, live output, and a verifiable receipt. Success begins when a new developer gets a result in under two minutes, then can answer what ran, which controls became effective, what output or violations were observed, and how the run ended.
 
 ## Positioning
 
-Rookhold is a small self-hosted execution control plane, not an LLM, agent framework, general-purpose IDE, or replacement for a harness workspace. Its differentiator is the combination of an independently operated API boundary, per-job execution policy, bounded live output, durable receipts, and portable signed evidence.
+Rookhold is the smallest reliable execution boundary a developer can add to an AI agent or application. It owns one problem: an application received code, must not hand it the host machine, and needs to know what happened afterward. Rookhold is not an LLM, agent framework, persistent workspace, browser environment, remote IDE, or general-purpose cloud sandbox.
 
 ## Operating Context
 
+- Developers begin with `rookhold run` or one SDK `run()` call. The command can manage a temporary local development service when no endpoint is configured and must state that this mode is unisolated.
 - Trusted applications, agent harnesses, and MCP adapters submit short stateless jobs over HTTP.
-- Operators use `rookhold-cli` or the embedded dashboard to connect a tenant credential, create a run, monitor its ordered event stream, cancel eligible work, and inspect result, policy, receipt, and attestation artifacts.
+- Developers and operators use the CLI or embedded dashboard to create a run, monitor its ordered event stream, cancel eligible work, and inspect result, policy, receipt, and signed evidence.
 - Claude Code, OpenCode, Codex, Hermes, OpenClaw, and other MCP hosts launch the same `rookhold-mcp` stdio adapter; the host owns the conversation UI while Rookhold owns execution policy and evidence.
 - Local development may use the explicitly unisolated subprocess provider. The guarded Linux x86_64 deployment uses one pinned gVisor workload per job on a dedicated VM.
 - The API and persisted store remain the source of truth; the terminal client, MCP adapter, and dashboard are views over those contracts.
@@ -50,11 +53,14 @@ Keep the name Rookhold and its plainspoken, technically honest voice. Security p
 
 ## Product Principles
 
-1. Show operational state before decoration.
-2. Keep requested policy, observed posture, and independently verifiable evidence distinct.
-3. Let one workflow move naturally from submit to monitor to prove.
-4. Make dense technical information scannable without hiding detail.
-5. Fail closed in behavior and speak plainly about uncertainty in the interface.
+1. A new developer must reach a successful run in under two minutes.
+2. The common execution path must require one CLI command or one SDK method.
+3. Every security claim must correspond to observed evidence, never configuration alone.
+4. Rookhold remains a bounded job runner, not a general-purpose remote computer.
+5. Roadmap priority comes from developer use cases, not architectural completeness.
+6. Show results first and make the receipt the memorable proof of what happened.
+7. Keep requested policy, observed controls, and independently verifiable evidence distinct.
+8. Fail closed in behavior and use plain language in every developer-facing surface.
 
 ## Accessibility & Inclusion
 

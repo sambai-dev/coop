@@ -1,7 +1,7 @@
 """Dependency-free synchronous client for the Rookhold execution API.
 
 The module is intentionally kept as one file: copy it into a project, or
-install the small ``rookhold-sdk`` package. WebSocket streaming is used when the
+install the small ``rookhold`` package. WebSocket streaming is used when the
 optional ``websocket-client`` package is present; cursor polling is the safe
 fallback.
 """
@@ -13,6 +13,11 @@ import hmac
 import http.client
 import json
 import math
+import os
+import shutil
+import socket
+import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -39,12 +44,14 @@ from typing import (
 
 __all__ = [
     "ArtifactDownload",
+    "ArtifactResult",
     "AttestationCapabilities",
     "AttestationPublicKey",
     "Capabilities",
     "CancellationResponse",
     "Rookhold",
     "RookholdError",
+    "RookholdExecutionError",
     "RookholdEvent",
     "EventChainReceipt",
     "EventPage",
@@ -57,6 +64,7 @@ __all__ = [
     "HashedRookholdEvent",
     "IsolationClass",
     "Job",
+    "JobFile",
     "JobAttestationStatus",
     "JobDetail",
     "JobPage",
@@ -70,17 +78,19 @@ __all__ = [
     "MinimumIsolation",
     "OutputEvidence",
     "Receipt",
+    "ReceiptFile",
     "ReceiptLimits",
     "ResourceUsage",
     "StoredJobSpec",
     "StoredLimits",
     "SubmitResponse",
     "SubmitResult",
+    "RunResult",
     "WhoAmI",
     "isolation_satisfies",
 ]
 
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 
 
 class JobStatus(str, Enum):
@@ -137,6 +147,14 @@ class JobSpec(_RequiredJobSpec, total=False):
     stdin: str
     limits: Dict[str, Union[int, bool]]
     requirements: "ExecutionRequirements"
+    files: List["JobFile"]
+    outputs: List[str]
+    runtime: str
+
+
+class JobFile(TypedDict):
+    path: str
+    content_base64: str
 
 
 IsolationClass = Literal[
@@ -197,6 +215,9 @@ class _RequiredStoredJobSpec(TypedDict):
 
 class StoredJobSpec(_RequiredStoredJobSpec, total=False):
     requirements: ExecutionRequirements
+    files: List[JobFile]
+    outputs: List[str]
+    runtime: Optional[str]
 
 
 class EffectiveLimits(TypedDict):
@@ -217,6 +238,9 @@ class EffectiveJobSpec(TypedDict):
     limits: EffectiveLimits
     requirements: ExecutionRequirements
     isolation_class: Optional[IsolationClass]
+    files: List[JobFile]
+    outputs: List[str]
+    runtime: Optional[str]
 
 
 class LimitEnforcement(TypedDict):
@@ -379,6 +403,15 @@ class Receipt(_RequiredReceipt, total=False):
     resource_usage: Optional[ResourceUsage]
     executor_output: Optional[ExecutorOutputEvidence]
     output: OutputEvidence
+    input_files: List["ReceiptFile"]
+    artifacts: List["ReceiptFile"]
+    runtime_pack: Optional[str]
+
+
+class ReceiptFile(TypedDict):
+    path: str
+    size_bytes: int
+    sha256: str
 
 
 class JobDetail(JobView):
@@ -441,6 +474,51 @@ class JobResult(TypedDict):
     stderr: str
     truncated: bool
     violations: List[Dict[str, Any]]
+    artifacts: List["ArtifactResult"]
+
+
+class ArtifactResult(TypedDict):
+    path: str
+    content_base64: str
+    size_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """Normalized result returned by :meth:`Rookhold.run`.
+
+    The lower-level dictionary APIs remain available for callers that need
+    exact wire compatibility.  This object is deliberately small and gives
+    the common execution path stable attributes, receipt metadata, and a
+    convenient failure check.
+    """
+
+    stdout: str
+    stderr: str
+    exit_code: Optional[int]
+    duration_ms: Optional[int]
+    job_id: str
+    status: JobStatusValue
+    truncated: bool
+    violations: List[Dict[str, Any]]
+    artifacts: List[ArtifactResult]
+    receipt: Optional[Receipt]
+    isolation: Optional[IsolationClass]
+    json_value: Any = None
+
+    @property
+    def duration(self) -> Optional[float]:
+        """Wall duration in seconds, or ``None`` when the server omitted it."""
+
+        return None if self.duration_ms is None else self.duration_ms / 1000.0
+
+    def raise_for_status(self) -> "RunResult":
+        """Return this result on success; raise with the full result otherwise."""
+
+        if self.status != JobStatus.SUCCEEDED.value:
+            raise RookholdExecutionError(self)
+        return self
 
 
 class JobPage(TypedDict):
@@ -482,6 +560,12 @@ class LimitCapabilities(TypedDict):
     output_record_bytes_max: int
     code_bytes_max: int
     stdin_bytes_max: int
+    input_files_max: int
+    input_file_bytes_max: int
+    input_bytes_max: int
+    output_files_max: int
+    output_file_bytes_max: int
+    output_bytes_max: int
 
 
 class FeatureCapabilities(TypedDict):
@@ -508,6 +592,7 @@ class Capabilities(TypedDict):
     limits: LimitCapabilities
     features: FeatureCapabilities
     attestations: AttestationCapabilities
+    runtime_packs: List[str]
 
 
 class AttestationPublicKey(TypedDict):
@@ -563,6 +648,18 @@ class RookholdError(RuntimeError):
         prefix = f"rookhold {self.status}" if self.status is not None else "rookhold"
         request = f" (request {self.request_id})" if self.request_id else ""
         return f"{prefix} [{self.code}]: {self.message}{request}"
+
+
+class RookholdExecutionError(RookholdError):
+    """A completed execution whose terminal status was not ``succeeded``."""
+
+    def __init__(self, result: RunResult) -> None:
+        super().__init__(
+            f"job {result.job_id} finished with status {result.status}",
+            code="execution_failed",
+            retryable=False,
+        )
+        self.result = result
 
 
 LimitInput = Union[Limits, Mapping[str, Union[int, bool]]]
@@ -690,6 +787,57 @@ class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
 
 class Rookhold:
     """Synchronous Rookhold API client."""
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        timeout: float = 30.0,
+        opener: Optional[OpenUrl] = None,
+        websocket_factory: Optional[WebSocketFactory] = None,
+    ) -> "Rookhold":
+        """Create a client from ``ROOKHOLD_BASE_URL`` and ``ROOKHOLD_API_KEY``.
+
+        The legacy ``COOP_*`` names remain compatible, but conflicting old and
+        new values fail closed instead of selecting a credential implicitly.
+        """
+
+        def compatible(primary: str, legacy: str, default: str = "") -> str:
+            current = os.environ.get(primary)
+            old = os.environ.get(legacy)
+            if current and old and current != old:
+                raise ValueError(f"{primary} conflicts with {legacy}")
+            return current or old or default
+
+        base_url = compatible(
+            "ROOKHOLD_BASE_URL", "COOP_BASE_URL", "http://127.0.0.1:7300"
+        )
+        api_key = compatible("ROOKHOLD_API_KEY", "COOP_API_KEY")
+        if not api_key:
+            raise ValueError("ROOKHOLD_API_KEY is required")
+        return cls(
+            base_url,
+            api_key,
+            timeout=timeout,
+            opener=opener,
+            websocket_factory=websocket_factory,
+        )
+
+    @classmethod
+    def local(
+        cls,
+        *,
+        server_binary: Optional[str] = None,
+        startup_timeout: float = 15.0,
+    ) -> "_LocalRookhold":
+        """Manage an ephemeral, loopback-only development server.
+
+        This mode is intentionally unisolated and is suitable only for trusted
+        code.  The server executable is discovered from ``ROOKHOLD_SERVER_BIN``
+        or ``PATH`` when it is not supplied explicitly.
+        """
+
+        return _LocalRookhold(cls, server_binary, startup_timeout)
 
     def __init__(
         self,
@@ -1039,6 +1187,9 @@ class Rookhold:
         limits: Optional[LimitInput] = None,
         *,
         requirements: Optional[ExecutionRequirements] = None,
+        files: Optional[List[JobFile]] = None,
+        outputs: Optional[List[str]] = None,
+        runtime: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         retry_ambiguous: bool = False,
         max_ambiguous_retries: int = 1,
@@ -1053,12 +1204,104 @@ class Rookhold:
             stdin,
             limits,
             requirements=requirements,
+            files=files,
+            outputs=outputs,
+            runtime=runtime,
             idempotency_key=idempotency_key,
             retry_ambiguous=retry_ambiguous,
             max_ambiguous_retries=max_ambiguous_retries,
             retry_backoff=retry_backoff,
             **limit_overrides,
         )["job"]
+
+    def run(
+        self,
+        language: str,
+        code: str,
+        stdin: Optional[str] = None,
+        limits: Optional[LimitInput] = None,
+        *,
+        requirements: Optional[ExecutionRequirements] = None,
+        files: Optional[List[JobFile]] = None,
+        outputs: Optional[List[str]] = None,
+        runtime: Optional[str] = None,
+        timeout: float = 60.0,
+        idempotency_key: Optional[str] = None,
+        **limit_overrides: Union[int, bool],
+    ) -> RunResult:
+        """Submit one bounded job, wait for it, and return a normalized result."""
+
+        key = idempotency_key or str(uuid.uuid4())
+        submitted = self.submit_result(
+            language,
+            code,
+            stdin,
+            limits,
+            requirements=requirements,
+            files=files,
+            outputs=outputs,
+            runtime=runtime,
+            idempotency_key=key,
+            retry_ambiguous=True,
+            **limit_overrides,
+        )
+        job_id = submitted["job"]["job_id"]
+        result = self.result(job_id, timeout=timeout)
+        detail = self.get(job_id)
+        receipt = detail["receipt"]
+        policy = detail["execution_policy"]
+        isolation = (
+            receipt.get("isolation_class")
+            if receipt is not None
+            else policy.get("isolation_class")
+        )
+        return RunResult(
+            stdout=result["stdout"],
+            stderr=result["stderr"],
+            exit_code=result["exit_code"],
+            duration_ms=result["duration_ms"],
+            job_id=job_id,
+            status=result["status"],
+            truncated=result["truncated"],
+            violations=result["violations"],
+            artifacts=result.get("artifacts", []),
+            receipt=receipt,
+            isolation=isolation,
+        )
+
+    def run_json(
+        self,
+        language: str,
+        code: str,
+        input: Any,
+        limits: Optional[LimitInput] = None,
+        *,
+        requirements: Optional[ExecutionRequirements] = None,
+        timeout: float = 60.0,
+        idempotency_key: Optional[str] = None,
+        **limit_overrides: Union[int, bool],
+    ) -> RunResult:
+        """Run code with compact JSON on stdin and parse its stdout as JSON."""
+
+        stdin = json.dumps(input, separators=(",", ":"), ensure_ascii=False)
+        merged_limits = self._limits_dict(limits, limit_overrides)
+        result = self.run(
+            language,
+            code,
+            stdin,
+            merged_limits or None,
+            requirements=requirements,
+            timeout=timeout,
+            idempotency_key=idempotency_key,
+        )
+        result.raise_for_status()
+        try:
+            value = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RookholdError(
+                "job stdout was not valid JSON", code="invalid_json_output"
+            ) from exc
+        return RunResult(**{**asdict(result), "json_value": value})
 
     def submit_result(
         self,
@@ -1068,6 +1311,9 @@ class Rookhold:
         limits: Optional[LimitInput] = None,
         *,
         requirements: Optional[ExecutionRequirements] = None,
+        files: Optional[List[JobFile]] = None,
+        outputs: Optional[List[str]] = None,
+        runtime: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         retry_ambiguous: bool = False,
         max_ambiguous_retries: int = 1,
@@ -1143,6 +1389,12 @@ class Rookhold:
             spec["requirements"] = cast(
                 ExecutionRequirements, dict(requirements_mapping)
             )
+        if files is not None:
+            spec["files"] = files
+        if outputs is not None:
+            spec["outputs"] = outputs
+        if runtime is not None:
+            spec["runtime"] = runtime
         attempt = 0
         while True:
             try:
@@ -1469,6 +1721,7 @@ class Rookhold:
         stderr: List[str] = []
         truncated = False
         violations: List[Dict[str, Any]] = []
+        artifacts: List[ArtifactResult] = []
         after: Optional[int] = None
         while True:
             remaining = deadline - time.monotonic()
@@ -1488,6 +1741,8 @@ class Rookhold:
                     truncated = True
                 elif kind == "violation":
                     violations.append(data)
+                elif kind == "artifact":
+                    artifacts.append(cast(ArtifactResult, data))
             if page["next_cursor"] is None:
                 break
             after = page["next_cursor"]
@@ -1507,6 +1762,7 @@ class Rookhold:
             "stderr": "\n".join(stderr),
             "truncated": truncated,
             "violations": violations,
+            "artifacts": artifacts,
         }
 
     @staticmethod
@@ -1580,7 +1836,7 @@ class Rookhold:
                 import websocket  # type: ignore[import-not-found]
             except ImportError as exc:
                 raise RookholdError(
-                    "install rookhold-sdk[stream] for WebSocket streaming",
+                    "install rookhold[stream] for WebSocket streaming",
                     code="websocket_unavailable",
                 ) from exc
             factory = cast(WebSocketFactory, getattr(websocket, "create_connection"))
@@ -1680,3 +1936,106 @@ class Rookhold:
                 terminal_projection_seen = True
                 continue
             time.sleep(poll_interval)
+
+
+class _LocalRookhold:
+    """Context manager backing :meth:`Rookhold.local`."""
+
+    def __init__(
+        self,
+        client_type: type[Rookhold],
+        server_binary: Optional[str],
+        startup_timeout: float,
+    ) -> None:
+        if not math.isfinite(startup_timeout) or startup_timeout <= 0:
+            raise ValueError("startup_timeout must be finite and positive")
+        self._client_type = client_type
+        self._server_binary = server_binary
+        self._startup_timeout = startup_timeout
+        self._temporary: Optional[tempfile.TemporaryDirectory[str]] = None
+        self._process: Optional[subprocess.Popen[bytes]] = None
+
+    def __enter__(self) -> Rookhold:
+        binary = (
+            self._server_binary
+            or os.environ.get("ROOKHOLD_SERVER_BIN")
+            or shutil.which("rookhold")
+        )
+        if not binary:
+            raise RuntimeError(
+                "Rookhold.local() needs the Rookhold server executable on PATH "
+                "or in ROOKHOLD_SERVER_BIN"
+            )
+        temporary = tempfile.TemporaryDirectory(prefix="rookhold-local-")
+        self._temporary = temporary
+        root = os.path.abspath(temporary.name)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = int(probe.getsockname()[1])
+        api_key = "local-" + uuid.uuid4().hex
+        env = dict(os.environ)
+        env.update(
+            {
+                "ROOKHOLD_ADDR": f"127.0.0.1:{port}",
+                "ROOKHOLD_API_KEYS": f"local:{api_key}",
+                "ROOKHOLD_SANDBOX": "off",
+                "ROOKHOLD_ENV": "development",
+                "ROOKHOLD_DB": os.path.join(root, "rookhold.sqlite"),
+                "ROOKHOLD_JOBS_ROOT": os.path.join(root, "state", "jobs"),
+                "ROOKHOLD_LOG_FORMAT": "compact",
+            }
+        )
+        creation_flags = 0
+        if os.name == "nt":
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        process = subprocess.Popen(
+            [binary, "serve"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            creationflags=creation_flags,
+        )
+        self._process = process
+        client = self._client_type(
+            f"http://127.0.0.1:{port}", api_key, timeout=min(2.0, self._startup_timeout)
+        )
+        deadline = time.monotonic() + self._startup_timeout
+        last_error: Optional[Exception] = None
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                detail = ""
+                if process.stderr is not None:
+                    detail = process.stderr.read().decode("utf-8", "replace").strip()
+                self.__exit__(None, None, None)
+                raise RuntimeError(
+                    "ephemeral Rookhold server stopped during startup"
+                    + (f": {detail}" if detail else "")
+                )
+            try:
+                client.capabilities()
+                return client
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.05)
+        self.__exit__(None, None, None)
+        raise RuntimeError(
+            f"ephemeral Rookhold server was not ready after {self._startup_timeout}s"
+        ) from last_error
+
+    def __exit__(self, *_exc: object) -> None:
+        process = self._process
+        self._process = None
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        if process is not None and process.stderr is not None:
+            process.stderr.close()
+        temporary = self._temporary
+        self._temporary = None
+        if temporary is not None:
+            temporary.cleanup()

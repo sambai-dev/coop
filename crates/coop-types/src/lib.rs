@@ -11,8 +11,20 @@ pub const MAX_OUTPUT_BYTES_PER_STREAM: usize = 1024 * 1024;
 pub const MAX_OUTPUT_RECORD_BYTES: usize = 16 * 1024;
 pub const MAX_CODE_BYTES: usize = 1024 * 1024;
 pub const MAX_STDIN_BYTES: usize = 1024 * 1024;
+pub const MAX_INPUT_FILES: usize = 32;
+pub const MAX_INPUT_FILE_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_OUTPUT_FILES: usize = 32;
+pub const MAX_OUTPUT_FILE_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_ARTIFACT_PATH_BYTES: usize = 240;
 
 pub const SUPPORTED_LANGUAGES: [&str; 3] = ["python", "node", "bash"];
+pub const RUNTIME_PACKS: [(&str, &str); 3] = [
+    ("python", "python:bookworm-20260826-stdlib"),
+    ("node", "node:bookworm-20260826-base"),
+    ("bash", "bash:bookworm-20260826-core"),
+];
 
 pub const WALL_MAX_SECONDS: u32 = 300;
 pub const CPU_MAX_SECONDS: u32 = 240;
@@ -191,6 +203,13 @@ impl LimitEnforcement {
     };
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JobFile {
+    pub path: String,
+    pub content_base64: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JobSpec {
@@ -202,6 +221,12 @@ pub struct JobSpec {
     pub limits: Limits,
     #[serde(default)]
     pub requirements: JobRequirements,
+    #[serde(default)]
+    pub files: Vec<JobFile>,
+    #[serde(default)]
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub runtime: Option<String>,
 }
 
 /// An execution spec whose controls describe effective, not merely requested,
@@ -219,6 +244,12 @@ pub struct EffectiveJobSpec {
     /// boundary. A configured provider is not execution evidence.
     #[serde(default)]
     pub isolation_class: Option<IsolationClass>,
+    #[serde(default)]
+    pub files: Vec<JobFile>,
+    #[serde(default)]
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub runtime: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -292,6 +323,39 @@ pub fn is_supported_language(language: &str) -> bool {
     SUPPORTED_LANGUAGES.contains(&language)
 }
 
+pub fn runtime_pack_for(language: &str) -> Option<&'static str> {
+    RUNTIME_PACKS
+        .iter()
+        .find_map(|(candidate, pack)| (*candidate == language).then_some(*pack))
+}
+
+pub fn validate_runtime_pack(language: &str, runtime: Option<&str>) -> bool {
+    runtime.is_none_or(|runtime| runtime_pack_for(language) == Some(runtime))
+}
+
+pub fn validate_artifact_path(path: &str, prefix: &str) -> bool {
+    if path.is_empty()
+        || path.len() > MAX_ARTIFACT_PATH_BYTES
+        || path.contains('\\')
+        || path.starts_with('/')
+        || path.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return false;
+    }
+    let mut parts = path.split('/');
+    if parts.next() != Some(prefix) {
+        return false;
+    }
+    let mut saw_name = false;
+    for part in parts {
+        if part.is_empty() || matches!(part, "." | "..") {
+            return false;
+        }
+        saw_name = true;
+    }
+    saw_name
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +382,9 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(spec.requirements.minimum_isolation, IsolationClass::None);
+        assert!(spec.files.is_empty());
+        assert!(spec.outputs.is_empty());
+        assert!(spec.runtime.is_none());
 
         let encoded = serde_json::to_value(JobRequirements {
             minimum_isolation: IsolationClass::GvisorApplicationKernel,
@@ -328,5 +395,29 @@ mod tests {
             IsolationClass::GvisorApplicationKernel.to_string(),
             "gvisor-application-kernel"
         );
+    }
+
+    #[test]
+    fn artifact_paths_and_runtime_packs_are_narrow_and_versioned() {
+        assert!(validate_artifact_path("input/data.csv", "input"));
+        assert!(validate_artifact_path("output/report.json", "output"));
+        for invalid in [
+            "data.csv",
+            "../input/data.csv",
+            "input/../secret",
+            "input\\secret",
+            "/input/secret",
+            "input/",
+        ] {
+            assert!(!validate_artifact_path(invalid, "input"), "{invalid}");
+        }
+        assert!(validate_runtime_pack(
+            "python",
+            Some("python:bookworm-20260826-stdlib")
+        ));
+        assert!(!validate_runtime_pack(
+            "python",
+            Some("node:bookworm-20260826-base")
+        ));
     }
 }

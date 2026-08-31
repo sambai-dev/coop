@@ -1,6 +1,6 @@
 use crate::bus::WireEvent;
 use crate::routes::{
-    AttestationCapabilities, AttestationPublicKeyResponse, CancellationResponse,
+    ArtifactView, AttestationCapabilities, AttestationPublicKeyResponse, CancellationResponse,
     CapabilitiesResponse, ErrorBody, ErrorEnvelope, ExecutionCapabilities, ExecutionPolicy,
     FeatureCapabilities, JobAttestationStatus, JobDetail, JobView, LimitCapabilities,
     ListJobsResponse, ReplayResponse, ResultView, SchedulerStatus, StatusResponse,
@@ -8,8 +8,8 @@ use crate::routes::{
 };
 use axum::Json;
 use coop_types::{
-    EffectiveJobSpec, EffectiveLimits, IsolationClass, JobRequirements, JobSpec, LimitEnforcement,
-    Limits,
+    EffectiveJobSpec, EffectiveLimits, IsolationClass, JobFile, JobRequirements, JobSpec,
+    LimitEnforcement, Limits,
 };
 use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi};
@@ -43,6 +43,7 @@ use utoipa::{Modify, OpenApi};
     ),
     components(schemas(
         JobSpec,
+        JobFile,
         JobRequirements,
         IsolationClass,
         Limits,
@@ -55,6 +56,7 @@ use utoipa::{Modify, OpenApi};
         JobAttestationStatus,
         ExecutionPolicy,
         ResultView,
+        ArtifactView,
         SubmitResponse,
         ListJobsResponse,
         ReplayResponse,

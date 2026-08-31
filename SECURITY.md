@@ -20,12 +20,13 @@ We aim to acknowledge a complete report within 72 hours. Timelines for validatio
 | Version | Security support |
 |---|---|
 | latest `main` | Active development; may include unreleased changes |
-| tagged `0.7.x` releases | Supported |
-| tagged `0.6.x` releases | Unsupported; upgrade to 0.7.x |
-| tagged `0.5.x` releases | Unsupported; upgrade to 0.7.x |
-| tagged `0.4.x` releases | Unsupported; upgrade to 0.7.x |
-| tagged `0.3.x` releases | Unsupported; upgrade to 0.7.x |
-| tagged `0.2.x` releases | Unsupported; upgrade to 0.7.x |
+| tagged `0.8.x` releases | Supported |
+| tagged `0.7.x` releases | Unsupported; upgrade to 0.8.x |
+| tagged `0.6.x` releases | Unsupported; upgrade to 0.8.x |
+| tagged `0.5.x` releases | Unsupported; upgrade to 0.8.x |
+| tagged `0.4.x` releases | Unsupported; upgrade to 0.8.x |
+| tagged `0.3.x` releases | Unsupported; upgrade to 0.8.x |
+| tagged `0.2.x` releases | Unsupported; upgrade to 0.8.x |
 | `0.1.x` | Unsupported; do not expose to hostile tenants |
 | older versions | Unsupported |
 

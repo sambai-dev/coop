@@ -42,7 +42,7 @@ from rookhold import (
     isolation_satisfies,
 )
 
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 
 PROTOCOL_VERSION = "2025-11-25"
 MODERN_PROTOCOL_VERSION = "2026-07-28"

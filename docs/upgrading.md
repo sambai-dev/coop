@@ -1,6 +1,6 @@
 # Upgrading
 
-Rookhold uses semantic versioning while the API is pre-1.0: minor releases may contain intentional contract changes. Read [CHANGELOG.md](../CHANGELOG.md), compare `/openapi.json`, and test SDKs before upgrading production.
+Rookhold uses semantic versioning while the API is pre-1.0: minor releases may contain intentional contract changes. Read [CHANGELOG.md](https://github.com/sambai-dev/rookhold/blob/main/CHANGELOG.md), compare `/openapi.json`, and test SDKs before upgrading production.
 
 ## Standard procedure
 

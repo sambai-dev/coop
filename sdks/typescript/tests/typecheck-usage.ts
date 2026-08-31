@@ -17,7 +17,7 @@ import type {
   SubmitResult,
   WhoAmI,
 } from "../rookhold.js";
-import { Rookhold, RookholdError, isolationSatisfies } from "../rookhold.js";
+import { Rookhold, RookholdError, RunResult, isolationSatisfies } from "../rookhold.js";
 import { Coop, CoopError } from "../coop.js";
 
 const client = new Rookhold("https://rookhold.example", "tenant-key", { timeoutMs: 5_000 });
@@ -38,6 +38,7 @@ async function consume(): Promise<void> {
     "print(42)",
     { idempotencyKey: "consumer-request-2" },
   );
+  const runResult: RunResult = await client.run({ language: "python", code: "print(42)" });
   const detail: JobDetail = await client.get(submitted.job_id);
   const terminal: JobDetail = await client.wait(submitted.job_id);
   const effective: EffectiveJobSpec | null = detail.effective_spec;
@@ -62,7 +63,7 @@ async function consume(): Promise<void> {
     { timeoutMs: 10_000 },
   );
   const observed: IsolationClass = capabilities.execution.isolation_class;
-  const postureSatisfied: boolean = isolationSatisfies(
+  const isolationSatisfied: boolean = isolationSatisfies(
     observed,
     "linux-shared-kernel",
   );
@@ -83,7 +84,8 @@ async function consume(): Promise<void> {
     events,
     identity,
     submittedWithHeaders,
-    postureSatisfied,
+    isolationSatisfied,
+    runResult,
     concurrentMemory,
     cancelledJob,
     cancelled,

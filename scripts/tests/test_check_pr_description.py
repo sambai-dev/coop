@@ -9,7 +9,10 @@ CHECK = runpy.run_path(str(ROOT / "scripts" / "check-pr-description.py"))
 
 
 def valid_body() -> str:
-    return """## Declared scope
+    return """## Contribution tier
+Tier C — executor, authentication, storage, receipts, or isolation.
+
+## Declared scope
 Repair one independently useful parser behavior without claiming the sibling command.
 
 ## Root invariant
@@ -25,7 +28,7 @@ Repair the classifier predicate and keep the parser contract otherwise unchanged
 - [x] null-like and annotated values
 - [x] leading spacer cells and classifier fallthrough
 
-## Validation on final head
+## Validation
 - Head: 0123456789abcdef
 - Checks: focused regression, affected suite, lint, and required CI are green.
 
@@ -46,6 +49,21 @@ No wire-format change; the accepted input set only gains previously valid cases.
 class PullRequestDescriptionTests(unittest.TestCase):
     def test_complete_contract_passes(self) -> None:
         self.assertEqual(CHECK["validate_body"](valid_body()), [])
+
+    def test_tier_a_needs_only_scope_changes_and_relevant_validation(self) -> None:
+        body = """## Contribution tier
+Tier A — documentation, examples, and integrations.
+
+## Declared scope
+Add one copyable recipe without changing the execution service.
+
+## Changes
+Add the recipe and link it from the examples index.
+
+## Validation
+Ran the recipe syntax check and the documentation link checker.
+"""
+        self.assertEqual(CHECK["validate_body"](body), [])
 
     def test_missing_scope_and_placeholder_sections_fail(self) -> None:
         body = valid_body().replace("## Declared scope", "## Context").replace(
@@ -76,10 +94,8 @@ class PullRequestDescriptionTests(unittest.TestCase):
             "- Checks: ok",
         )
         errors = CHECK["validate_body"](body)
-        self.assertIn("Validation on final head must include 'Head: <commit SHA>'", errors)
-        self.assertIn(
-            "Validation on final head must include concrete 'Checks:'", errors
-        )
+        self.assertIn("Tier C validation must include 'Head: <commit SHA>'", errors)
+        self.assertIn("Tier C validation must include concrete 'Checks:'", errors)
 
 
 if __name__ == "__main__":

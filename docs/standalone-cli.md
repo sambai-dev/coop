@@ -1,8 +1,8 @@
 # Standalone terminal apps
 
-This folder already contains everything needed to use Rookhold from a terminal:
+This folder contains everything needed to use Rookhold from a terminal:
 
-- `rookhold` starts the local service;
+- `rookhold` runs one job, checks a connection, configures an MCP host, or starts the service;
 - `rookhold-cli` is the interactive human client; and
 - `rookhold-mcp` connects Claude Code, OpenCode, Hermes, OpenClaw, and other MCP hosts.
 
@@ -24,13 +24,23 @@ publisher warning, verify the downloaded archive before allowing it.
 
 ## Local trusted-code demo
 
-Start the service in one terminal. This mode is intentionally unisolated and
-must stay on `127.0.0.1`.
+Run one command. It manages a temporary loopback service, saves the receipt,
+then stops the service:
+
+```bash
+rookhold run python 'print(6 * 7)'
+```
+
+This mode is intentionally unisolated, reports `isolation: none`, retains host
+network access, and may receive only trusted code.
+
+Use `rookhold dev` when you want the local API and dashboard to remain open.
+The equivalent explicit environment remains available below.
 
 macOS or Linux:
 
 ```bash
-ROOKHOLD_SANDBOX=off ROOKHOLD_JOBS_ROOT="$PWD/.rookhold-dev/jobs" ./rookhold
+ROOKHOLD_SANDBOX=off ROOKHOLD_JOBS_ROOT="$PWD/.rookhold-dev/jobs" ./rookhold serve
 ```
 
 Windows PowerShell:
@@ -38,7 +48,7 @@ Windows PowerShell:
 ```powershell
 $env:ROOKHOLD_SANDBOX = "off"
 $env:ROOKHOLD_JOBS_ROOT = Join-Path (Get-Location) ".rookhold-dev\jobs"
-.\rookhold.exe
+.\rookhold.exe serve
 ```
 
 Open a second terminal and start the human client.
@@ -60,12 +70,15 @@ $env:ROOKHOLD_API_KEY = "rookhold-dev-key"
 ```
 
 Try `/mcp`, then `/run python "print(6 * 7)"`. Type `/help` for every command.
+Use `rookhold check` from another terminal to test the service, credential,
+runtimes, actual isolation, and packaged MCP adapter.
 
 ## Connect an agent CLI
 
-Use the templates in `integrations/` and set the MCP command to the absolute
-path of `rookhold-cli`, with `mcp-server` as its argument. Keep the API key in
-the host environment, never in a model-visible prompt.
+Run `rookhold setup claude-code`, `rookhold setup opencode`, or `rookhold setup
+hermes`. The command previews the change, backs up an existing file, keeps the
+API key in the host environment, writes only after confirmation, and tests the
+connection afterward.
 
 Adding Rookhold does not disable an agent host's built-in shell or other
 execution tools. Deny those alternate routes in the host when every job must

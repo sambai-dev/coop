@@ -28,7 +28,7 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
 # The namespace backend never receives the outer container root as its rootfs.
 # This stage is copied into a separate, trusted tree used only for job pivots.
 FROM runtime-base AS sandbox-rootfs
-RUN install -d -m 0755 /.pivot_old /proc /dev /work \
+RUN install -d -m 0755 /.pivot_old /proc /dev /work /input /output \
     && install -d -m 1777 /tmp \
     && install -d -m 0755 /tmp/home
 
@@ -43,7 +43,7 @@ FROM runtime-base AS runtime
 # containment boundary.
 RUN test "$(dpkg --print-architecture)" = amd64
 
-ARG VERSION=0.7.1
+ARG VERSION=0.8.0
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="Rookhold" \
       org.opencontainers.image.description="Audit-first execution gateway for AI agents" \

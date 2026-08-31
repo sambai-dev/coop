@@ -72,6 +72,14 @@ export interface JobSpec {
   stdin?: string;
   limits?: Limits;
   requirements?: JobRequirements;
+  files?: JobFile[];
+  outputs?: string[];
+  runtime?: string;
+}
+
+export interface JobFile {
+  path: string;
+  content_base64: string;
 }
 
 /** Complete limits recorded after the server applies defaults or policy. */
@@ -92,6 +100,9 @@ export interface StoredJobSpec {
   limits: StoredLimits;
   /** Absent on pre-v0.4 servers; v0.4 defaults this to `none`. */
   requirements?: JobRequirements;
+  files?: JobFile[];
+  outputs?: string[];
+  runtime?: string | null;
 }
 
 /** Controls actually enforced for an execution; null means not enforced. */
@@ -114,6 +125,9 @@ export interface EffectiveJobSpec {
   requirements?: JobRequirements;
   /** Null until the provider crosses its observed workload-ready boundary. */
   isolation_class?: IsolationClass | null;
+  files?: JobFile[];
+  outputs?: string[];
+  runtime?: string | null;
 }
 
 export interface LimitEnforcement {
@@ -321,6 +335,15 @@ export interface Receipt {
   resource_usage?: ResourceUsage | null;
   executor_output?: ExecutorOutputEvidence | null;
   output?: OutputEvidence;
+  input_files?: ReceiptFile[];
+  artifacts?: ReceiptFile[];
+  runtime_pack?: string | null;
+}
+
+export interface ReceiptFile {
+  path: string;
+  size_bytes: number;
+  sha256: string;
 }
 
 export interface JobResult {
@@ -332,6 +355,62 @@ export interface JobResult {
   stderr: string;
   truncated: boolean;
   violations: Record<string, unknown>[];
+  artifacts?: ArtifactResult[];
+}
+
+export interface ArtifactResult {
+  path: string;
+  content_base64: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+export class RunResult {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode: number | null;
+  readonly durationMs: number | null;
+  readonly jobId: string;
+  readonly status: JobStatus;
+  readonly truncated: boolean;
+  readonly violations: Record<string, unknown>[];
+  readonly artifacts: ArtifactResult[];
+  readonly receipt: Receipt | null;
+  readonly isolation: IsolationClass | null;
+  readonly jsonValue: unknown;
+
+  constructor(
+    result: JobResult,
+    evidence: { receipt: Receipt | null; isolation: IsolationClass | null },
+    jsonValue?: unknown,
+  ) {
+    this.stdout = result.stdout;
+    this.stderr = result.stderr;
+    this.exitCode = result.exit_code;
+    this.durationMs = result.duration_ms;
+    this.jobId = result.job_id;
+    this.status = result.status;
+    this.truncated = result.truncated;
+    this.violations = result.violations;
+    this.artifacts = result.artifacts ?? [];
+    this.receipt = evidence.receipt;
+    this.isolation = evidence.isolation;
+    this.jsonValue = jsonValue;
+  }
+
+  get duration(): number | null {
+    return this.durationMs === null ? null : this.durationMs / 1_000;
+  }
+
+  raiseForStatus(): this {
+    if (this.status !== "succeeded") throw new RookholdExecutionError(this);
+    return this;
+  }
+
+  /** Python-compatible spelling for shared examples and generated bindings. */
+  raise_for_status(): this {
+    return this.raiseForStatus();
+  }
 }
 
 export interface JobPage {
@@ -373,6 +452,12 @@ export interface LimitCapabilities {
   output_record_bytes_max: number;
   code_bytes_max: number;
   stdin_bytes_max: number;
+  input_files_max: number;
+  input_file_bytes_max: number;
+  input_bytes_max: number;
+  output_files_max: number;
+  output_file_bytes_max: number;
+  output_bytes_max: number;
 }
 
 export interface FeatureCapabilities {
@@ -399,6 +484,7 @@ export interface Capabilities {
   limits: LimitCapabilities;
   features: FeatureCapabilities;
   attestations: AttestationCapabilities;
+  runtime_packs: string[];
 }
 
 export interface AttestationPublicKey {
@@ -437,6 +523,9 @@ export interface SubmitOptions extends RequestOptions {
   stdin?: string | undefined;
   limits?: Limits | undefined;
   requirements?: JobRequirements | undefined;
+  files?: JobFile[] | undefined;
+  outputs?: string[] | undefined;
+  runtime?: string | undefined;
   /**
    * Stable key for safely reconciling an ambiguously acknowledged submission.
    * The value must contain 1-128 visible ASCII bytes.
@@ -448,6 +537,23 @@ export interface SubmitOptions extends RequestOptions {
    * Enable this only when the target server enforces submission idempotency.
    */
   retryAmbiguous?: boolean | undefined;
+}
+
+export interface RunRequest extends SubmitOptions {
+  language: Language | (string & {});
+  code: string;
+  /** End-to-end wait budget. Defaults to 60 seconds. */
+  waitTimeoutMs?: number | undefined;
+}
+
+export interface RunJsonRequest extends Omit<RunRequest, "stdin"> {
+  input: unknown;
+}
+
+export interface FromEnvOptions extends ClientOptions {
+  env?: Readonly<Record<string, string | undefined>> | undefined;
+  baseUrl?: string | undefined;
+  apiKey?: string | undefined;
 }
 
 export interface ListOptions extends RequestOptions {
@@ -530,6 +636,19 @@ export class RookholdError extends Error {
     this.retryAfterMs = init.retryAfterMs;
     this.idempotencyKey = init.idempotencyKey;
     this.cause = init.cause;
+  }
+}
+
+export class RookholdExecutionError extends RookholdError {
+  readonly result: RunResult;
+
+  constructor(result: RunResult) {
+    super(`job ${result.jobId} finished with status ${result.status}`, {
+      code: "execution_failed",
+      retryable: false,
+    });
+    this.name = "RookholdExecutionError";
+    this.result = result;
   }
 }
 
@@ -717,6 +836,30 @@ export class Rookhold {
     return this.#apiKey;
   }
 
+  static fromEnv(options: FromEnvOptions = {}): Rookhold {
+    const processEnv = (
+      globalThis as typeof globalThis & {
+        process?: { env?: Readonly<Record<string, string | undefined>> };
+      }
+    ).process?.env;
+    const env = options.env ?? processEnv ?? {};
+    const compatible = (primary: string, legacy: string, fallback = ""): string => {
+      const current = env[primary];
+      const old = env[legacy];
+      if (current && old && current !== old) {
+        throw new TypeError(`${primary} conflicts with ${legacy}`);
+      }
+      return current || old || fallback;
+    };
+    const baseUrl =
+      options.baseUrl ??
+      compatible("ROOKHOLD_BASE_URL", "COOP_BASE_URL", "http://127.0.0.1:7300");
+    const apiKey = options.apiKey ?? compatible("ROOKHOLD_API_KEY", "COOP_API_KEY");
+    if (!apiKey) throw new TypeError("ROOKHOLD_API_KEY is required");
+    const { env: _env, baseUrl: _baseUrl, apiKey: _apiKey, ...clientOptions } = options;
+    return new Rookhold(baseUrl, apiKey, clientOptions);
+  }
+
   constructor(baseUrl: string, apiKey: string, options: ClientOptions = {}) {
     const parsed = new URL(baseUrl);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
@@ -804,8 +947,8 @@ export class Rookhold {
             Accept: "application/json",
             Authorization: `Bearer ${this.#apiKey}`,
             ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-            "X-Rookhold-Client": "typescript/0.7.1",
-            "X-Coop-Client": "typescript/0.7.1",
+            "X-Rookhold-Client": "typescript/0.8.0",
+            "X-Coop-Client": "typescript/0.8.0",
             ...policy.headers,
           },
           ...(serializedBody !== undefined ? { body: serializedBody } : {}),
@@ -911,8 +1054,8 @@ export class Rookhold {
           headers: {
             Accept: accept,
             Authorization: `Bearer ${this.#apiKey}`,
-            "X-Rookhold-Client": "typescript/0.7.1",
-            "X-Coop-Client": "typescript/0.7.1",
+            "X-Rookhold-Client": "typescript/0.8.0",
+            "X-Coop-Client": "typescript/0.8.0",
           },
         });
       } catch (cause) {
@@ -1069,6 +1212,74 @@ export class Rookhold {
     return (await this.submitResult(language, code, options)).job;
   }
 
+  async run(request: RunRequest): Promise<RunResult> {
+    const {
+      language,
+      code,
+      waitTimeoutMs = 60_000,
+      idempotencyKey = generatedIdempotencyKey(),
+      ...options
+    } = request;
+    const submitted = await this.submitResult(language, code, {
+      ...options,
+      idempotencyKey,
+      retryAmbiguous: true,
+    });
+    const result = await this.result(
+      submitted.job.job_id,
+      waitTimeoutMs,
+      options.signal,
+    );
+    const detail = await this.get(submitted.job.job_id, {
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+    });
+    return new RunResult(result, {
+      receipt: detail.receipt,
+      isolation:
+        detail.receipt?.isolation_class ??
+        detail.execution_policy.isolation_class ??
+        null,
+    });
+  }
+
+  async runJson(request: RunJsonRequest): Promise<RunResult> {
+    const { input, ...runRequest } = request;
+    let stdin: string;
+    try {
+      stdin = JSON.stringify(input);
+    } catch (cause) {
+      throw new RookholdError("input was not JSON serializable", {
+        code: "invalid_request",
+        cause,
+      });
+    }
+    const result = await this.run({ ...runRequest, stdin });
+    result.raiseForStatus();
+    try {
+      return new RunResult(
+        {
+          job_id: result.jobId,
+          status: result.status,
+          exit_code: result.exitCode,
+          duration_ms: result.durationMs,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          truncated: result.truncated,
+          violations: result.violations,
+        },
+        { receipt: result.receipt, isolation: result.isolation },
+        JSON.parse(result.stdout) as unknown,
+      );
+    } catch (cause) {
+      if (cause instanceof RookholdError) throw cause;
+      throw new RookholdError("job stdout was not valid JSON", {
+        code: "invalid_json_output",
+        cause,
+      });
+    }
+  }
+
   async submitResult(
     language: Language | (string & {}),
     code: string,
@@ -1080,12 +1291,18 @@ export class Rookhold {
       stdin,
       limits,
       requirements,
+      files,
+      outputs,
+      runtime,
       retryAmbiguous = false,
     } = options;
     const spec: JobSpec = { language, code };
     if (stdin !== undefined) spec.stdin = stdin;
     if (limits !== undefined) spec.limits = limits;
     if (requirements !== undefined) spec.requirements = requirements;
+    if (files !== undefined) spec.files = files;
+    if (outputs !== undefined) spec.outputs = outputs;
+    if (runtime !== undefined) spec.runtime = runtime;
     const idempotencyKey =
       options.idempotencyKey === undefined
         ? retryAmbiguous
@@ -1408,6 +1625,7 @@ export class Rookhold {
     const stdout: string[] = [];
     const stderr: string[] = [];
     const violations: Record<string, unknown>[] = [];
+    const artifacts: ArtifactResult[] = [];
     let truncated = false;
     let after: number | undefined;
     let terminalEventSeen = false;
@@ -1442,6 +1660,7 @@ export class Rookhold {
         else if (event.kind === "stderr") stderr.push(line);
         else if (event.kind === "truncated") truncated = true;
         else if (event.kind === "violation") violations.push(event.data);
+        else if (event.kind === "artifact") artifacts.push(event.data as unknown as ArtifactResult);
         if (event.kind === "finished" || isTerminal(event.data.status)) {
           terminalEventSeen = true;
         }
@@ -1486,6 +1705,7 @@ export class Rookhold {
       stderr: stderr.join("\n"),
       truncated,
       violations,
+      artifacts,
     };
   }
 

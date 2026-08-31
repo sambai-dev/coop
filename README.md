@@ -1,31 +1,75 @@
-<div align="center">
-
 # Rookhold
 
-### Give your AI agent a controlled place to run code
-
-Rookhold runs short Python, Node.js, and Bash jobs in a separate service, applies
-the limits you choose, and gives you a clear record of what happened.
+Run short Python, Node, and Bash jobs with hard limits, live output, and a
+verifiable execution receipt.
 
 [![CI](https://github.com/sambai-dev/rookhold/actions/workflows/ci.yml/badge.svg)](https://github.com/sambai-dev/rookhold/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/sambai-dev/rookhold)](https://github.com/sambai-dev/rookhold/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![No Rust required](https://img.shields.io/badge/quick_start-no_Rust_required-198754.svg)](#try-rookhold-in-five-minutes)
+[![PyPI](https://img.shields.io/pypi/v/rookhold)](https://pypi.org/project/rookhold/)
+[![npm](https://img.shields.io/npm/v/rookhold)](https://www.npmjs.com/package/rookhold)
 
-[Try it](#try-rookhold-in-five-minutes) ·
-[How it works](#what-rookhold-does) ·
-[Agent integrations](#agent-and-harness-integration) ·
-[Production](#production-on-a-dedicated-linux-x86_64-vm) ·
-[Documentation](#documentation)
+```console
+$ rookhold run python 'print(6 * 7)'
+42
 
-</div>
+status       succeeded
+network      disabled
+isolation    gvisor-application-kernel
+receipt      saved to .rookhold/runs/019…/receipt.json
+```
 
-[![Rookhold CLI authenticating, listing the live MCP tools, and running Python to a bounded result](docs/assets/rookhold-cli-mcp-demo.gif)](docs/assets/rookhold-cli-mcp-demo.mp4)
+Install the SDK normally:
 
-The recording uses the real `rookhold-cli` against a local v0.7 server: it
-authenticates, initializes `rookhold-mcp`, lists the four live tools, submits
-Python with the configured minimum isolation, and renders the bounded result.
-Select it for the MP4.
+```bash
+pip install rookhold
+npm install rookhold
+```
+
+```python
+from rookhold import Rookhold
+
+result = Rookhold.from_env().run("python", "print(6 * 7)")
+print(result.stdout)
+```
+
+Use Rookhold when an agent or user supplies short-lived code and you need it
+bounded, cancellable, and inspectable. It is not a persistent development
+workspace, browser sandbox, remote IDE, or general-purpose container platform.
+
+[Quickstart](https://sambai-dev.github.io/rookhold/getting-started/quickstart) ·
+[Python](https://sambai-dev.github.io/rookhold/use/python) ·
+[TypeScript](https://sambai-dev.github.io/rookhold/use/typescript) ·
+[CLI](https://sambai-dev.github.io/rookhold/use/cli) ·
+[MCP](https://sambai-dev.github.io/rookhold/use/mcp) ·
+[Recipes](https://sambai-dev.github.io/rookhold/use/recipes) ·
+[Self-hosting](https://sambai-dev.github.io/rookhold/deployment) ·
+[Security model](https://sambai-dev.github.io/rookhold/security-boundary) ·
+[API](https://sambai-dev.github.io/rookhold/api)
+
+> [!WARNING]
+> With no configured endpoint, `rookhold run` manages an unisolated local
+> service for trusted code and reports `isolation: none` and `network: host`.
+> Use a dedicated Linux gVisor service for untrusted code.
+
+The memorable failure case is deliberate:
+
+```console
+$ rookhold run python 'while True: pass' --wall-seconds 2
+Job terminated after 2.00s
+
+status       timed_out
+wall limit   2s — enforced
+network      disabled
+isolation    gvisor-application-kernel
+receipt      saved to .rookhold/runs/019…/receipt.json
+```
+
+Copyable applications live in [examples](examples/) and the forkable
+[Next.js](templates/nextjs-code-runner/) and
+[FastAPI](templates/fastapi-code-runner/) starters.
+
+[![Rookhold terminating an infinite Python loop after two seconds and saving the execution receipt](docs/assets/rookhold-cli-mcp-demo.gif)](docs/assets/rookhold-cli-mcp-demo.mp4)
 
 ## What Rookhold does
 
@@ -49,9 +93,9 @@ runs the MCP server for Claude Code, OpenCode, and other agent CLIs.
 
 | Your computer | Single-file CLI |
 |---|---|
-| Windows, 64-bit | [`rookhold-cli-x86_64-pc-windows-msvc.exe`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-pc-windows-msvc.exe) |
-| Mac with Apple silicon | [`rookhold-cli-aarch64-apple-darwin`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-aarch64-apple-darwin) |
-| Linux x86_64 | [`rookhold-cli-x86_64-unknown-linux-gnu`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-unknown-linux-gnu) |
+| Windows, 64-bit | [`rookhold-cli-x86_64-pc-windows-msvc.exe`](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-pc-windows-msvc.exe) |
+| Mac with Apple silicon | [`rookhold-cli-aarch64-apple-darwin`](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-aarch64-apple-darwin) |
+| Linux x86_64 | [`rookhold-cli-x86_64-unknown-linux-gnu`](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-unknown-linux-gnu) |
 
 Run it normally for the interactive CLI. Register the same path plus the
 `mcp-server` argument in an MCP host. On macOS or Linux, mark the download
@@ -59,10 +103,11 @@ executable once with `chmod +x ./rookhold-cli-*`. Rename it to `rookhold-cli`
 (`rookhold-cli.exe` on Windows) and place it on `PATH` for the copy-ready agent
 configurations to work unchanged.
 
-## Try Rookhold in five minutes
+## Keep the local development service running
 
-This path uses a prebuilt app. You do not need Rust, a source checkout, or an
-understanding of Rookhold's internals.
+Use `rookhold run` for one job. Use this longer path only when you want the API
+and dashboard to remain available between runs. You do not need Rust or a
+source checkout.
 
 > [!WARNING]
 > This quick start is an **unisolated local demo for code you trust**. Keep it on
@@ -70,14 +115,14 @@ understanding of Rookhold's internals.
 
 ### 1. Download the app
 
-Open the [v0.7.1 release](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1),
+Open the [v0.8.0 release](https://github.com/sambai-dev/rookhold/releases/tag/v0.8.0),
 then choose the archive for your computer:
 
 | Your computer | Download the complete app bundle |
 |---|---|
-| Windows, 64-bit | [`rookhold-x86_64-pc-windows-msvc.zip`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-x86_64-pc-windows-msvc.zip) |
-| Mac with Apple silicon | [`rookhold-aarch64-apple-darwin.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-aarch64-apple-darwin.tar.gz) |
-| Linux x86_64 | [`rookhold-x86_64-unknown-linux-musl.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-x86_64-unknown-linux-musl.tar.gz) |
+| Windows, 64-bit | [`rookhold-x86_64-pc-windows-msvc.zip`](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-pc-windows-msvc.zip) |
+| Mac with Apple silicon | [`rookhold-aarch64-apple-darwin.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-aarch64-apple-darwin.tar.gz) |
+| Linux x86_64 | [`rookhold-x86_64-unknown-linux-musl.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-unknown-linux-musl.tar.gz) |
 
 Extract the archive. It contains the Rookhold service, `rookhold-cli`,
 `rookhold-mcp`, verification tools, and the copy-ready agent configurations.
@@ -162,20 +207,21 @@ the local process is **not sandboxed**.
 
 ## Connect an AI agent
 
-Rookhold works with Claude Code, OpenCode, Codex, Hermes, OpenClaw, and other
-MCP-compatible CLIs through `rookhold-cli mcp-server`.
+Rookhold release-checks Claude Code, OpenCode, and Hermes through
+`rookhold-cli mcp-server`. Other MCP hosts can use the generic stdio contract.
 
 1. Start Rookhold using the demo above or the production deployment.
 2. Put the single-file `rookhold-cli` download in a stable path or keep the
    extracted app folder where it is.
-3. Copy the configuration for your agent, set its command to that file with
-   `mcp-server` as the argument, and restart the agent.
+3. Run `rookhold setup claude-code`, `rookhold setup opencode`, or
+   `rookhold setup hermes`. Review the diff and restart the host.
 
 Use the copy-ready guides for [Claude Code](integrations/claude-code/mcp.json),
 [OpenCode](integrations/opencode/opencode.snippet.json),
-[Hermes](integrations/hermes/config.snippet.yaml),
-[OpenClaw](integrations/openclaw/openclaw.snippet.json5), or a
-[generic MCP host](integrations/README.md#generic-mcp-host). The detailed,
+[Hermes](integrations/hermes/config.snippet.yaml), or a
+[generic MCP host](integrations/README.md#generic-mcp-host). OpenClaw and other
+community host examples remain available but are not part of the release
+compatibility matrix. The detailed,
 fail-closed installation path is in [Agent and harness integration](#agent-and-harness-integration).
 
 ## Is Rookhold right for my task?
@@ -203,7 +249,7 @@ complete every deployment check.
 > accepting untrusted jobs.
 
 > [!NOTE]
-> **Current release:** [v0.7.1](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1).
+> **Current release:** [v0.8.0](https://github.com/sambai-dev/rookhold/releases/tag/v0.8.0).
 > Its exact eleven-asset set includes checksums, a combined artifact-scoped SPDX
 > SBOM, GitHub SBOM/provenance attestations, and the offline `rookhold-verify`
 > verifier inside each platform archive. Older release lines are unsupported
@@ -246,12 +292,15 @@ you → AI agent or app → rookhold-cli mcp-server or SDK → Rookhold → shor
 
 ### What ships
 
+- a one-command `rookhold run` path with live output, direct limit summaries, and saved receipts
 - standalone `rookhold-cli` and `rookhold-mcp` executables in every platform archive—no Python installation required
 - one authenticated HTTP API for submit, inspect, cancel, wait, and event history
 - live WebSocket output with one-use stream tickets and persisted history before live frames
 - scoped indexed credentials or RFC 9068 JWTs, with legacy per-tenant keys retained for migration
 - fair per-tenant admission, aggregate memory limits, logical storage quotas, and a disk-reserve watermark
 - server-clamped wall-time, CPU, memory, process, and file limits
+- bounded per-job input files, exact requested output artifacts, safe paths, and receipt hashes
+- versioned stdlib/base runtime-pack names bound to runtime and rootfs digests
 - a per-job gVisor OCI provider plus the Linux x86_64 namespace fallback, both with networking denied
 - an operator dashboard served from the binary
 - a SQLite schema-v4 job/evidence store with configurable retention, idempotent submission, and per-job hash chains
@@ -272,11 +321,11 @@ The event chain remains server-verifiable operational evidence. A signed envelop
 | Do I need an AI model? | **No.** Any application can call Rookhold through HTTP or an SDK. |
 | Can I use Claude Code, OpenCode, Codex, Hermes, or OpenClaw? | **Yes.** They can all launch the included stdio MCP adapter. |
 | Does Rookhold replace my agent's normal workspace? | **No.** Keep repository editing in the workspace and send short execution jobs to Rookhold. |
-| Is the five-minute demo safe for untrusted code? | **No.** It is loopback-only and unisolated. Use the guarded production deployment for mutually untrusted jobs. |
+| Is the automatic local run safe for untrusted code? | **No.** It is loopback-only and unisolated. Use the guarded production deployment for mutually untrusted jobs. |
 
 ## Build from source (optional)
 
-Most users should use the [prebuilt quick start](#try-rookhold-in-five-minutes).
+Most users should use the [one-command quickstart](https://sambai-dev.github.io/rookhold/getting-started/quickstart).
 This section is only for contributors or operators who specifically want to
 compile Rookhold themselves. Install Rust 1.98 and the runtimes you intend to use:
 
@@ -629,17 +678,23 @@ Runnable starting templates for systemd, its environment file, and Caddy live un
 
 ## Contributing
 
-Issues and focused pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the [contribution lifecycle](docs/contribution-lifecycle.md) for declared scope, RED/adversarial evidence, exact-head validation, hostile-suite requirements, and precise implementation/review/integration status.
+Questions and showcases belong in [Discussions](https://github.com/sambai-dev/rookhold/discussions). Bugs and scoped work belong in [Issues](https://github.com/sambai-dev/rookhold/issues). [CONTRIBUTING.md](CONTRIBUTING.md) separates docs/examples, SDK/API, and security-core changes so each contribution runs checks proportional to its risk.
 
 ## Project direction
 
-Rookhold now has the hardened-runtime, signed-evidence, scoped-identity, MCP 2026,
-and bounded-observability foundations selected by the v0.4 research. The next
-credible steps are external KMS/HSM signing and key history, transparency
-anchoring, a destination-bound credential broker for tightly controlled
-egress, and optional hardware/confidential-VM providers. Persistent workspaces,
-general browsers/PTYs, arbitrary images, and multi-node scheduling remain
-deliberate non-goals until their durability and trust boundaries are designed.
+Roadmap order follows developer outcomes:
+
+1. **Installable:** public PyPI and npm packages, one-command local run, plain-language checks, executable quickstarts, and Discussions.
+2. **Embeddable:** one-call Python and TypeScript APIs, structured results, maintained MCP setup, recipes, and forkable starters.
+3. **Useful for real jobs:** bounded files, returned artifacts, immutable runtime packs, and receipt-first verification.
+4. **Community-tested:** independent projects, external contributors, compatibility policy, and APIs stabilized from observed use.
+
+External KMS/HSM custody, transparency anchoring, credential brokerage,
+confidential VMs, cloud control planes, broad Kubernetes automation, persistent
+workspaces, browsers, desktops, billing, SSO, and large RBAC systems are paused
+until real users pull Rookhold there. Minor releases package meaningful
+developer outcomes; patch releases fix defects; uncertain contracts use
+prereleases. A 1.0 requires external use, not internal completeness.
 
 ## License
 

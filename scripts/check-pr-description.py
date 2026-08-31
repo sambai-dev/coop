@@ -9,13 +9,17 @@ import re
 import sys
 from pathlib import Path
 
-REQUIRED_SECTIONS = (
+COMMON_SECTIONS = (
+    "Contribution tier",
     "Declared scope",
+    "Changes",
+    "Validation",
+)
+
+TIER_C_SECTIONS = (
     "Root invariant",
     "Reproduction and RED evidence",
-    "Changes",
     "Adversarial coverage",
-    "Validation on final head",
     "Non-goals and remaining work",
     "Safety and compatibility",
     "Completion state",
@@ -60,7 +64,17 @@ def field_value(section: str, label: str) -> str | None:
 
 def validate_body(body: str) -> list[str]:
     parsed, errors = sections(body)
-    for name in REQUIRED_SECTIONS:
+    tier_text = meaningful(parsed.get("Contribution tier", ""))
+    tier_match = re.search(r"\btier\s+([abc])\b", tier_text, re.IGNORECASE)
+    tier = tier_match.group(1).upper() if tier_match else None
+    if tier is None:
+        errors.append("Contribution tier must state Tier A, Tier B, or Tier C")
+    required = list(COMMON_SECTIONS)
+    if tier == "B":
+        required.append("Safety and compatibility")
+    elif tier == "C":
+        required.extend(TIER_C_SECTIONS)
+    for name in required:
         if name not in parsed:
             errors.append(f"missing section: {name}")
             continue
@@ -68,7 +82,7 @@ def validate_body(body: str) -> list[str]:
         if len(value) < 16:
             errors.append(f"section has no concrete evidence: {name}")
 
-    red = meaningful(parsed.get("Reproduction and RED evidence", ""))
+    red = meaningful(parsed.get("Reproduction and RED evidence", "")) if tier == "C" else ""
     if red and not re.search(
         r"\b(red|fail(?:ed|s|ing)?|not applicable because)\b", red, re.IGNORECASE
     ):
@@ -77,7 +91,7 @@ def validate_body(body: str) -> list[str]:
             "explain 'Not applicable because ...'"
         )
 
-    adversarial = meaningful(parsed.get("Adversarial coverage", ""))
+    adversarial = meaningful(parsed.get("Adversarial coverage", "")) if tier == "C" else ""
     if adversarial and not (
         re.search(r"\[[xX]\]", adversarial)
         or re.search(r"not applicable because", adversarial, re.IGNORECASE)
@@ -87,16 +101,16 @@ def validate_body(body: str) -> list[str]:
             "explain 'Not applicable because ...'"
         )
 
-    exact_head = meaningful(parsed.get("Validation on final head", ""))
+    exact_head = meaningful(parsed.get("Validation", "")) if tier == "C" else ""
     if exact_head:
         head = field_value(exact_head, "Head")
         checks = field_value(exact_head, "Checks")
         if head is None or not re.search(r"\b[0-9a-f]{7,40}\b", head, re.IGNORECASE):
-            errors.append("Validation on final head must include 'Head: <commit SHA>'")
+            errors.append("Tier C validation must include 'Head: <commit SHA>'")
         if checks is None or len(checks) < 8:
-            errors.append("Validation on final head must include concrete 'Checks:'")
+            errors.append("Tier C validation must include concrete 'Checks:'")
 
-    completion = meaningful(parsed.get("Completion state", ""))
+    completion = meaningful(parsed.get("Completion state", "")) if tier == "C" else ""
     if completion:
         for label in COMPLETION_LABELS:
             value = field_value(completion, label)

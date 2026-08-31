@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+mod cli;
+
 const HTTP_DRAIN_GRACE: Duration = Duration::from_secs(10);
 const WORKER_DRAIN_GRACE: Duration = Duration::from_secs(30);
 const RECOVERY_PAGE_SIZE: i64 = 256;
@@ -25,9 +27,18 @@ enum RuntimeStop {
 
 #[tokio::main]
 async fn main() {
+    let dispatch = match cli::dispatch().await {
+        Ok(dispatch) => dispatch,
+        Err(error) => {
+            eprintln!("rookhold: {error}");
+            std::process::exit(1);
+        }
+    };
+    if dispatch == cli::Dispatch::Exit {
+        return;
+    }
     init_tracing();
-
-    if let Err(error) = run().await {
+    if let Err(error) = run_server().await {
         tracing::error!(%error, "Rookhold terminated");
         std::process::exit(1);
     }
@@ -90,7 +101,7 @@ fn select_log_format(configured: Option<&str>, production: bool) -> (LogFormat, 
     }
 }
 
-async fn run() -> Result<(), String> {
+async fn run_server() -> Result<(), String> {
     let cfg = Config::from_env()?;
     let addr = cfg.addr.clone();
 

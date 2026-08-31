@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Rookhold CLI and MCP recording</title>
+  <title>Rookhold bounded execution recording</title>
   <style>
     :root {
       color-scheme: dark;
@@ -43,9 +43,9 @@
   </style>
 </head>
 <body>
-  <main class="stage" aria-label="Recording of the real Rookhold terminal client and MCP catalog">
+  <main class="stage" aria-label="Recording of Rookhold terminating a bounded infinite loop and saving its receipt">
     <div class="rail" aria-hidden="true"></div>
-    <div class="meta"><strong>Rookhold / terminal</strong><span>live local canary · v0.7.1</span></div>
+    <div class="meta"><strong>Rookhold / bounded run</strong><span>gVisor service · v0.8.0</span></div>
     <section class="hero">
       <pre class="rook" aria-hidden="true">    ██  ██
   ██████████
@@ -54,33 +54,29 @@
     ██████
   ██████████</pre>
       <div>
-        <h1>Rookhold CLI v0.7.1</h1>
-        <p class="sub">Controlled execution for AI agents</p>
+        <h1>Rookhold CLI v0.8.0</h1>
+        <p class="sub">Short jobs. Hard limits. Receipts.</p>
         <dl class="facts">
-          <dt>Endpoint</dt><dd>http://127.0.0.1:7300</dd>
-          <dt>Tenant</dt><dd>local</dd>
-          <dt>Runtime</dt><dd>off · isolation none</dd>
-          <dt>MCP</dt><dd>4 tools ready</dd>
+          <dt>Endpoint</dt><dd>https://executor.internal</dd>
+          <dt>Tenant</dt><dd>demo</dd>
+          <dt>Runtime</dt><dd>gVisor application kernel</dd>
+          <dt>Network</dt><dd>blocked</dd>
         </dl>
       </div>
     </section>
     <section class="terminal">
       <div class="bar"><span>rookhold-cli</span><span class="ready">● connected</span></div>
       <div class="screen">
-        <div class="line warning">local demo · unisolated · submit trusted code only</div>
+        <div class="line"><span class="prompt">$ </span><span class="strong" id="runCommand"></span><span class="cursor" id="cursor"></span></div>
         <div class="spacer"></div>
-        <div class="line"><span class="prompt">rookhold › </span><span class="strong" id="mcpCommand"></span><span class="cursor" id="cursorA"></span></div>
-        <div class="line accent" id="mcpTitle"></div>
-        <div class="line indent" id="tool1"></div>
-        <div class="line indent" id="tool2"></div>
-        <div class="line indent" id="tool3"></div>
-        <div class="line indent" id="tool4"></div>
-        <div class="line muted" id="policy"></div>
-        <div class="line"><span class="prompt" id="promptB"></span><span class="strong" id="runCommand"></span><span class="cursor" id="cursorB"></span></div>
-        <div class="line" id="accepted"></div>
-        <div class="line success" id="result"></div>
-        <div class="line accent" id="stdoutLabel"></div>
-        <div class="line indent" id="stdout"></div>
+        <div class="line warning" id="terminated"></div>
+        <div class="spacer"></div>
+        <div class="line" id="status"></div>
+        <div class="line" id="duration"></div>
+        <div class="line" id="wall"></div>
+        <div class="line" id="network"></div>
+        <div class="line" id="isolation"></div>
+        <div class="line success" id="receipt"></div>
       </div>
     </section>
   </main>
@@ -95,19 +91,16 @@
     };
     function render(time) {
       const t = Math.max(0, Math.min(duration, time));
-      byId("mcpCommand").textContent = reveal("/mcp", .35, 1.05, t);
-      byId("mcpTitle").textContent = t >= 1.2 ? "  rookhold-mcp" : "";
-      const tools = ["rookhold_run_code", "rookhold_job_result", "rookhold_job_events", "rookhold_cancel_job"];
-      tools.forEach((tool, index) => { byId(`tool${index + 1}`).textContent = t >= 1.45 + index * .22 ? `● ${tool}` : ""; });
-      byId("policy").textContent = t >= 2.45 ? "  policy minimum: none" : "";
-      byId("promptB").textContent = t >= 2.85 ? "rookhold › " : "";
-      byId("runCommand").textContent = reveal('/run python "print(6 * 7)"', 3.0, 4.6, t);
-      byId("accepted").textContent = t >= 4.85 ? "  accepted · job 01a05621…2b8c · waiting up to 60s" : "";
-      byId("result").textContent = t >= 6.0 ? "  ✓ succeeded · exit 0 · 127 ms" : "";
-      byId("stdoutLabel").textContent = t >= 6.55 ? "  stdout" : "";
-      byId("stdout").textContent = t >= 6.9 ? "42" : "";
-      byId("cursorA").style.opacity = t < 1.2 && Math.floor(t * 4) % 2 === 0 ? "1" : "0";
-      byId("cursorB").style.opacity = t >= 2.85 && t < 4.85 && Math.floor(t * 4) % 2 === 0 ? "1" : "0";
+      const command = "rookhold run python 'while True: pass' --wall-seconds 2";
+      byId("runCommand").textContent = reveal(command, .35, 2.55, t);
+      byId("terminated").textContent = t >= 4.8 ? "Job terminated after 2.00s" : "";
+      byId("status").textContent = t >= 5.2 ? "status       timed_out" : "";
+      byId("duration").textContent = t >= 5.55 ? "duration     2000ms" : "";
+      byId("wall").textContent = t >= 5.9 ? "wall limit   2s — enforced" : "";
+      byId("network").textContent = t >= 6.25 ? "network      disabled" : "";
+      byId("isolation").textContent = t >= 6.6 ? "isolation    gvisor-application-kernel" : "";
+      byId("receipt").textContent = t >= 7.05 ? "receipt      saved to .rookhold/runs/019…/receipt.json" : "";
+      byId("cursor").style.opacity = t < 2.8 && Math.floor(t * 4) % 2 === 0 ? "1" : "0";
       window.__ready = true;
     }
     if (queryTime !== null) render(Number(queryTime));

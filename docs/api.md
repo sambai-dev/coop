@@ -23,6 +23,9 @@ Rookhold uses plain HTTP/1.1. Put it behind a TLS proxy for any connection that 
   "language": "python",
   "code": "print('hello')",
   "stdin": "optional input\n",
+  "files": [{"path": "input/data.csv", "content_base64": "YSxiXG4xLDJcbiJ9"}],
+  "outputs": ["output/report.json"],
+  "runtime": "python:bookworm-20260826-stdlib",
   "requirements": {
     "minimum_isolation": "linux-shared-kernel"
   },
@@ -56,7 +59,19 @@ confidential-vm`; a stronger observed class satisfies a weaker minimum. The
 minimum of `none`). An unsatisfied minimum returns
 `422 minimum_isolation_unsatisfied` without creating a job.
 
-Source and stdin are each capped at 1 MiB after JSON decoding. The encoded request body is capped at 16 MiB so worst-case valid JSON escaping still fits without allowing unbounded buffering. Body reads have a 30-second deadline and global/per-tenant active-read caps; capacity failures are structured retryable `429`/`503` responses. Stored/emitted stdout and stderr are independently capped at 1 MiB and 10,000 records, with any single record split at 16 KiB. The executor continues draining after the storage cap so a noisy child cannot block supervision; the event history and receipt record truncation and observed byte counts.
+Source and stdin are each capped at 1 MiB after JSON decoding. A job accepts at
+most 32 input files, 2 MiB per file and 4 MiB total, plus at most 32 requested
+outputs under the same per-file and total ceilings. Paths must be relative
+under `input/` or `output/`; absolute paths, traversal, backslashes, duplicates,
+non-regular output files, and symlink traversal are rejected. The encoded
+request body is capped at 24 MiB so worst-case valid JSON escaping and base64
+still fit without allowing unbounded buffering. Body reads have a 30-second
+deadline and global/per-tenant active-read caps; capacity failures are
+structured retryable `429`/`503` responses. Stored/emitted stdout and stderr
+are independently capped at 1 MiB and 10,000 records, with any single record
+split at 16 KiB. The executor continues draining after the storage cap so a
+noisy child cannot block supervision; the event history and receipt record
+truncation and observed byte counts.
 
 A successful submission returns `201 Created` with the job ID, initial status,
 relative stream/history URLs, `Location: /v1/jobs/{id}`, and an
@@ -116,7 +131,13 @@ Once terminal, a job does not return to a running state.
   "stdout": "hello",
   "stderr": "",
   "truncated": false,
-  "violations": []
+  "violations": [],
+  "artifacts": [{
+    "path": "output/report.json",
+    "content_base64": "eyJvayI6dHJ1ZX0=",
+    "size_bytes": 11,
+    "sha256": "…"
+  }]
 }
 ```
 
@@ -132,7 +153,9 @@ A response cut short by a transport boundary does not satisfy its declared `Cont
 
 `GET /v1/jobs/{id}/replay?after=SEQ&limit=N` returns an `{events,next_cursor}` page in sequence order. The cursor is exclusive. The endpoint name means *replay stored events*, not rerun the program. Consumers should preserve unknown event kinds and hash metadata for forward compatibility.
 
-Common event kinds include lifecycle transitions, `stdout`, `stderr`, `violation`, `truncated`, and `finished`. Use the sequence field for ordering; do not infer order from client receive time.
+Common event kinds include lifecycle transitions, `stdout`, `stderr`,
+`artifact`, `violation`, `truncated`, and `finished`. Use the sequence field for
+ordering; do not infer order from client receive time.
 
 ### Receipts and hash chains
 
@@ -141,7 +164,8 @@ Every newly written event carries `hash_version: 1`, `prev_hash`, and `event_has
 The terminal receipt records code/stdin/policy hashes, requested and effective
 limits, backend/seccomp/network posture, private-rootfs and dedicated-bootstrap
 facts, lifecycle and outcome fields, resource observations when available,
-output evidence, and the final event-chain metadata. `bootstrap_ready` is the
+output evidence, input/output artifact hashes, the selected runtime-pack name,
+and the final event-chain metadata. `bootstrap_ready` is the
 executor-observed readiness bit. When it is `false`, the isolation facts are
 false, `network_allowed`/`networking` are null, `effective_limits` contains
 null values, and every `limit_enforcement` flag is false. When executor
@@ -233,8 +257,10 @@ Clients must handle:
 `GET /v1/jobs?limit=N&cursor=CURSOR&status=STATUS&language=LANGUAGE` returns `{items,next_cursor}` for the authenticated tenant. Cursors are opaque; pass them through unchanged.
 
 `GET /v1/capabilities` describes supported languages, the provider's
-`isolation_class`, per-job ceilings, the aggregate `concurrent_mem_mb_max`, and
-server features, including signer metadata when enabled. `GET /v1/whoami`
+`isolation_class`, per-job and artifact ceilings, the aggregate
+`concurrent_mem_mb_max`, and versioned `runtime_packs` available for an
+isolated provider. It also reports server features and signer metadata when
+enabled. `GET /v1/whoami`
 resolves the authenticated tenant, principal, credential/auth method, scopes,
 and authority expiry. `GET /v1/metrics` exposes tenant-scoped current-job
 metrics. The separate global `/metrics` endpoint is disabled unless
