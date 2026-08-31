@@ -20,11 +20,12 @@ We aim to acknowledge a complete report within 72 hours. Timelines for validatio
 | Version | Security support |
 |---|---|
 | latest `main` | Active development; may include unreleased changes |
-| tagged `0.6.x` releases | Supported |
-| tagged `0.5.x` releases | Unsupported; upgrade to 0.6.x |
-| tagged `0.4.x` releases | Unsupported; upgrade to 0.6.x |
-| tagged `0.3.x` releases | Unsupported; upgrade to 0.6.x |
-| tagged `0.2.x` releases | Unsupported; upgrade to 0.6.x |
+| tagged `0.7.x` releases | Supported |
+| tagged `0.6.x` releases | Unsupported; upgrade to 0.7.x |
+| tagged `0.5.x` releases | Unsupported; upgrade to 0.7.x |
+| tagged `0.4.x` releases | Unsupported; upgrade to 0.7.x |
+| tagged `0.3.x` releases | Unsupported; upgrade to 0.7.x |
+| tagged `0.2.x` releases | Unsupported; upgrade to 0.7.x |
 | `0.1.x` | Unsupported; do not expose to hostile tenants |
 | older versions | Unsupported |
 
@@ -32,7 +33,7 @@ We aim to acknowledge a complete report within 72 hours. Timelines for validatio
 
 ## Boundary summary
 
-Rookhold v0.6 retains three materially different execution modes:
+Rookhold v0.7 retains three materially different execution modes:
 
 - `gvisor`: the guarded production default on Linux x86_64. Every job receives a separate OCI workload under the reviewed, digest-pinned `runsc` application kernel, an immutable private-rootfs manifest, cgroup v2/rlimits, a dedicated OCI init, and denied networking.
 - `namespaces`: a weaker shared-host-kernel Linux x86_64 fallback requiring a private rootfs, cgroup v2, rlimits, the x86_64 seccomp policy, checked privilege drop, and isolated namespaces. Run it only on a dedicated x86_64 VM.

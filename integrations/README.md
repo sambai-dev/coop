@@ -1,7 +1,7 @@
 # Agent integrations
 
 Rookhold ships one universal integration surface: the `rookhold-mcp` stdio server in
-the Python SDK wheel. Hermes, OpenClaw, Codex, Claude Code, and other MCP hosts
+the Python SDK wheel. Claude Code, OpenCode, Codex, Hermes, OpenClaw, and other MCP hosts
 can all launch the same executable. The adapter does not call an LLM and does
 not expose the Rookhold URL or bearer key as model-selectable arguments.
 
@@ -17,7 +17,9 @@ On Windows, the executable is
 path as the MCP `command` when the harness does not inherit the virtual
 environment's `PATH`.
 
-The server exposes four tools:
+The same installed wheel also provides `rookhold-cli`, a human/operator terminal
+for direct runs and evidence inspection. Agent CLIs should launch
+`rookhold-mcp`, which exposes four tools:
 
 | Tool | Purpose |
 |---|---|
@@ -46,6 +48,50 @@ class satisfaction order: gVisor and VM providers satisfy
 a separate branch. Terminal policy and receipt evidence must report a class
 that still satisfies the configured minimum. This avoids imposing
 namespace-specific seccomp/rootfs assertions on gVisor or VM providers.
+
+## Claude Code
+
+Claude Code supports local stdio MCP servers and environment expansion in
+project-scoped `.mcp.json` files. Copy
+[`claude-code/mcp.json`](claude-code/mcp.json) to `.mcp.json` at the project
+root, or merge its `rookhold` entry into an existing file. Set
+`ROOKHOLD_API_KEY` in the environment that launches Claude Code, plus the base
+URL, minimum isolation, and language allowlist appropriate for that project.
+
+Run `claude mcp list` and `claude mcp get rookhold`, then use `/mcp` inside
+Claude Code to confirm the server and four tools. Project-scoped MCP servers
+require Claude Code's trust approval before first use. The current command and
+configuration behavior is documented by
+[Claude Code's official MCP guide](https://code.claude.com/docs/en/mcp).
+
+For a private user-wide registration, Claude Code also supports:
+
+```bash
+claude mcp add --transport stdio --scope user \
+  --env ROOKHOLD_BASE_URL="$ROOKHOLD_BASE_URL" \
+  --env ROOKHOLD_API_KEY="$ROOKHOLD_API_KEY" \
+  --env ROOKHOLD_MCP_MINIMUM_ISOLATION="$ROOKHOLD_MCP_MINIMUM_ISOLATION" \
+  rookhold -- rookhold-mcp
+```
+
+That command records the expanded credential in Claude Code's user
+configuration; prefer `.mcp.json` environment references or your managed
+configuration/secret mechanism when plaintext local config is inappropriate.
+
+## OpenCode
+
+OpenCode v2 runs local MCP servers over stdio from entries below
+`mcp.servers`. Merge
+[`opencode/opencode.snippet.json`](opencode/opencode.snippet.json) into the
+project or user `opencode.json`, export the four referenced `ROOKHOLD_*`
+variables, then start OpenCode normally. The server connects automatically and
+its tools are grouped under the `rookhold` server name by default.
+
+The snippet follows the current
+[OpenCode v2 local-MCP schema](https://opencode.ai/v2/docs/mcp-servers/),
+including its `{env:NAME}` substitution. Set `"codemode": false` on the
+`rookhold` server only if you want the four tools exposed directly rather than
+through OpenCode's default Code Mode.
 
 ## Hermes
 

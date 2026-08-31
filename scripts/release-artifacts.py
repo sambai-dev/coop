@@ -286,6 +286,7 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
         return (
             "rookhold/__init__.py",
             "rookhold/py.typed",
+            "rookhold_cli.py",
             "rookhold_mcp.py",
             "coop/__init__.py",
             "coop/py.typed",
@@ -299,6 +300,7 @@ def required_paths(asset: str, version: str) -> tuple[str, ...]:
             f"{root}/{name}"
             for name in (
                 "rookhold.py",
+                "rookhold_cli.py",
                 "rookhold_mcp.py",
                 "coop.py",
                 "coop_mcp.py",

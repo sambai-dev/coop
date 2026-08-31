@@ -21,7 +21,7 @@ def make_request(base, key, method, path, payload=None, timeout=75, retries=5):
             headers={
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
-                "User-Agent": "rookhold-bench/0.6",
+                "User-Agent": "rookhold-bench/0.7",
             },
         )
         try:

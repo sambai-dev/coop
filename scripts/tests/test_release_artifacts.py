@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[2]
 RELEASE = runpy.run_path(str(ROOT / "scripts" / "release-artifacts.py"))
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 
 def archive_entries(asset: str) -> dict[str, bytes | None]:

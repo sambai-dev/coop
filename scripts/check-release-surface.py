@@ -45,7 +45,7 @@ def toml_string(relative: str, section: str, key: str) -> str:
 
 def check_versions() -> str:
     version = toml_string("Cargo.toml", "workspace.package", "version")
-    require(version == "0.6.0", f"unexpected workspace release version: {version}")
+    require(version == "0.7.0", f"unexpected workspace release version: {version}")
 
     toolchain = toml_string("rust-toolchain.toml", "toolchain", "channel")
     rust_version = toml_string("Cargo.toml", "workspace.package", "rust-version")
@@ -149,6 +149,11 @@ def check_versions() -> str:
     require(
         f'__version__ = "{version}"' in read("sdks/python/rookhold_mcp.py"),
         "Python MCP module version differs from its package metadata",
+    )
+    require(
+        "from rookhold import IsolationClass, Rookhold, RookholdError, __version__"
+        in read("sdks/python/rookhold_cli.py"),
+        "Python CLI does not inherit the SDK release version",
     )
     typescript_source = read("sdks/typescript/rookhold.ts")
     typescript_client_header = f'"X-Rookhold-Client": "typescript/{version}"'
@@ -424,7 +429,7 @@ def check_pins_and_packaging() -> int:
             "python -m twine check",
             "python -m pip install --no-deps --target",
             'PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v',
-            "import coop, coop_mcp, rookhold, rookhold_mcp",
+            "import coop, coop_mcp, rookhold, rookhold_cli, rookhold_mcp",
             "coop_mcp.py",
             "-name 'rookhold_sdk-*.whl'",
             "-name 'rookhold_sdk-*.tar.gz'",
@@ -485,12 +490,33 @@ def check_pins_and_packaging() -> int:
     python_manifest = read("sdks/python/pyproject.toml")
     for required in [
         'requires = ["hatchling==1.27.0"]',
+        'rookhold-cli = "rookhold_cli:main"',
         'rookhold-mcp = "rookhold_mcp:main"',
         'coop-mcp = "coop_mcp:main"',
         '"rookhold.py" = "rookhold/__init__.py"',
+        '"rookhold_cli.py" = "rookhold_cli.py"',
         '"coop_mcp.py" = "coop_mcp.py"',
     ]:
         require(required in python_manifest, f"Python MCP packaging contract missing: {required}")
+    claude_mcp = json.loads(read("integrations/claude-code/mcp.json"))
+    claude_rookhold = claude_mcp.get("mcpServers", {}).get("rookhold", {})
+    require(
+        claude_rookhold.get("type") == "stdio"
+        and claude_rookhold.get("command") == "rookhold-mcp"
+        and "${ROOKHOLD_API_KEY}" in claude_rookhold.get("env", {}).values(),
+        "Claude Code template must launch stdio rookhold-mcp with an environment reference",
+    )
+    opencode_mcp = json.loads(read("integrations/opencode/opencode.snippet.json"))
+    opencode_rookhold = (
+        opencode_mcp.get("mcp", {}).get("servers", {}).get("rookhold", {})
+    )
+    require(
+        opencode_rookhold.get("type") == "local"
+        and opencode_rookhold.get("command") == ["rookhold-mcp"]
+        and "{env:ROOKHOLD_API_KEY}"
+        in opencode_rookhold.get("environment", {}).values(),
+        "OpenCode v2 template must launch local rookhold-mcp with an environment reference",
+    )
     root_license = read("LICENSE")
     for relative in ["sdks/python/LICENSE", "sdks/typescript/LICENSE"]:
         require(

@@ -9,17 +9,17 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.98"
 license = "MIT"
 repository = "https://github.com/sambai-dev/rookhold"
 
 [workspace.dependencies]
-coop-types = { path = "crates/coop-types", version = "0.6.0" }
-coop-store = { path = "crates/coop-store", version = "0.6.0" }
-coop-exec = { path = "crates/coop-exec", version = "0.6.0" }
-coop-attestation = { path = "crates/coop-attestation", version = "0.6.0", default-features = false }
+coop-types = { path = "crates/coop-types", version = "0.7.0" }
+coop-store = { path = "crates/coop-store", version = "0.7.0" }
+coop-exec = { path = "crates/coop-exec", version = "0.7.0" }
+coop-attestation = { path = "crates/coop-attestation", version = "0.7.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

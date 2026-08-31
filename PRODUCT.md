@@ -4,7 +4,7 @@
 
 ## Platform
 
-web
+web, terminal
 
 ## Users
 
@@ -21,15 +21,17 @@ Rookhold is a small self-hosted execution control plane, not an LLM, agent frame
 ## Operating Context
 
 - Trusted applications, agent harnesses, and MCP adapters submit short stateless jobs over HTTP.
-- Operators use the embedded dashboard to connect a tenant credential, create a run, monitor its ordered event stream, cancel eligible work, and inspect result, policy, receipt, and attestation artifacts.
+- Operators use `rookhold-cli` or the embedded dashboard to connect a tenant credential, create a run, monitor its ordered event stream, cancel eligible work, and inspect result, policy, receipt, and attestation artifacts.
+- Claude Code, OpenCode, Codex, Hermes, OpenClaw, and other MCP hosts launch the same `rookhold-mcp` stdio adapter; the host owns the conversation UI while Rookhold owns execution policy and evidence.
 - Local development may use the explicitly unisolated subprocess provider. The guarded Linux x86_64 deployment uses one pinned gVisor workload per job on a dedicated VM.
-- The API and persisted store remain the source of truth; the dashboard is an operator view over those contracts.
+- The API and persisted store remain the source of truth; the terminal client, MCP adapter, and dashboard are views over those contracts.
 
 ## Capabilities and Constraints
 
 - Preserve the existing submit, list, filter, inspect, cancel, live-output, event, result, record, exact artifact download, and copy workflows.
 - Preserve scoped identity and tenant context, the six-class isolation contract, requested-versus-effective policy, output truncation evidence, receipt integrity metadata, and explicit trust warnings.
 - The dashboard is a single dependency-free HTML/CSS/JavaScript document embedded in the Rust server and protected by exact Content Security Policy hashes.
+- The Python package's `rookhold-cli` and `rookhold-mcp` commands use only the standard library and share the typed client contract.
 - No dashboard state may become a competing source of truth or imply that server-provided evidence was independently verified.
 - The operator surface must work with narrow screens, keyboard navigation, zoom/reflow, reduced motion, and high-contrast preferences.
 

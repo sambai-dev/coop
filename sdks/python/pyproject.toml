@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rookhold-sdk"
-version = "0.6.0"
+version = "0.7.0"
 description = "Typed, dependency-free Python client for the Rookhold execution gateway"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -21,6 +21,7 @@ classifiers = [
 dependencies = []
 
 [project.scripts]
+rookhold-cli = "rookhold_cli:main"
 rookhold-mcp = "rookhold_mcp:main"
 coop-mcp = "coop_mcp:main"
 
@@ -44,18 +45,19 @@ bypass-selection = true
 [tool.hatch.build.targets.wheel.force-include]
 "rookhold.py" = "rookhold/__init__.py"
 "py.typed" = "rookhold/py.typed"
+"rookhold_cli.py" = "rookhold_cli.py"
 "coop.py" = "coop/__init__.py"
 "coop_mcp.py" = "coop_mcp.py"
 "rookhold_mcp.py" = "rookhold_mcp.py"
 "coop.py.typed" = "coop/py.typed"
 
 [tool.hatch.build.targets.sdist]
-include = ["rookhold.py", "rookhold_mcp.py", "coop.py", "coop_mcp.py", "py.typed", "coop.py.typed", "LICENSE", "README.md", "pyproject.toml", "tests"]
+include = ["rookhold.py", "rookhold_cli.py", "rookhold_mcp.py", "coop.py", "coop_mcp.py", "py.typed", "coop.py.typed", "LICENSE", "README.md", "pyproject.toml", "tests"]
 
 [tool.pyright]
 pythonVersion = "3.9"
 typeCheckingMode = "strict"
-include = ["rookhold.py", "rookhold_mcp.py", "coop.py", "coop_mcp.py", "tests/typecheck_usage.py"]
+include = ["rookhold.py", "rookhold_cli.py", "rookhold_mcp.py", "coop.py", "coop_mcp.py", "tests/typecheck_usage.py"]
 
 [tool.ruff]
 target-version = "py39"

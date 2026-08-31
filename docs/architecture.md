@@ -94,7 +94,7 @@ See [security-boundary.md](security-boundary.md) for the complete trust-tier sta
 
 ## Scale characteristics
 
-v0.6 remains a single-node design:
+v0.7 remains a single-node design:
 
 - atomic global/per-tenant queued leases and fair tenant dispatch
 - a configured worker pool
@@ -105,7 +105,7 @@ v0.6 remains a single-node design:
 
 Running multiple Rookhold servers against the same SQLite file is unsupported. A multi-node design requires a durable queue, distributed admission control, a network database, and an external stream bus.
 
-## Non-goals in v0.6
+## Non-goals in v0.7
 
 - persistent or resumable sandboxes
 - file upload/download or artifact stores

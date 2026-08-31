@@ -2,6 +2,24 @@
 
 All notable changes are documented here. Rookhold follows semantic versioning while pre-1.0; minor versions can contain API and deployment changes.
 
+## 0.7.0 — 2026-08-31
+
+### Terminal-first operation
+
+- Add the dependency-free `rookhold-cli` command to the Python SDK package beside `rookhold-mcp`. It supports an interactive operator prompt plus one-shot run, jobs, show, result, events, cancel, posture, and MCP-discovery commands.
+- Show the authenticated tenant, live backend, observed isolation class, configured minimum, language availability, and unisolated-development warning before accepting code. API keys remain process-owned and are redacted from diagnostics.
+- Keep code submission policy-bound: every CLI run sends `minimum_isolation` atomically, waits within a bounded budget, retains the job ID, and renders bounded output and terminal state.
+
+### Universal MCP hosts
+
+- Add copy-ready, environment-substituted stdio configurations for Claude Code and OpenCode v2 while retaining Hermes, OpenClaw, and generic MCP templates.
+- Verify the CLI's MCP view by initializing the real in-process `rookhold-mcp` server and listing its live, capability-narrowed four-tool surface.
+- Document that OpenCode and Claude Code own the conversational agent UI while Rookhold remains the separately controlled execution/evidence service; adding the MCP server does not disable either host's other execution tools.
+
+### Terminal design research
+
+- Adapt the compact banner, posture-at-a-glance, command/prompt hierarchy, restrained status color, and progressive tool-output disclosure patterns observed in the MIT-licensed OpenCode/OpenTUI terminal experience without importing its agent/session runtime or vendoring upstream source.
+
 ## 0.6.0 — 2026-08-31
 
 ### Rookhold identity
