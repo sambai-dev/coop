@@ -153,23 +153,6 @@ operated execution boundary for short, risky, or user-supplied jobs without
 letting the model hold the Coop key or choose its own server, tenant, language
 allowlist, or required isolation posture.
 
-```text
-you → AI agent or app → coop-mcp or SDK → Coop → short job
-       decides what      submits safely    policy + evidence
-```
-
-## Common questions
-
-| Question | Answer |
-|---|---|
-| Do I need Rust? | **No.** Download a prebuilt release unless you want to contribute to Coop itself. |
-| Do I need an AI model? | **No.** Any application can call Coop through HTTP or an SDK. |
-| Can I use Hermes, OpenClaw, or Codex? | **Yes.** Use the included MCP adapter and copy-ready configuration. |
-| Does Coop replace my agent's normal workspace? | **No.** Keep repository editing in the workspace and send short execution jobs to Coop. |
-| Is the five-minute demo safe for untrusted code? | **No.** It is loopback-only and unisolated. Use the guarded production deployment for mutually untrusted jobs. |
-
-## The problem Coop solves
-
 Without Coop, a tool call often ends as `subprocess.run(model_text)` inside the
 agent process or a long-lived container. The application then has to invent
 authentication, resource ceilings, cancellation, output bounds, tenant
@@ -179,6 +162,11 @@ With Coop, the trusted adapter submits once and receives a job ID. Operators
 can answer five concrete questions: what ran, who submitted it, which controls
 actually became effective, what output or violations were observed, and how
 the run ended. Evidence survives failure, timeout, OOM, and cancellation.
+
+```text
+you → AI agent or app → coop-mcp or SDK → Coop → short job
+       decides what      submits safely    policy + evidence
+```
 
 ### What ships
 
@@ -197,6 +185,16 @@ the run ended. Evidence survives failure, timeout, OOM, and cancellation.
 - a dependency-free, concurrent `coop-mcp` stdio server supporting MCP 2026 Tasks and legacy hosts
 
 The event chain remains server-verifiable operational evidence. A signed envelope additionally proves that the configured Coop key asserted the authoritative tenant, exact receipt, and result digest. It does **not** prove deterministic re-execution, trusted hardware, remote attestation, or WORM storage; distribute or pin the public key out of band rather than trusting its API `key_id` hint.
+
+## Common questions
+
+| Question | Answer |
+|---|---|
+| Do I need Rust? | **No.** Download a prebuilt release unless you want to contribute to Coop itself. |
+| Do I need an AI model? | **No.** Any application can call Coop through HTTP or an SDK. |
+| Can I use Hermes, OpenClaw, or Codex? | **Yes.** Use the included MCP adapter and copy-ready configuration. |
+| Does Coop replace my agent's normal workspace? | **No.** Keep repository editing in the workspace and send short execution jobs to Coop. |
+| Is the five-minute demo safe for untrusted code? | **No.** It is loopback-only and unisolated. Use the guarded production deployment for mutually untrusted jobs. |
 
 ## Build from source (optional)
 
@@ -421,10 +419,10 @@ wait returns the job ID instead of losing ownership of the still-running job.
    and restart or reload the harness.
 
 On Windows, the executable is
-`%USERPROFILE%\.local\share\coop-mcp\Scripts\coop-mcp.exe`. Omit
-`COOP_MCP_MINIMUM_ISOLATION` may be `none` only for the explicitly unisolated
-local demo; production integrations should name the exact minimum class and
-fail closed.
+`%USERPROFILE%\.local\share\coop-mcp\Scripts\coop-mcp.exe`.
+`COOP_MCP_MINIMUM_ISOLATION` may be omitted or set to `none` only for the
+explicitly unisolated local demo. Production integrations should specify the
+exact minimum isolation class and fail closed.
 
 Copy-ready configuration is included for:
 
