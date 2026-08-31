@@ -40,7 +40,7 @@ pub fn key_id(verifying_key: &VerifyingKey) -> String {
     format!("sha256:{:x}", Sha256::digest(verifying_key.as_bytes()))
 }
 
-/// Encode a private key using Coop's canonical unencrypted PKCS#8 PEM profile.
+/// Encode a private key using Rookhold's canonical unencrypted PKCS#8 PEM profile.
 pub fn encode_private_key_pem(
     signing_key: &SigningKey,
 ) -> Result<Zeroizing<String>, AttestationError> {
@@ -75,7 +75,7 @@ pub fn decode_private_key_pem(pem: &str) -> Result<SigningKey, AttestationError>
     Ok(signing_key)
 }
 
-/// Encode a public key using Coop's canonical SubjectPublicKeyInfo PEM profile.
+/// Encode a public key using Rookhold's canonical SubjectPublicKeyInfo PEM profile.
 pub fn encode_public_key_pem(verifying_key: &VerifyingKey) -> Result<String, AttestationError> {
     verifying_key
         .to_public_key_pem(LineEnding::LF)

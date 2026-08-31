@@ -28,7 +28,7 @@ async fn main() {
     init_tracing();
 
     if let Err(error) = run().await {
-        tracing::error!(%error, "coop terminated");
+        tracing::error!(%error, "Rookhold terminated");
         std::process::exit(1);
     }
 }
@@ -37,7 +37,9 @@ fn init_tracing() {
     let filter =
         || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     let production = coop_server::config::is_production();
-    let configured = std::env::var("COOP_LOG_FORMAT").ok();
+    let configured = std::env::var("ROOKHOLD_LOG_FORMAT")
+        .ok()
+        .or_else(|| std::env::var("COOP_LOG_FORMAT").ok());
     let (format, invalid) = select_log_format(configured.as_deref(), production);
     match format {
         LogFormat::Json => tracing_subscriber::fmt()
@@ -58,7 +60,7 @@ fn init_tracing() {
         let fallback = if production { "json" } else { "compact" };
         tracing::warn!(
             fallback,
-            "unsupported COOP_LOG_FORMAT; using privacy-safe fallback"
+            "unsupported ROOKHOLD_LOG_FORMAT; using privacy-safe fallback"
         );
     }
 }
@@ -200,7 +202,7 @@ async fn run() -> Result<(), String> {
         http_header_timeout_s = HTTP_HEADER_READ_TIMEOUT.as_secs(),
         http_write_progress_timeout_s = HTTP_WRITE_PROGRESS_TIMEOUT.as_secs(),
         dashboard = format!("http://{addr}/"),
-        "coop is listening"
+        "Rookhold is listening"
     );
 
     let (http_stop_tx, http_stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -540,22 +542,22 @@ fn acquire_instance_lock(db_path: &Path) -> Result<InstanceLock, String> {
     let absolute = absolute_path(db_path)?;
     let parent = absolute
         .parent()
-        .ok_or_else(|| format!("COOP_DB {} has no parent directory", db_path.display()))?;
+        .ok_or_else(|| format!("ROOKHOLD_DB {} has no parent directory", db_path.display()))?;
     std::fs::create_dir_all(parent).map_err(|error| {
         format!(
-            "failed to create COOP_DB parent {} before locking: {error}",
+            "failed to create ROOKHOLD_DB parent {} before locking: {error}",
             parent.display()
         )
     })?;
     let canonical_parent = parent.canonicalize().map_err(|error| {
         format!(
-            "failed to canonicalize COOP_DB parent {}: {error}",
+            "failed to canonicalize ROOKHOLD_DB parent {}: {error}",
             parent.display()
         )
     })?;
     let filename = absolute
         .file_name()
-        .ok_or_else(|| format!("COOP_DB {} has no file name", db_path.display()))?
+        .ok_or_else(|| format!("ROOKHOLD_DB {} has no file name", db_path.display()))?
         .to_string_lossy();
     let lock_path = canonical_parent.join(format!(".{filename}.coop.lock"));
     let adjacent = open_and_lock(&lock_path)?;
@@ -563,7 +565,7 @@ fn acquire_instance_lock(db_path: &Path) -> Result<InstanceLock, String> {
     if std::fs::symlink_metadata(&absolute).is_ok_and(|metadata| metadata.file_type().is_symlink())
     {
         return Err(format!(
-            "COOP_DB {} must not be a symlink",
+            "ROOKHOLD_DB {} must not be a symlink",
             absolute.display()
         ));
     }
@@ -576,16 +578,19 @@ fn acquire_instance_lock(db_path: &Path) -> Result<InstanceLock, String> {
     }
     let db_file = db_options.open(&absolute).map_err(|error| {
         format!(
-            "failed to bootstrap COOP_DB {}: {error}",
+            "failed to bootstrap ROOKHOLD_DB {}: {error}",
             absolute.display()
         )
     })?;
-    let db_metadata = db_file
-        .metadata()
-        .map_err(|error| format!("failed to identify COOP_DB {}: {error}", absolute.display()))?;
+    let db_metadata = db_file.metadata().map_err(|error| {
+        format!(
+            "failed to identify ROOKHOLD_DB {}: {error}",
+            absolute.display()
+        )
+    })?;
     if !db_metadata.is_file() {
         return Err(format!(
-            "COOP_DB {} must be a regular file",
+            "ROOKHOLD_DB {} must be a regular file",
             absolute.display()
         ));
     }
@@ -600,7 +605,7 @@ fn acquire_instance_lock(db_path: &Path) -> Result<InstanceLock, String> {
         use std::os::unix::fs::MetadataExt;
         if db_metadata.nlink() != 1 {
             return Err(format!(
-                "COOP_DB {} has {} hard links; hard-linked SQLite files are unsupported",
+                "ROOKHOLD_DB {} has {} hard links; hard-linked SQLite files are unsupported",
                 absolute.display(),
                 db_metadata.nlink()
             ));
@@ -614,7 +619,7 @@ fn acquire_instance_lock(db_path: &Path) -> Result<InstanceLock, String> {
         let identity_path = identity_root.join(format!("{identity}.lock"));
         Some(open_and_lock(&identity_path).map_err(|error| {
             format!(
-                "another coop process already owns the same SQLite file identity as {}: {error}",
+                "another Rookhold process already owns the same SQLite file identity as {}: {error}",
                 absolute.display()
             )
         })?)
@@ -712,7 +717,7 @@ fn storage_file_identity(
     let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information) };
     if ok == 0 {
         return Err(format!(
-            "failed to identify COOP_DB {}: {}",
+            "failed to identify ROOKHOLD_DB {}: {}",
             path.display(),
             std::io::Error::last_os_error()
         ));
@@ -733,7 +738,7 @@ fn storage_file_identity(
 ) -> Result<String, String> {
     path.canonicalize()
         .map(|path| format!("path-{}", path.to_string_lossy()))
-        .map_err(|error| format!("failed to identify COOP_DB {}: {error}", path.display()))
+        .map_err(|error| format!("failed to identify ROOKHOLD_DB {}: {error}", path.display()))
 }
 
 #[cfg(not(unix))]

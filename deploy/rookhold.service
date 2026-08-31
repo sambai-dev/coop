@@ -1,12 +1,12 @@
 [Unit]
-Description=Coop execution gateway
-Documentation=https://github.com/sambai-dev/coop/tree/main/docs
+Description=Rookhold execution gateway
+Documentation=https://github.com/sambai-dev/rookhold/tree/main/docs
 After=network-online.target
 Wants=network-online.target
-ConditionPathIsDirectory=/opt/coop/rootfs
-ConditionFileIsExecutable=/usr/local/bin/coop-sandbox-init
+ConditionPathIsDirectory=/opt/rookhold/rootfs
+ConditionFileIsExecutable=/usr/local/bin/rookhold-sandbox-init
 ConditionFileIsExecutable=/usr/local/bin/runsc
-ConditionPathExists=/etc/coop/attestation-key.pem
+ConditionPathExists=/etc/rookhold/attestation-key.pem
 ConditionArchitecture=x86-64
 
 [Service]
@@ -15,15 +15,15 @@ Type=simple
 # uid/gid, and cgroup operations. Keep this service on a dedicated x86_64 VM.
 User=root
 Group=root
-EnvironmentFile=/etc/coop/coop.env
-ExecStart=/usr/local/bin/coop
+EnvironmentFile=/etc/rookhold/rookhold.env
+ExecStart=/usr/local/bin/rookhold
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=45s
 KillMode=mixed
 Delegate=yes
 UMask=0077
-StateDirectory=coop
+StateDirectory=rookhold
 StateDirectoryMode=0700
 MemoryHigh=6G
 MemoryMax=8G
@@ -42,8 +42,8 @@ ProtectClock=yes
 ProtectControlGroups=no
 RestrictNamespaces=user mnt pid net ipc uts
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_SYS_CHROOT CAP_MKNOD CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL
-ReadWritePaths=/var/lib/coop /sys/fs/cgroup
-ReadOnlyPaths=/opt/coop/rootfs /usr/local/bin/coop /usr/local/bin/coop-sandbox-init /usr/local/bin/runsc /etc/coop/attestation-key.pem
+ReadWritePaths=/var/lib/rookhold /sys/fs/cgroup
+ReadOnlyPaths=/opt/rookhold/rootfs /usr/local/bin/rookhold /usr/local/bin/rookhold-sandbox-init /usr/local/bin/runsc /etc/rookhold/attestation-key.pem
 
 [Install]
 WantedBy=multi-user.target

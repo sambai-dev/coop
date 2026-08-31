@@ -894,7 +894,7 @@ fn server_receipt_json_entry_point_rejects_duplicates_before_signing() {
             br#"{"job_id":"a","job_id":"b"}"#,
         ),
         Err(AttestationError::InvalidJson {
-            document: "Coop receipt",
+            document: "Rookhold receipt",
             ..
         })
     ));

@@ -1,10 +1,10 @@
-# Contributing to Coop
+# Contributing to Rookhold
 
 Thanks for helping make agent code execution safer and easier to audit.
 
 ## Before you start
 
-- Use [GitHub Issues](https://github.com/sambai-dev/coop/issues) for reproducible bugs and scoped feature requests.
+- Use [GitHub Issues](https://github.com/sambai-dev/rookhold/issues) for reproducible bugs and scoped feature requests.
 - For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
 - For large changes, open an issue first so the approach and containment tradeoffs can be agreed before implementation.
 
@@ -27,18 +27,18 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace --all-targets
 ```
 
-On macOS or Windows, Coop uses the development subprocess backend. Start the
+On macOS or Windows, Rookhold uses the development subprocess backend. Start the
 server explicitly in that mode. For macOS or another POSIX shell:
 
 ```bash
-COOP_SANDBOX=off COOP_API_KEYS="local:dev-key" cargo run -p coop-server
+ROOKHOLD_SANDBOX=off ROOKHOLD_API_KEYS="local:dev-key" cargo run -p coop-server
 ```
 
 For PowerShell:
 
 ```powershell
-$env:COOP_SANDBOX = "off"
-$env:COOP_API_KEYS = "local:dev-key"
+$env:ROOKHOLD_SANDBOX = "off"
+$env:ROOKHOLD_API_KEYS = "local:dev-key"
 cargo run -p coop-server
 ```
 

@@ -28,7 +28,7 @@ Chalk-white command planes surround one carbon execution well. The transcript is
 
 | Ingredient | Approved commitment | Implementation medium |
 | --- | --- | --- |
-| Command bar | 68px; Coop, runtime, tenant, connection/key, run switcher, New run | semantic header/form controls; existing icon glyphs |
+| Command bar | 68px; Rookhold, runtime, tenant, connection/key, run switcher, New run | semantic header/form controls; existing icon glyphs |
 | Left dock | 292px; Compose/History tabs; composer shown in the approved state | aside, native tabs, form controls |
 | Composer | language, minimum isolation, code editor, compact limits, Queue run | existing form/API contract moved inline; semantic textarea/inputs |
 | Code gutter | narrow numbered rail aligned to the textarea | generated DOM text; presentation-only |

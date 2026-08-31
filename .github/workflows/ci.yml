@@ -14,7 +14,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  COOP_GIT_REVISION: ${{ github.sha }}
+  ROOKHOLD_GIT_REVISION: ${{ github.sha }}
   RUST_BACKTRACE: "1"
 
 jobs:
@@ -110,7 +110,7 @@ jobs:
         run: python -m pyright
       - name: Type-check Python SDK with Mypy
         working-directory: sdks/python
-        run: python -m mypy --strict coop.py coop_mcp.py tests/typecheck_usage.py
+        run: python -m mypy --strict rookhold.py rookhold_mcp.py coop.py coop_mcp.py tests/typecheck_usage.py
       - name: Build and verify Python wheel and source distribution
         shell: bash
         run: |
@@ -118,8 +118,8 @@ jobs:
           artifacts=sdks/python/.verify-dist/artifacts
           rm -rf "$artifacts"
           python -m build --wheel --sdist --outdir "$artifacts" ./sdks/python
-          wheel=$(find "$artifacts" -maxdepth 1 -type f -name 'coop_sdk-*.whl')
-          sdist=$(find "$artifacts" -maxdepth 1 -type f -name 'coop_sdk-*.tar.gz')
+          wheel=$(find "$artifacts" -maxdepth 1 -type f -name 'rookhold_sdk-*.whl')
+          sdist=$(find "$artifacts" -maxdepth 1 -type f -name 'rookhold_sdk-*.tar.gz')
           test "$(printf '%s\n' "$wheel" | grep -c .)" -eq 1
           test "$(printf '%s\n' "$sdist" | grep -c .)" -eq 1
           python -m twine check "$wheel" "$sdist"
@@ -129,7 +129,7 @@ jobs:
             target="sdks/python/.verify-dist/${kind}-install"
             rm -rf "$target"
             python -m pip install --no-deps --target "$target" "$artifact"
-            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp; assert coop.__version__ == '0.5.0'; assert coop_mcp.__version__ == coop.__version__; assert Path(coop.__file__).with_name('py.typed').is_file()"
+            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp, rookhold, rookhold_mcp; assert rookhold.__version__ == '0.6.0'; assert rookhold_mcp.__version__ == rookhold.__version__; assert coop.Coop is rookhold.Rookhold; assert coop_mcp.CoopMcpServer is rookhold_mcp.RookholdMcpServer; assert Path(rookhold.__file__).with_name('py.typed').is_file(); assert Path(coop.__file__).with_name('py.typed').is_file()"
             PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v
           done
       - name: Install TypeScript SDK dependencies
@@ -149,7 +149,7 @@ jobs:
         run: |
           python -m pip install "./sdks/python[dev]"
           python -m unittest discover -s sdks/python/tests -v
-          python -m mypy --strict sdks/python/coop.py sdks/python/coop_mcp.py sdks/python/tests/typecheck_usage.py
+          python -m mypy --strict sdks/python/rookhold.py sdks/python/rookhold_mcp.py sdks/python/coop.py sdks/python/coop_mcp.py sdks/python/tests/typecheck_usage.py
       - name: Set up latest supported Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -186,7 +186,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate Compose model
         env:
-          COOP_API_KEYS: ci:ci-only-key-with-more-than-16-characters
+          ROOKHOLD_API_KEYS: ci:ci-only-key-with-more-than-16-characters
         run: docker compose config --quiet
       - name: Build locked image
         shell: bash
@@ -197,54 +197,59 @@ jobs:
           docker build --pull \
             --build-arg "VERSION=$version" \
             --build-arg "VCS_REF=${GITHUB_SHA}" \
-            --tag coop:ci .
+            --tag rookhold:ci .
       - name: Inspect private rootfs
         run: |
-          docker run --rm --entrypoint /bin/sh coop:ci -ec '
+          docker run --rm --entrypoint /bin/sh rookhold:ci -ec '
+            test -x /usr/local/bin/rookhold
             test -x /usr/local/bin/coop
+            test -x /usr/local/bin/rookhold-sandbox-init
             test -x /usr/local/bin/coop-sandbox-init
+            test -x /usr/local/bin/rookhold-verify
             test -x /usr/local/bin/coop-verify
+            test -x /usr/local/bin/rookhold-container-entrypoint
             test -x /usr/local/bin/coop-container-entrypoint
-            test -x /opt/coop/rootfs/usr/bin/python3
-            test -x /opt/coop/rootfs/usr/bin/node
-            test -x /opt/coop/rootfs/usr/bin/bash
-            test -x /opt/coop/rootfs/usr/local/bin/coop-oci-init
-            test -d /opt/coop/rootfs/.pivot_old
-            test "$(stat -c %a /opt/coop)" = 700
-            test "$(stat -c %U:%G /opt/coop)" = root:root
-            test "$(stat -c %a /opt/coop/rootfs)" = 755
-            test "$(stat -c %U:%G /opt/coop/rootfs)" = root:root
+            test -x /opt/rookhold/rootfs/usr/bin/python3
+            test -x /opt/rookhold/rootfs/usr/bin/node
+            test -x /opt/rookhold/rootfs/usr/bin/bash
+            test -x /opt/rookhold/rootfs/usr/local/bin/rookhold-oci-init
+            test -x /opt/rookhold/rootfs/usr/local/bin/coop-oci-init
+            test -d /opt/rookhold/rootfs/.pivot_old
+            test "$(stat -c %a /opt/rookhold)" = 700
+            test "$(stat -c %U:%G /opt/rookhold)" = root:root
+            test "$(stat -c %a /opt/rookhold/rootfs)" = 755
+            test "$(stat -c %U:%G /opt/rookhold/rootfs)" = root:root
             test "$(stat -c %a /data)" = 700
             test "$(stat -c %U:%G /data)" = root:root
-            test "$(stat -c %a /var/lib/coop/jobs)" = 700
-            test "$(stat -c %U:%G /var/lib/coop/jobs)" = root:root
-            test "$(stat -c %a /run/coop-bootstrap)" = 700
-            test "$(stat -c %U:%G /run/coop-bootstrap)" = root:root
-            test "$(stat -c %a /run/coop-runtime)" = 700
-            test "$(stat -c %U:%G /run/coop-runtime)" = root:root
-            test "$(stat -c %a /run/coop-secrets)" = 700
-            test "$(stat -c %U:%G /run/coop-secrets)" = root:root
+            test "$(stat -c %a /var/lib/rookhold/jobs)" = 700
+            test "$(stat -c %U:%G /var/lib/rookhold/jobs)" = root:root
+            test "$(stat -c %a /run/rookhold-bootstrap)" = 700
+            test "$(stat -c %U:%G /run/rookhold-bootstrap)" = root:root
+            test "$(stat -c %a /run/rookhold-runtime)" = 700
+            test "$(stat -c %U:%G /run/rookhold-runtime)" = root:root
+            test "$(stat -c %a /run/rookhold-secrets)" = 700
+            test "$(stat -c %U:%G /run/rookhold-secrets)" = root:root
           '
       - name: Smoke final image through the namespace backend
         env:
-          COOP_SMOKE_ALLOW_PRIVILEGED: "true"
-        run: bash scripts/smoke-container.sh coop:ci
+          ROOKHOLD_SMOKE_ALLOW_PRIVILEGED: "true"
+        run: bash scripts/smoke-container.sh rookhold:ci
       - name: Smoke final image through the reviewed gVisor OCI backend
         run: |
           set -euo pipefail
           base=https://storage.googleapis.com/gvisor/releases/release/20260817.0/x86_64
-          curl -fsSLo /tmp/coop-runsc "$base/runsc"
+          curl -fsSLo /tmp/rookhold-runsc "$base/runsc"
           curl -fsSLo /tmp/runsc.sha512 "$base/runsc.sha512"
-          (cd /tmp && cp coop-runsc runsc && sha512sum -c runsc.sha512)
-          test "$(sha256sum /tmp/coop-runsc | awk '{print $1}')" = 048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c
-          sudo install -o root -g root -m 0755 /tmp/coop-runsc /usr/local/bin/coop-runsc-ci
+          (cd /tmp && cp rookhold-runsc runsc && sha512sum -c runsc.sha512)
+          test "$(sha256sum /tmp/rookhold-runsc | awk '{print $1}')" = 048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c
+          sudo install -o root -g root -m 0755 /tmp/rookhold-runsc /usr/local/bin/rookhold-runsc-ci
           docker run --rm --privileged --cgroupns=host \
-            --volume /usr/local/bin/coop-runsc-ci:/usr/local/bin/runsc:ro \
+            --volume /usr/local/bin/rookhold-runsc-ci:/usr/local/bin/runsc:ro \
             --volume "$PWD/scripts/smoke-gvisor.sh:/usr/local/bin/smoke-gvisor.sh:ro" \
-            --env COOP_GVISOR_RUNSC=/usr/local/bin/runsc \
-            --env COOP_GVISOR_SERVER_BIN=/usr/local/bin/coop \
+            --env ROOKHOLD_GVISOR_RUNSC=/usr/local/bin/runsc \
+            --env ROOKHOLD_GVISOR_SERVER_BIN=/usr/local/bin/rookhold \
             --entrypoint /bin/bash \
-            coop:ci /usr/local/bin/smoke-gvisor.sh
+            rookhold:ci /usr/local/bin/smoke-gvisor.sh
 
   hostile:
     name: Linux containment (must run)
@@ -257,8 +262,8 @@ jobs:
       CARGO_HOME: /usr/local/cargo
       DEBIAN_SNAPSHOT: 20260826T000000Z
       RUST_LOG: info,coop_server=debug
-      COOP_ROOTFS: /opt/coop/rootfs
-      COOP_SANDBOX_HELPER: /usr/local/bin/coop-sandbox-init
+      ROOKHOLD_ROOTFS: /opt/rookhold/rootfs
+      ROOKHOLD_SANDBOX_HELPER: /usr/local/bin/rookhold-sandbox-init
     steps:
       - name: Install test runtimes and preflight tools
         shell: bash
@@ -280,8 +285,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked -p coop-server --bin coop -p coop-exec --bin coop-sandbox-init --bin coop-oci-init -p coop-attestation --bin coop-verify
-          bash scripts/prepare-test-rootfs.sh target/debug/coop-sandbox-init target/debug/coop-oci-init
+          cargo build --locked -p coop-server --bin rookhold -p coop-exec --bin rookhold-sandbox-init --bin rookhold-oci-init -p coop-attestation --bin rookhold-verify
+          bash scripts/prepare-test-rootfs.sh target/debug/rookhold-sandbox-init target/debug/rookhold-oci-init
       - name: Install reviewed gVisor runtime
         shell: bash
         run: |
@@ -296,8 +301,8 @@ jobs:
       - name: Run real gVisor OCI lifecycle and crash-reconciliation gate
         shell: bash
         env:
-          COOP_GVISOR_RUNSC: /usr/local/bin/runsc
-          COOP_GVISOR_SERVER_BIN: target/debug/coop
+          ROOKHOLD_GVISOR_RUNSC: /usr/local/bin/runsc
+          ROOKHOLD_GVISOR_SERVER_BIN: target/debug/rookhold
         run: bash scripts/smoke-gvisor.sh
       - name: Fail if containment prerequisites are unavailable
         shell: bash
@@ -313,7 +318,7 @@ jobs:
           grep -qw cpu <<<"$controllers"
           actual_kernel=$(uname -r | cut -d- -f1)
           test "$(printf '%s\n' 5.14 "$actual_kernel" | sort -V | head -n1)" = 5.14
-          probe="/sys/fs/cgroup/coop-ci-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          probe="/sys/fs/cgroup/rookhold-ci-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir "$probe"
           test -w "$probe/cgroup.kill"
           echo 1 > "$probe/cgroup.kill"

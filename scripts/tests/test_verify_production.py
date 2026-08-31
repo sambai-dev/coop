@@ -298,7 +298,7 @@ class IsolationVerificationTests(unittest.TestCase):
                 encoding="utf-8",
                 newline="\n",
             )
-            packaged_binary = str((Path(raw_temp) / "coop-verify.exe").resolve())
+            packaged_binary = str((Path(raw_temp) / "rookhold-verify.exe").resolve())
             runner = verify.OfflineVerifier(
                 str(public_key.resolve()), binary=packaged_binary
             )
@@ -351,14 +351,14 @@ class IsolationVerificationTests(unittest.TestCase):
 
     def test_offline_verifier_fails_closed_on_bad_signature_or_missing_pin(self) -> None:
         with self.assertRaisesRegex(
-            verify.VerificationError, "COOP_VERIFY_PUBLIC_KEY_FILE is required"
+            verify.VerificationError, "ROOKHOLD_VERIFY_PUBLIC_KEY_FILE is required"
         ):
             verify.OfflineVerifier("")
 
         with tempfile.TemporaryDirectory() as raw_temp:
             public_key = Path(raw_temp) / "operator-pinned.pem"
             public_key.write_text("test public key", encoding="utf-8")
-            packaged_binary = str((Path(raw_temp) / "coop-verify.exe").resolve())
+            packaged_binary = str((Path(raw_temp) / "rookhold-verify.exe").resolve())
             runner = verify.OfflineVerifier(
                 str(public_key.resolve()), binary=packaged_binary
             )
@@ -401,14 +401,14 @@ class IsolationVerificationTests(unittest.TestCase):
                 self.assertIn("--cap-drop=ALL", command)
                 self.assertIn("--security-opt=no-new-privileges", command)
                 self.assertIn(
-                    "COOP_VERIFY_PUBLIC_KEY_SOURCE=/run/coop-bootstrap/"
+                    "ROOKHOLD_VERIFY_PUBLIC_KEY_SOURCE=/run/rookhold-bootstrap/"
                     "trusted-attestation-public-key.pem",
                     command,
                 )
                 image_index = command.index("sha256:" + "a" * 64)
                 self.assertEqual(
                     command[image_index + 1 : image_index + 3],
-                    ["/usr/local/bin/coop-verify", "verify"],
+                    ["/usr/local/bin/rookhold-verify", "verify"],
                 )
                 self.assertEqual(
                     command[command.index("--tenant") + 1],
@@ -449,7 +449,7 @@ class IsolationVerificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_temp:
             public_key = Path(raw_temp) / "operator-pinned.pem"
             public_key.write_text("test public key", encoding="utf-8")
-            packaged_binary = str((Path(raw_temp) / "coop-verify.exe").resolve())
+            packaged_binary = str((Path(raw_temp) / "rookhold-verify.exe").resolve())
             runner = verify.OfflineVerifier(
                 str(public_key.resolve()), binary=packaged_binary
             )

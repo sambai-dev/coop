@@ -80,7 +80,7 @@ pub enum AttestationError {
     #[error("DSSE signature threshold was not met (required {required}, verified {verified})")]
     SignatureThresholdNotMet { required: usize, verified: usize },
 
-    /// The authenticated DSSE payload type was not the Coop profile's in-toto media type.
+    /// The authenticated DSSE payload type was not the Rookhold profile's in-toto media type.
     #[error("authenticated DSSE payloadType is not application/vnd.in-toto+json")]
     PayloadTypeMismatch,
 
@@ -88,16 +88,16 @@ pub enum AttestationError {
     #[error("authenticated payload is not an in-toto Statement/v1")]
     StatementTypeMismatch,
 
-    /// The statement predicate type was not the versioned Coop execution predicate.
+    /// The statement predicate type was not the versioned Rookhold execution predicate.
     #[error("authenticated statement has an unsupported predicateType")]
     PredicateTypeMismatch,
 
-    /// The Coop predicate schema version was unsupported.
-    #[error("authenticated Coop execution predicate has an unsupported schemaVersion")]
+    /// The Rookhold predicate schema version was unsupported.
+    #[error("authenticated Rookhold execution predicate has an unsupported schemaVersion")]
     PredicateSchemaVersionMismatch,
 
     /// A required profile field was empty, too long, or otherwise malformed.
-    #[error("authenticated Coop execution statement has an invalid {field} field")]
+    #[error("authenticated Rookhold execution statement has an invalid {field} field")]
     InvalidProfileField { field: &'static str },
 
     /// The statement subject and predicate result descriptors did not agree.

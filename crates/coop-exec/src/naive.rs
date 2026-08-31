@@ -294,7 +294,7 @@ pub(crate) async fn preflight_interpreter(
         "python" => "print('COOP_NAIVE_PREFLIGHT_OK')",
         "node" => "console.log('COOP_NAIVE_PREFLIGHT_OK')",
         // `cat` is intentionally external. A candidate is accepted only when
-        // its Unix tool path works under Coop's sanitized environment; an
+        // its Unix tool path works under Rookhold's sanitized environment; an
         // echo-only canary would miss a partially usable Bash installation.
         "bash" => concat!(
             "probe_value=\"$(printf '%s' COOP_NATIVE_BASH | cat)\" || exit 70\n",
@@ -840,7 +840,7 @@ pub(crate) fn resolve_native_windows_bash(override_bin: Option<&str>) -> io::Res
         if configured.is_absolute() || configured.components().count() > 1 {
             push_unique_windows_path(&mut candidates, configured);
         } else {
-            // A bare COOP_BASH still means "find native Bash", never "accept
+            // A bare ROOKHOLD_BASH still means "find native Bash", never "accept
             // whichever Windows application alias happens to win SearchPath".
             let configured_name = configured.to_string_lossy();
             if configured_name.eq_ignore_ascii_case("bash")
@@ -881,7 +881,7 @@ pub(crate) fn resolve_native_windows_bash(override_bin: Option<&str>) -> io::Res
     }
 
     let configured = override_bin
-        .map(|value| format!(" configured by COOP_BASH={value:?}"))
+        .map(|value| format!(" configured by ROOKHOLD_BASH={value:?}"))
         .unwrap_or_default();
     let detail = if rejected.is_empty() {
         String::new()
@@ -891,7 +891,7 @@ pub(crate) fn resolve_native_windows_bash(override_bin: Option<&str>) -> io::Res
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "native Windows Bash is unavailable{configured}; install Git for Windows or set COOP_BASH to a native bash.exe{detail}"
+            "native Windows Bash is unavailable{configured}; install Git for Windows or set ROOKHOLD_BASH to a native bash.exe{detail}"
         ),
     ))
 }

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "SQLite-backed job, event, and execution-evidence store for Coop"
+description = "SQLite-backed job, event, and execution-evidence store for Rookhold"
 readme = "../../README.md"
 
 [dependencies]

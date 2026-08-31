@@ -1,22 +1,23 @@
-# Coop v0.5 design QA
+# Rookhold v0.6 branding QA
 
 ## Evidence
 
 - Approved source: `.impeccable/mocks/chalk-carbon-execution-desk.png`
 - Source dimensions: 1487 × 1058 px
 - Implemented surface: `crates/coop-server/src/dashboard.html`
-- Primary implementation capture: `.impeccable/review/desktop.png`
-- Implementation dimensions: 1440 × 1024 px at 1440 × 1024 CSS px, DPR 1
+- v0.6 branding capture: `docs/assets/console-v0.6.png`
+- Branding-capture dimensions: 1280 × 720 px at the in-app browser's release-check viewport
+- Original v0.5 layout capture: `.impeccable/review/desktop.png` at 1440 × 1024 CSS px, DPR 1
 - Responsive captures: `.impeccable/review/user-1060.png`, `.impeccable/review/mobile.png`, `.impeccable/review/mobile-440.png`, `.impeccable/review/mobile-queue.png`, and `.impeccable/review/mobile-record.png`
 - Compared state: authenticated tenant, selected successful Python run, output transcript visible, result-and-record sheet open
 
 ## Visual comparison
 
-The implementation keeps the approved composition: a chalk-white compose/history dock, a carbon chronological transcript, a narrow requested-policy ribbon, and a contextual white result sheet. The implementation intentionally uses the real Coop response model instead of the mock's illustrative fields. It preserves the reference's compact operator density, electric-blue action color, status accents, square geometry, and monospace evidence language.
+The v0.6 branding capture confirms the approved composition remains intact: a chalk-white compose/history dock, a carbon chronological transcript, a narrow requested-policy ribbon, and a contextual white result sheet. The identity is now Rookhold throughout the command bar and user-facing states, while the underlying execution and evidence workflow remains unchanged. The real built server loaded without console warnings or errors, accepted `rookhold-dev-key`, queued the included Python canary, reached `succeeded`, and rendered its result and evidence record. The implementation preserves the reference's compact operator density, electric-blue action color, status accents, square geometry, and monospace evidence language.
 
 The first implementation left the proof stage below the primary desktop fold because the output viewport and transcript gaps were too tall. The transcript was tightened and the output viewport bounded so intent, policy, execution, output, system events, completion, and proof now read as one sequence. An intermediate capture was unstyled after a stale CSP hash; the exact inline-style hash was updated before the valid final capture.
 
-The independent finish reviewer rejected three stale v0.4 evidence files, so the final desktop-empty, mobile-History, and mobile-record states were recaptured from the rebuilt v0.5 artifact. The full review then found one craft-floor issue: the selected History row used a 2px cobalt side stripe. It was reduced to a one-pixel seam, the CSP hash was regenerated, and the affected 390 × 844 History capture was repeated. The reviewer scored the fix resolved with no regressions and returned `ship`.
+The independent v0.5 finish reviewer rejected three stale v0.4 evidence files, so the final desktop-empty, mobile-History, and mobile-record states were recaptured from the rebuilt v0.5 artifact. The full review then found one craft-floor issue: the selected History row used a 2px cobalt side stripe. It was reduced to a one-pixel seam, the CSP hash was regenerated, and the affected 390 × 844 History capture was repeated. That reviewer scored the fix resolved with no regressions and returned `ship`. v0.6 changes visible identity strings and download names only; it does not change the verified layout or interaction model.
 
 No unresolved P0, P1, or P2 visual differences remain.
 
@@ -48,4 +49,4 @@ Browser console checks reported no errors in the tested states.
 
 ## Result
 
-`passed` — independent finish disposition: `ship`
+`passed` — v0.6 branding regression check; v0.5 independent finish disposition remains `ship`

@@ -1,4 +1,4 @@
-# Coop Python SDK
+# Rookhold Python SDK
 
 A typed synchronous client and stdio MCP adapter with no required dependencies.
 Install the optional stream extra for a native WebSocket; otherwise `stream()`
@@ -7,41 +7,41 @@ transparently uses cursor replay.
 Install from a source checkout (available now):
 
 ```bash
-git clone https://github.com/sambai-dev/coop.git
-python -m pip install "./coop/sdks/python[stream]"
+git clone https://github.com/sambai-dev/rookhold.git
+python -m pip install "./rookhold/sdks/python[stream]"
 ```
 
 The PyPI package is not published yet. After it is published, install it with:
 
 ```bash
-python -m pip install "coop-sdk[stream]"
+python -m pip install "rookhold-sdk[stream]"
 ```
 
-The exact v0.5.0 GitHub release wheel is
-`coop_sdk-0.5.0-py3-none-any.whl`; follow the
+The exact v0.6.0 GitHub release wheel is
+`rookhold_sdk-0.6.0-py3-none-any.whl`; follow the
 [checksum, attestation, and installation commands](../../docs/sdks.md) rather
 than using a moving release URL.
 
-Installation also provides the `coop-mcp` command. It exposes run, result,
-evidence, and cancellation tools to MCP hosts while keeping the Coop URL and
+Installation also provides the `rookhold-mcp` command. It exposes run, result,
+evidence, and cancellation tools to MCP hosts while keeping the Rookhold URL and
 key outside model-visible arguments:
 
 ```bash
-export COOP_BASE_URL=http://127.0.0.1:7300
-export COOP_API_KEY=coop-dev-key
-coop-mcp
+export ROOKHOLD_BASE_URL=http://127.0.0.1:7300
+export ROOKHOLD_API_KEY=rookhold-dev-key
+rookhold-mcp
 ```
 
 Normally an MCP host launches the command. Use the [Hermes, OpenClaw, and
 generic host templates](../../integrations/README.md), and set
-`COOP_MCP_MINIMUM_ISOLATION=gvisor-application-kernel` in the guarded
+`ROOKHOLD_MCP_MINIMUM_ISOLATION=gvisor-application-kernel` in the guarded
 production deployment. The legacy `COOP_MCP_REQUIRE_ISOLATION=true` maps only
-to `linux-shared-kernel`; prefer the exact class name. Coop
+to `linux-shared-kernel`; prefer the exact class name. Rookhold
 checks the minimum atomically at submission and the adapter validates the
 terminal observed `isolation_class` without assuming namespace-specific
 rootfs or seccomp details.
 
-For `coop_run_code`, the adapter uses one UUID across the initial HTTP submit
+For `rookhold_run_code`, the adapter uses one UUID across the initial HTTP submit
 and one ambiguous retry. When both acknowledgements are lost, it retains that
 key for ten minutes under a tenant-, policy-, and normalized-job fingerprint,
 then reuses it for the next identical call. The process-local table is capped
@@ -51,9 +51,9 @@ intentional identical runs receive fresh keys. Do not rely on this bounded
 window across adapter restarts or configure unbounded host retries.
 
 ```python
-from coop import Coop, Limits
+from rookhold import Limits, Rookhold
 
-client = Coop("http://127.0.0.1:7300", "tenant-api-key", timeout=30)
+client = Rookhold("http://127.0.0.1:7300", "tenant-api-key", timeout=30)
 job = client.submit(
     "python",
     "print(sum(range(10)))",
@@ -88,10 +88,10 @@ verification. Obtain and pin the operator's Ed25519 public key through an
 authenticated out-of-band channel, then verify offline:
 
 ```bash
-coop-verify verify \
+rookhold-verify verify \
   --envelope job.dsse.json \
   --subject job-result.json \
-  --public-key trusted-coop-attestation.pub.pem \
+  --public-key trusted-rookhold-attestation.pub.pem \
   --tenant "$EXPECTED_TENANT" \
   --subject-name "coop://jobs/$JOB_ID/result" \
   --media-type application/vnd.coop.execution-result.v1+json
@@ -116,10 +116,10 @@ response `Location` and `Idempotency-Replayed` metadata. Idempotency keys are
 The client obtains a one-use stream ticket, so API keys do not appear in
 WebSocket URLs. The legacy v0.1 query-key fallback is disabled by default
 because URLs leak into logs and history. Enable it only for a trusted legacy
-server with `allow_legacy_query_key=True`; structured Coop errors never trigger
+server with `allow_legacy_query_key=True`; structured Rookhold errors never trigger
 that fallback.
 
-`CoopError` exposes `status`, `code`, `request_id`, `retryable`, `retry_after`,
+`RookholdError` exposes `status`, `code`, `request_id`, `retryable`, `retry_after`,
 and the submission `idempotency_key` when relevant. Transport and
 invalid-response errors use the same error type.
 
@@ -131,11 +131,15 @@ was not enforced, `isolation_class` is runtime-observed evidence, and
 whole effective spec and policy fields are nullable when a queued, migrated,
 or restart-recovered row has no execution evidence. `Receipt`,
 `EventChainReceipt`, `OutputEvidence`, `ExecutorOutputEvidence`,
-`ResourceUsage`, and `HashedCoopEvent` are exported for typed
+`ResourceUsage`, and `HashedRookholdEvent` are exported for typed
 evidence-processing code. Receipt `output` covers canonical durable event
 strings; `executor_output` separately describes raw executor telemetry.
-Keep accepting `CoopEvent` when reading migrated v0.1 history because its hash
+Keep accepting `RookholdEvent` when reading migrated v0.1 history because its hash
 fields may be absent or null.
 The receipt core and event chain are always present; execution-specific receipt
 fields are optional because restart recovery creates a minimal receipt with
 `terminal_reason="server_restarted"`.
+
+For a staged rename, the `coop` and `coop_mcp` modules, `Coop` class aliases,
+`coop-mcp` command, old `coop_*` MCP tool calls, and `COOP_*` environment names
+remain supported. Matching non-empty `ROOKHOLD_*` and `COOP_*` values must agree.

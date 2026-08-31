@@ -2,17 +2,16 @@
 
 from typing import Iterator, Optional, cast
 
-from coop import (
+from coop import Coop, CoopError
+from rookhold import (
     ArtifactDownload,
     AttestationCapabilities,
     AttestationPublicKey,
     CancellationResponse,
-    Coop,
-    CoopEvent,
     EffectiveJobSpec,
     ExecutionRequirements,
     ExecutorOutputEvidence,
-    HashedCoopEvent,
+    HashedRookholdEvent,
     IsolationClass,
     JobAttestationStatus,
     JobDetail,
@@ -21,12 +20,17 @@ from coop import (
     Limits,
     OutputEvidence,
     Receipt,
+    Rookhold,
+    RookholdEvent,
     SubmitResponse,
     SubmitResult,
     isolation_satisfies,
 )
 
-client = Coop("https://coop.example", "tenant-key", timeout=5)
+client = Rookhold("https://rookhold.example", "tenant-key", timeout=5)
+legacy_client: Coop = Coop("https://rookhold.example", "tenant-key", timeout=5)
+legacy_error: CoopError = CoopError("compatibility")
+_legacy = (legacy_client, legacy_error)
 requirements: ExecutionRequirements = {"minimum_isolation": "linux-shared-kernel"}
 submitted: SubmitResponse = client.submit(
     "python",
@@ -55,10 +59,10 @@ result_artifact: ArtifactDownload = client.download_result_artifact(
 )
 receipt: Optional[Receipt] = detail["receipt"]
 terminal: JobDetail = client.wait(submitted["job_id"])
-events: Iterator[CoopEvent] = client.stream(submitted["job_id"])
+events: Iterator[RookholdEvent] = client.stream(submitted["job_id"])
 result: JobResult = client.result(submitted["job_id"])
 cancelled: CancellationResponse = client.cancel_result(submitted["job_id"])
-hashed: HashedCoopEvent = cast(HashedCoopEvent, next(events))
+hashed: HashedRookholdEvent = cast(HashedRookholdEvent, next(events))
 observed_isolation: IsolationClass = "gvisor-application-kernel"
 isolation_ok: bool = isolation_satisfies(
     observed_isolation, requirements.get("minimum_isolation", "none")

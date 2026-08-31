@@ -385,16 +385,16 @@ async fn build_execution_provider(
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             {
                 let runsc = _cfg.gvisor_runsc.as_deref().ok_or_else(|| {
-                    "COOP_GVISOR_RUNSC is required for COOP_SANDBOX=gvisor".to_string()
+                    "ROOKHOLD_GVISOR_RUNSC is required for ROOKHOLD_SANDBOX=gvisor".to_string()
                 })?;
-                let rootfs = _cfg
-                    .rootfs
-                    .as_deref()
-                    .ok_or_else(|| "COOP_ROOTFS is required for COOP_SANDBOX=gvisor".to_string())?;
+                let rootfs = _cfg.rootfs.as_deref().ok_or_else(|| {
+                    "ROOKHOLD_ROOTFS is required for ROOKHOLD_SANDBOX=gvisor".to_string()
+                })?;
                 let platform = coop_exec::gvisor::GvisorPlatform::parse(&_cfg.gvisor_platform)
                     .map_err(|error| error.to_string())?;
                 let rootfs_sha256 = _cfg.gvisor_rootfs_sha256.clone().ok_or_else(|| {
-                    "COOP_GVISOR_ROOTFS_SHA256 is required for COOP_SANDBOX=gvisor".to_string()
+                    "ROOKHOLD_GVISOR_ROOTFS_SHA256 is required for ROOKHOLD_SANDBOX=gvisor"
+                        .to_string()
                 })?;
                 let provider = coop_exec::gvisor::GvisorProvider::new(
                     std::path::PathBuf::from(runsc),
@@ -439,25 +439,26 @@ pub fn resolve_sandbox(cfg: &Config) -> Result<coop_exec::SandboxMode, String> {
         "gvisor" | "runsc"
     ) {
         if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            return Err("COOP_SANDBOX=gvisor requires Linux x86_64".to_string());
+            return Err("ROOKHOLD_SANDBOX=gvisor requires Linux x86_64".to_string());
         }
         let rootfs = cfg
             .rootfs
             .as_deref()
-            .ok_or_else(|| "COOP_ROOTFS is required for COOP_SANDBOX=gvisor".to_string())?;
+            .ok_or_else(|| "ROOKHOLD_ROOTFS is required for ROOKHOLD_SANDBOX=gvisor".to_string())?;
         validate_rootfs(Path::new(rootfs))?;
-        let runsc = cfg
-            .gvisor_runsc
-            .as_deref()
-            .ok_or_else(|| "COOP_GVISOR_RUNSC is required for COOP_SANDBOX=gvisor".to_string())?;
+        let runsc = cfg.gvisor_runsc.as_deref().ok_or_else(|| {
+            "ROOKHOLD_GVISOR_RUNSC is required for ROOKHOLD_SANDBOX=gvisor".to_string()
+        })?;
         if !Path::new(runsc).is_absolute() {
-            return Err("COOP_GVISOR_RUNSC must be an absolute path".to_string());
+            return Err("ROOKHOLD_GVISOR_RUNSC must be an absolute path".to_string());
         }
         let digest = cfg.gvisor_rootfs_sha256.as_deref().ok_or_else(|| {
-            "COOP_GVISOR_ROOTFS_SHA256 is required for COOP_SANDBOX=gvisor".to_string()
+            "ROOKHOLD_GVISOR_ROOTFS_SHA256 is required for ROOKHOLD_SANDBOX=gvisor".to_string()
         })?;
         if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err("COOP_GVISOR_ROOTFS_SHA256 must be 64 hexadecimal characters".to_string());
+            return Err(
+                "ROOKHOLD_GVISOR_ROOTFS_SHA256 must be 64 hexadecimal characters".to_string(),
+            );
         }
         return Ok(coop_exec::SandboxMode::Gvisor);
     }
@@ -494,14 +495,18 @@ pub fn resolve_sandbox(cfg: &Config) -> Result<coop_exec::SandboxMode, String> {
 
 fn validate_sandbox_helper(path: &Path) -> Result<bool, String> {
     if !path.is_absolute() {
-        return Err("COOP_SANDBOX_HELPER must be an absolute path".to_string());
+        return Err("ROOKHOLD_SANDBOX_HELPER must be an absolute path".to_string());
     }
-    ensure_no_redirected_ancestors(path, "COOP_SANDBOX_HELPER")?;
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|e| format!("cannot inspect COOP_SANDBOX_HELPER {}: {e}", path.display()))?;
+    ensure_no_redirected_ancestors(path, "ROOKHOLD_SANDBOX_HELPER")?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| {
+        format!(
+            "cannot inspect ROOKHOLD_SANDBOX_HELPER {}: {e}",
+            path.display()
+        )
+    })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(format!(
-            "COOP_SANDBOX_HELPER {} must be a regular non-symlink file",
+            "ROOKHOLD_SANDBOX_HELPER {} must be a regular non-symlink file",
             path.display()
         ));
     }
@@ -510,13 +515,13 @@ fn validate_sandbox_helper(path: &Path) -> Result<bool, String> {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
             return Err(format!(
-                "COOP_SANDBOX_HELPER {} must be root-owned and not group/world writable",
+                "ROOKHOLD_SANDBOX_HELPER {} must be root-owned and not group/world writable",
                 path.display()
             ));
         }
         if metadata.permissions().mode() & 0o111 == 0 {
             return Err(format!(
-                "COOP_SANDBOX_HELPER {} is not executable",
+                "ROOKHOLD_SANDBOX_HELPER {} is not executable",
                 path.display()
             ));
         }
@@ -526,41 +531,44 @@ fn validate_sandbox_helper(path: &Path) -> Result<bool, String> {
 
 fn validate_rootfs(path: &Path) -> Result<bool, String> {
     if !path.is_absolute() {
-        return Err("COOP_ROOTFS must be an absolute path".to_string());
+        return Err("ROOKHOLD_ROOTFS must be an absolute path".to_string());
     }
     crate::config::validate_jobs_root(path)
-        .map_err(|error| error.replace("COOP_JOBS_ROOT", "COOP_ROOTFS"))?;
-    ensure_no_redirected_ancestors(path, "COOP_ROOTFS")?;
+        .map_err(|error| error.replace("ROOKHOLD_JOBS_ROOT", "ROOKHOLD_ROOTFS"))?;
+    ensure_no_redirected_ancestors(path, "ROOKHOLD_ROOTFS")?;
     let metadata = std::fs::symlink_metadata(path)
-        .map_err(|e| format!("cannot inspect COOP_ROOTFS {}: {e}", path.display()))?;
+        .map_err(|e| format!("cannot inspect ROOKHOLD_ROOTFS {}: {e}", path.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(format!(
-            "COOP_ROOTFS {} must be a real directory, not a symlink",
+            "ROOKHOLD_ROOTFS {} must be a real directory, not a symlink",
             path.display()
         ));
     }
     let canonical = path
         .canonicalize()
-        .map_err(|e| format!("cannot resolve COOP_ROOTFS {}: {e}", path.display()))?;
+        .map_err(|e| format!("cannot resolve ROOKHOLD_ROOTFS {}: {e}", path.display()))?;
     if canonical.parent().is_none() {
         return Err(
-            "COOP_ROOTFS must be a private root filesystem; host / is forbidden".to_string(),
+            "ROOKHOLD_ROOTFS must be a private root filesystem; host / is forbidden".to_string(),
         );
     }
     for required in [".pivot_old", "tmp", "proc", "dev", "work"] {
         let required_path = canonical.join(required);
-        let required_metadata = std::fs::symlink_metadata(&required_path)
-            .map_err(|e| format!("COOP_ROOTFS is missing required directory /{required}: {e}"))?;
+        let required_metadata = std::fs::symlink_metadata(&required_path).map_err(|e| {
+            format!("ROOKHOLD_ROOTFS is missing required directory /{required}: {e}")
+        })?;
         if required_metadata.file_type().is_symlink() || !required_metadata.is_dir() {
-            return Err(format!("COOP_ROOTFS /{required} must be a real directory"));
+            return Err(format!(
+                "ROOKHOLD_ROOTFS /{required} must be a real directory"
+            ));
         }
     }
     if std::fs::read_dir(canonical.join(".pivot_old"))
-        .map_err(|e| format!("cannot inspect COOP_ROOTFS /.pivot_old: {e}"))?
+        .map_err(|e| format!("cannot inspect ROOKHOLD_ROOTFS /.pivot_old: {e}"))?
         .next()
         .is_some()
     {
-        return Err("COOP_ROOTFS /.pivot_old must be empty".to_string());
+        return Err("ROOKHOLD_ROOTFS /.pivot_old must be empty".to_string());
     }
     Ok(true)
 }
@@ -615,7 +623,7 @@ fn resolve_sandbox_with(
     let setting = setting.trim();
     match setting.to_ascii_lowercase().as_str() {
         "off" | "none" | "naive" if production && !unsafe_allow_naive => Err(
-            "COOP_SANDBOX=off in production requires the conspicuous acknowledgement COOP_UNSAFE_ALLOW_NAIVE=true"
+            "ROOKHOLD_SANDBOX=off in production requires the conspicuous acknowledgement ROOKHOLD_UNSAFE_ALLOW_NAIVE=true"
                 .to_string(),
         ),
         "off" | "none" | "naive" => Ok(coop_exec::SandboxMode::Off),
@@ -624,15 +632,15 @@ fn resolve_sandbox_with(
             Ok(coop_exec::SandboxMode::Namespaces)
         }
         "ns" | "namespaces" | "sandbox" if !rootfs_ready => Err(
-            "COOP_SANDBOX requests namespace isolation, but COOP_ROOTFS is missing or invalid; host / is never used as a sandbox root"
+            "ROOKHOLD_SANDBOX requests namespace isolation, but ROOKHOLD_ROOTFS is missing or invalid; host / is never used as a sandbox root"
                 .to_string(),
         ),
         "ns" | "namespaces" | "sandbox" if !helper_ready => Err(
-            "COOP_SANDBOX requests namespace isolation, but COOP_SANDBOX_HELPER is missing or invalid"
+            "ROOKHOLD_SANDBOX requests namespace isolation, but ROOKHOLD_SANDBOX_HELPER is missing or invalid"
                 .to_string(),
         ),
         "ns" | "namespaces" | "sandbox" => Err(
-            "COOP_SANDBOX requests namespace isolation, but the namespace sandbox is \
+            "ROOKHOLD_SANDBOX requests namespace isolation, but the namespace sandbox is \
              unavailable on this host (needs root + cgroup v2 unified hierarchy)"
                 .to_string(),
         ),
@@ -642,25 +650,25 @@ fn resolve_sandbox_with(
             Ok(coop_exec::SandboxMode::Namespaces)
         }
         "auto" | "" if production && !rootfs_ready => Err(
-            "COOP_ROOTFS is required for namespace isolation in production".to_string(),
+            "ROOKHOLD_ROOTFS is required for namespace isolation in production".to_string(),
         ),
         "auto" | "" if production && !helper_ready => Err(
-            "COOP_SANDBOX_HELPER is required for namespace isolation in production".to_string(),
+            "ROOKHOLD_SANDBOX_HELPER is required for namespace isolation in production".to_string(),
         ),
         "auto" | "" if production => Err(format!(
-            "COOP_SANDBOX={setting:?}: namespace sandbox unavailable on this host \
+            "ROOKHOLD_SANDBOX={setting:?}: namespace sandbox unavailable on this host \
              (needs root + cgroup v2 unified hierarchy); refusing to serve production \
              traffic without kernel isolation"
         )),
         "auto" | "" => {
             tracing::warn!(
-                "namespace sandbox unavailable or COOP_ROOTFS missing; \
+                "namespace sandbox unavailable or ROOKHOLD_ROOTFS missing; \
                  running executors WITHOUT kernel isolation"
             );
             Ok(coop_exec::SandboxMode::Off)
         }
         _ => Err(format!(
-            "invalid COOP_SANDBOX value {setting:?}; expected auto, namespaces, or off"
+            "invalid ROOKHOLD_SANDBOX value {setting:?}; expected auto, namespaces, or off"
         )),
     }
 }
@@ -718,7 +726,7 @@ mod tests {
     fn explicit_ns_unavailable_is_config_error_even_in_dev() {
         for s in ["ns", "namespaces", "sandbox", " NS "] {
             let err = resolve_sandbox_with(s, false, false, true, true, false).unwrap_err();
-            assert!(err.contains("COOP_SANDBOX"), "{err}");
+            assert!(err.contains("ROOKHOLD_SANDBOX"), "{err}");
         }
     }
 
@@ -780,12 +788,12 @@ mod tests {
         let db = base.join("coop.db");
         let jobs = base.join("jobs");
         let source = |key: &str| match key {
-            "COOP_API_KEYS" => Some("tenant:a-long-development-key".to_string()),
-            "COOP_SANDBOX" => Some("off".to_string()),
-            "COOP_STORAGE_TENANT_MB" => Some("128".to_string()),
-            "COOP_STORAGE_GLOBAL_MB" => Some("256".to_string()),
-            "COOP_STORAGE_FREE_RESERVE_MB" => Some("0".to_string()),
-            "COOP_JOBS_ROOT" => Some(jobs.to_string_lossy().into_owned()),
+            "ROOKHOLD_API_KEYS" => Some("tenant:a-long-development-key".to_string()),
+            "ROOKHOLD_SANDBOX" => Some("off".to_string()),
+            "ROOKHOLD_STORAGE_TENANT_MB" => Some("128".to_string()),
+            "ROOKHOLD_STORAGE_GLOBAL_MB" => Some("256".to_string()),
+            "ROOKHOLD_STORAGE_FREE_RESERVE_MB" => Some("0".to_string()),
+            "ROOKHOLD_JOBS_ROOT" => Some(jobs.to_string_lossy().into_owned()),
             _ => None,
         };
         let cfg = Config::from_sources(&source, false).unwrap();
@@ -806,9 +814,9 @@ mod tests {
         let db = base.join("coop.db");
         let jobs = base.join("jobs");
         let source = |key: &str| match key {
-            "COOP_SANDBOX" => Some("off".to_string()),
-            "COOP_STORAGE_FREE_RESERVE_MB" => Some("0".to_string()),
-            "COOP_JOBS_ROOT" => Some(jobs.to_string_lossy().into_owned()),
+            "ROOKHOLD_SANDBOX" => Some("off".to_string()),
+            "ROOKHOLD_STORAGE_FREE_RESERVE_MB" => Some("0".to_string()),
+            "ROOKHOLD_JOBS_ROOT" => Some(jobs.to_string_lossy().into_owned()),
             _ => None,
         };
         let cfg = Config::from_sources(&source, false).unwrap();

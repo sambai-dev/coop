@@ -1,4 +1,4 @@
-"""Live Python SDK and MCP adapter verification against a real Coop server."""
+"""Live Python SDK and MCP adapter verification against a real Rookhold server."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import os
 import uuid
 from typing import cast
 
-from coop import Coop, CoopError, IsolationClass, isolation_satisfies
-from coop_mcp import CoopMcpServer, McpConfig
+from rookhold import IsolationClass, Rookhold, RookholdError, isolation_satisfies
+from rookhold_mcp import McpConfig, RookholdMcpServer
 
 
 def require(condition: bool, message: str) -> None:
@@ -16,13 +16,13 @@ def require(condition: bool, message: str) -> None:
 
 
 def main() -> None:
-    base_url = os.environ["COOP_VERIFY_BASE_URL"]
-    api_key = os.environ["COOP_CLIENT_KEY"]
+    base_url = os.environ["ROOKHOLD_VERIFY_BASE_URL"]
+    api_key = os.environ["ROOKHOLD_CLIENT_KEY"]
     minimum = cast(
         IsolationClass,
-        os.environ.get("COOP_VERIFY_MINIMUM_ISOLATION", "linux-shared-kernel"),
+        os.environ.get("ROOKHOLD_VERIFY_MINIMUM_ISOLATION", "linux-shared-kernel"),
     )
-    client = Coop(base_url, api_key, timeout=10)
+    client = Rookhold(base_url, api_key, timeout=10)
 
     capabilities = client.capabilities()
     observed = capabilities["execution"]["isolation_class"]
@@ -100,7 +100,7 @@ def main() -> None:
                 "pass",
                 requirements={"minimum_isolation": stronger_minimum},
             )
-        except CoopError as exc:
+        except RookholdError as exc:
             require(
                 exc.code == "minimum_isolation_unsatisfied",
                 f"unexpected minimum-isolation error: {exc}",
@@ -108,7 +108,7 @@ def main() -> None:
         else:
             raise AssertionError("provider accepted an unsatisfied stronger minimum")
 
-    adapter = CoopMcpServer(
+    adapter = RookholdMcpServer(
         McpConfig(
             base_url=base_url,
             api_key=api_key,
@@ -135,7 +135,7 @@ def main() -> None:
             "id": "run",
             "method": "tools/call",
             "params": {
-                "name": "coop_run_code",
+                "name": "rookhold_run_code",
                 "arguments": {"language": "python", "code": "print('mcp-live')"},
             },
         }
@@ -163,7 +163,7 @@ def main() -> None:
             "id": "cancel",
             "method": "tools/call",
             "params": {
-                "name": "coop_cancel_job",
+                "name": "rookhold_cancel_job",
                 "arguments": {"job_id": adapter_cancellable["job_id"]},
             },
         }

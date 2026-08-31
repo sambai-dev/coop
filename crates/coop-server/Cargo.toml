@@ -5,13 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Coop: a self-hosted, audit-first execution gateway for AI agents"
+description = "Rookhold: a self-hosted, audit-first execution gateway for AI agents"
 readme = "../../README.md"
-default-run = "coop"
+default-run = "rookhold"
+
+[[bin]]
+name = "rookhold"
+path = "src/main.rs"
 
 [[bin]]
 name = "coop"
-path = "src/main.rs"
+path = "src/bin/coop.rs"
 
 [dependencies]
 coop-types = { workspace = true }

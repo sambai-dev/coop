@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a running Coop deployment through its authenticated public API."""
+"""Verify a running Rookhold deployment through its authenticated public API."""
 
 from __future__ import annotations
 
@@ -37,16 +37,16 @@ RESULT_ARTIFACT_MEDIA_TYPE = "application/vnd.coop.execution-result.v1+json"
 IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 CANARIES = {
     "python": (
-        'print("coop-production-canary-python")',
-        "coop-production-canary-python",
+        'print("rookhold-production-canary-python")',
+        "rookhold-production-canary-python",
     ),
     "node": (
-        'console.log("coop-production-canary-node")',
-        "coop-production-canary-node",
+        'console.log("rookhold-production-canary-node")',
+        "rookhold-production-canary-node",
     ),
     "bash": (
-        'printf "%s\\n" "coop-production-canary-bash"',
-        "coop-production-canary-bash",
+        'printf "%s\\n" "rookhold-production-canary-bash"',
+        "rookhold-production-canary-bash",
     ),
 }
 
@@ -62,27 +62,27 @@ class OfflineVerifier:
         self,
         public_key_file: str,
         *,
-        binary: str = "coop-verify",
+        binary: str = "rookhold-verify",
         container_image: Optional[str] = None,
         docker_binary: str = "docker",
     ) -> None:
         if not public_key_file.strip():
             raise VerificationError(
-                "COOP_VERIFY_PUBLIC_KEY_FILE is required; obtain and pin the "
+                "ROOKHOLD_VERIFY_PUBLIC_KEY_FILE is required; obtain and pin the "
                 "Ed25519 public key through an authenticated out-of-band channel"
             )
         public_key = Path(public_key_file)
         if not public_key.is_absolute():
-            raise VerificationError("COOP_VERIFY_PUBLIC_KEY_FILE must be absolute")
+            raise VerificationError("ROOKHOLD_VERIFY_PUBLIC_KEY_FILE must be absolute")
         try:
             metadata = public_key.lstat()
         except OSError as exc:
             raise VerificationError(
-                f"cannot inspect COOP_VERIFY_PUBLIC_KEY_FILE: {exc}"
+                f"cannot inspect ROOKHOLD_VERIFY_PUBLIC_KEY_FILE: {exc}"
             ) from None
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
             raise VerificationError(
-                "COOP_VERIFY_PUBLIC_KEY_FILE must be a non-symlink regular file"
+                "ROOKHOLD_VERIFY_PUBLIC_KEY_FILE must be a non-symlink regular file"
             )
         self.public_key_file = public_key
         self.binary = binary.strip()
@@ -91,22 +91,22 @@ class OfflineVerifier:
         if self.container_image is not None:
             if not IMAGE_ID.fullmatch(self.container_image):
                 raise VerificationError(
-                    "COOP_VERIFY_CONTAINER_IMAGE must be an immutable sha256 image ID"
+                    "ROOKHOLD_VERIFY_CONTAINER_IMAGE must be an immutable sha256 image ID"
                 )
             if not self.docker_binary:
-                raise VerificationError("COOP_VERIFY_DOCKER_BIN must not be empty")
+                raise VerificationError("ROOKHOLD_VERIFY_DOCKER_BIN must not be empty")
         elif not self.binary or not Path(self.binary).is_absolute():
             raise VerificationError(
-                "COOP_VERIFY_BIN must be the absolute path to the packaged verifier"
+                "ROOKHOLD_VERIFY_BIN must be the absolute path to the packaged verifier"
             )
 
     @classmethod
     def from_environment(cls) -> "OfflineVerifier":
         return cls(
-            os.environ.get("COOP_VERIFY_PUBLIC_KEY_FILE", ""),
-            binary=os.environ.get("COOP_VERIFY_BIN", ""),
-            container_image=os.environ.get("COOP_VERIFY_CONTAINER_IMAGE") or None,
-            docker_binary=os.environ.get("COOP_VERIFY_DOCKER_BIN", "docker"),
+            os.environ.get("ROOKHOLD_VERIFY_PUBLIC_KEY_FILE", ""),
+            binary=os.environ.get("ROOKHOLD_VERIFY_BIN", ""),
+            container_image=os.environ.get("ROOKHOLD_VERIFY_CONTAINER_IMAGE") or None,
+            docker_binary=os.environ.get("ROOKHOLD_VERIFY_DOCKER_BIN", "docker"),
         )
 
     def verify(
@@ -121,7 +121,7 @@ class OfflineVerifier:
         outcome: str,
         expected_key_id: str,
     ) -> Dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="coop-production-verify-") as raw_temp:
+        with tempfile.TemporaryDirectory(prefix="rookhold-production-verify-") as raw_temp:
             temporary = Path(raw_temp)
             envelope_path = temporary / "attestation.dsse.json"
             subject_path = temporary / "result-artifact.json"
@@ -158,26 +158,26 @@ class OfflineVerifier:
                     "--cap-add=CHOWN",
                     "--security-opt=no-new-privileges",
                     "--user=0:0",
-                    "--tmpfs=/run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0",
+                    "--tmpfs=/run/rookhold-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0",
                     "--mount",
                     f"type=bind,src={temporary},dst=/verify-input,readonly",
                     "--mount",
                     "type=bind,src="
                     f"{self.public_key_file},"
-                    "dst=/run/coop-bootstrap/trusted-attestation-public-key.pem,readonly",
+                    "dst=/run/rookhold-bootstrap/trusted-attestation-public-key.pem,readonly",
                     "--env",
-                    "COOP_VERIFY_PUBLIC_KEY_SOURCE=/run/coop-bootstrap/trusted-attestation-public-key.pem",
+                    "ROOKHOLD_VERIFY_PUBLIC_KEY_SOURCE=/run/rookhold-bootstrap/trusted-attestation-public-key.pem",
                     "--env",
-                    "COOP_VERIFY_PUBLIC_KEY_FILE=/run/coop-secrets/trusted-attestation-public-key.pem",
+                    "ROOKHOLD_VERIFY_PUBLIC_KEY_FILE=/run/rookhold-secrets/trusted-attestation-public-key.pem",
                     self.container_image,
-                    "/usr/local/bin/coop-verify",
+                    "/usr/local/bin/rookhold-verify",
                     "verify",
                     "--envelope",
                     "/verify-input/attestation.dsse.json",
                     "--subject",
                     "/verify-input/result-artifact.json",
                     "--public-key",
-                    "/run/coop-secrets/trusted-attestation-public-key.pem",
+                    "/run/rookhold-secrets/trusted-attestation-public-key.pem",
                 ]
             command.extend(
                 [
@@ -199,62 +199,62 @@ class OfflineVerifier:
                     timeout=30,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
-                raise VerificationError(f"coop-verify could not run: {exc}") from None
+                raise VerificationError(f"rookhold-verify could not run: {exc}") from None
             if completed.returncode != 0:
                 detail = completed.stderr[:64 * 1024].decode(
                     "utf-8", errors="replace"
                 )
                 raise VerificationError(
-                    f"coop-verify rejected the signed result: {detail.strip()}"
+                    f"rookhold-verify rejected the signed result: {detail.strip()}"
                 )
             if len(completed.stdout) > 64 * 1024:
-                raise VerificationError("coop-verify output exceeded 65536 bytes")
+                raise VerificationError("rookhold-verify output exceeded 65536 bytes")
             try:
                 output = json.loads(completed.stdout.decode("utf-8"))
             except (UnicodeError, json.JSONDecodeError) as exc:
                 raise VerificationError(
-                    f"coop-verify returned invalid JSON: {exc}"
+                    f"rookhold-verify returned invalid JSON: {exc}"
                 ) from None
-            require(isinstance(output, dict), "coop-verify output was not an object")
+            require(isinstance(output, dict), "rookhold-verify output was not an object")
             verified_key_ids = output.get("verified_key_ids")
-            require(output.get("verified") is True, "coop-verify did not report success")
+            require(output.get("verified") is True, "rookhold-verify did not report success")
             require(
                 output.get("execution_id") == execution_id,
-                "coop-verify execution ID differs from the job",
+                "rookhold-verify execution ID differs from the job",
             )
             require(
                 output.get("tenant") == tenant,
-                "coop-verify tenant differs from policy",
+                "rookhold-verify tenant differs from policy",
             )
             require(
                 output.get("subject_name") == subject_name,
-                "coop-verify subject name differs from policy",
+                "rookhold-verify subject name differs from policy",
             )
             require(
                 output.get("subject_media_type") == media_type,
-                "coop-verify subject media type differs from policy",
+                "rookhold-verify subject media type differs from policy",
             )
             require(
                 output.get("subject_sha256") == hashlib.sha256(subject).hexdigest(),
-                "coop-verify subject digest differs from the exact result bytes",
+                "rookhold-verify subject digest differs from the exact result bytes",
             )
             require(
                 output.get("subject_size_bytes") == len(subject),
-                "coop-verify subject size differs from the exact result bytes",
+                "rookhold-verify subject size differs from the exact result bytes",
             )
             require(
                 output.get("outcome") == outcome,
-                "coop-verify outcome differs from the API result",
+                "rookhold-verify outcome differs from the API result",
             )
             require(
                 output.get("event_chain_complete") is True,
-                "coop-verify did not authenticate a complete event chain",
+                "rookhold-verify did not authenticate a complete event chain",
             )
             require(
                 isinstance(verified_key_ids, list)
                 and bool(verified_key_ids)
                 and all(isinstance(value, str) for value in verified_key_ids),
-                "coop-verify returned no verified key IDs",
+                "rookhold-verify returned no verified key IDs",
             )
             require(
                 expected_key_id in verified_key_ids,
@@ -272,10 +272,10 @@ class Api:
     def __init__(self, base_url: str, key: str) -> None:
         parts = urllib.parse.urlsplit(base_url)
         if parts.scheme not in {"http", "https"} or not parts.netloc:
-            raise VerificationError("COOP_VERIFY_BASE_URL must be an absolute HTTP URL")
+            raise VerificationError("ROOKHOLD_VERIFY_BASE_URL must be an absolute HTTP URL")
         if parts.username or parts.password or parts.query or parts.fragment:
             raise VerificationError(
-                "COOP_VERIFY_BASE_URL must not contain credentials, a query, "
+                "ROOKHOLD_VERIFY_BASE_URL must not contain credentials, a query, "
                 "or fragment"
             )
         if parts.scheme == "http" and parts.hostname not in {"127.0.0.1", "localhost"}:
@@ -284,7 +284,7 @@ class Api:
                 "remotely"
             )
         if not key.strip():
-            raise VerificationError("COOP_CLIENT_KEY is required")
+            raise VerificationError("ROOKHOLD_CLIENT_KEY is required")
         self.base_url = urllib.parse.urlunsplit(
             (parts.scheme, parts.netloc, parts.path.rstrip("/"), "", "")
         )
@@ -303,7 +303,7 @@ class Api:
         headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self.key}",
-            "User-Agent": "coop-production-verifier/1",
+            "User-Agent": "rookhold-production-verifier/1",
         }
         if payload is not None:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -351,7 +351,7 @@ class Api:
             headers={
                 "Accept": accept,
                 "Authorization": f"Bearer {self.key}",
-                "User-Agent": "coop-production-verifier/1",
+                "User-Agent": "rookhold-production-verifier/1",
             },
         )
         try:
@@ -377,7 +377,7 @@ def parse_minimum_isolation(raw: str) -> str:
     value = raw.strip()
     require(
         value in ISOLATION_CLASSES,
-        "COOP_VERIFY_MINIMUM_ISOLATION must be one of "
+        "ROOKHOLD_VERIFY_MINIMUM_ISOLATION must be one of "
         + ",".join(sorted(ISOLATION_CLASSES)),
     )
     return value
@@ -764,7 +764,7 @@ def verify_canary(
 
 def parse_languages(raw: str) -> List[str]:
     values = [value.strip().lower() for value in raw.split(",") if value.strip()]
-    require(bool(values), "COOP_VERIFY_LANGUAGES must not be empty")
+    require(bool(values), "ROOKHOLD_VERIFY_LANGUAGES must not be empty")
     unknown = set(values).difference(CANARIES)
     require(
         not unknown, f"unsupported canary language(s): {', '.join(sorted(unknown))}"
@@ -776,14 +776,14 @@ def main() -> None:
     try:
         offline_verifier = OfflineVerifier.from_environment()
         api = Api(
-            os.environ.get("COOP_VERIFY_BASE_URL", "http://127.0.0.1:7300"),
-            os.environ.get("COOP_CLIENT_KEY", ""),
+            os.environ.get("ROOKHOLD_VERIFY_BASE_URL", "http://127.0.0.1:7300"),
+            os.environ.get("ROOKHOLD_CLIENT_KEY", ""),
         )
         languages = parse_languages(
-            os.environ.get("COOP_VERIFY_LANGUAGES", "python,node,bash")
+            os.environ.get("ROOKHOLD_VERIFY_LANGUAGES", "python,node,bash")
         )
         minimum_isolation = parse_minimum_isolation(
-            os.environ.get("COOP_VERIFY_MINIMUM_ISOLATION", DEFAULT_MINIMUM_ISOLATION)
+            os.environ.get("ROOKHOLD_VERIFY_MINIMUM_ISOLATION", DEFAULT_MINIMUM_ISOLATION)
         )
         identity = api.request("GET", "/v1/whoami")
         tenant = identity.get("tenant")

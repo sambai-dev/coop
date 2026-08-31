@@ -32,7 +32,7 @@ fn run(args: Vec<std::ffi::OsString>) -> io::Result<i32> {
     if args.len() != 7 || args[1] != "--internal-v1" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "invalid coop-oci-init invocation",
+            "invalid Rookhold OCI init invocation",
         ));
     }
     let nonce = args[2]

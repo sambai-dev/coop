@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedAt": "2026-08-30T23:20:21.0250175Z",
-  "title": "Design System: Coop",
+  "title": "Design System: Rookhold",
   "extensions": {
     "colorMeta": {
       "workbench": {
@@ -331,7 +331,7 @@
   ],
   "narrative": {
     "northStar": "The Chalk-and-Carbon Execution Desk",
-    "overview": "Coop is an exacting operations surface built from two materials with different responsibilities. Chalk-white command planes hold intent, configuration, history, and proof; a deep carbon well holds the truthful chronological run transcript. The contrast makes execution the focal object without dressing the product as a novelty terminal.\n\nCobalt marks deliberate operator intent: queueing, selection, focus, active navigation, and transcript structure. Green, amber, red, and slate report real execution state. One-pixel seams, compact square controls, restrained type, and server-qualified language keep the system direct and credible.\n\nThe dashboard expresses the world as a Compose/History dock, dominant transcript, and contextual Result & record sheet. That composition belongs to the run workflow rather than every future Coop surface. The durable system is the material hierarchy—chalk around carbon—plus the ordered move from requested intent to accepted policy, execution, result, and portable proof.",
+    "overview": "Rookhold is an exacting operations surface built from two materials with different responsibilities. Chalk-white command planes hold intent, configuration, history, and proof; a deep carbon well holds the truthful chronological run transcript. The contrast makes execution the focal object without dressing the product as a novelty terminal.\n\nCobalt marks deliberate operator intent: queueing, selection, focus, active navigation, and transcript structure. Green, amber, red, and slate report real execution state. One-pixel seams, compact square controls, restrained type, and server-qualified language keep the system direct and credible.\n\nThe dashboard expresses the world as a Compose/History dock, dominant transcript, and contextual Result & record sheet. That composition belongs to the run workflow rather than every future Rookhold surface. The durable system is the material hierarchy—chalk around carbon—plus the ordered move from requested intent to accepted policy, execution, result, and portable proof.",
     "keyCharacteristics": [
       "Chalk command and proof planes surrounding one dominant carbon execution well.",
       "Intent Cobalt reserved for operator action, focus, selection, and chronological structure.",
@@ -368,7 +368,7 @@
       },
       {
         "name": "The Composition Stays With the Run Rule",
-        "body": "Preserve the dock → transcript → result anatomy for this run workflow, but do not force those widths or three regions onto unrelated Coop surfaces.",
+        "body": "Preserve the dock → transcript → result anatomy for this run workflow, but do not force those widths or three regions onto unrelated Rookhold surfaces.",
         "section": "layout"
       },
       {

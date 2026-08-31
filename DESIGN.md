@@ -1,5 +1,5 @@
 ---
-name: "Coop"
+name: "Rookhold"
 description: "Chalk command planes around a carbon run transcript, with cobalt intent and truthful semantic state."
 colors:
   workbench: "#fdfeff"
@@ -167,17 +167,17 @@ components:
     padding: "14px"
 ---
 
-# Design System: Coop
+# Design System: Rookhold
 
 ## Overview
 
 **Creative North Star: "The Chalk-and-Carbon Execution Desk"**
 
-Coop is an exacting operations surface built from two materials with different responsibilities. Chalk-white command planes hold intent, configuration, history, and proof; a deep carbon well holds the truthful chronological run transcript. The contrast makes execution the focal object without dressing the product as a novelty terminal.
+Rookhold is an exacting operations surface built from two materials with different responsibilities. Chalk-white command planes hold intent, configuration, history, and proof; a deep carbon well holds the truthful chronological run transcript. The contrast makes execution the focal object without dressing the product as a novelty terminal.
 
 Cobalt marks deliberate operator intent: queueing, selection, focus, active navigation, and transcript structure. Green, amber, red, and slate report real execution state. One-pixel seams, compact square controls, restrained type, and server-qualified language keep the system direct and credible.
 
-The dashboard expresses the world as a Compose/History dock, dominant transcript, and contextual Result & record sheet. That composition belongs to the run workflow rather than every future Coop surface. The durable system is the material hierarchy—chalk around carbon—plus the ordered move from requested intent to accepted policy, execution, result, and portable proof.
+The dashboard expresses the world as a Compose/History dock, dominant transcript, and contextual Result & record sheet. That composition belongs to the run workflow rather than every future Rookhold surface. The durable system is the material hierarchy—chalk around carbon—plus the ordered move from requested intent to accepted policy, execution, result, and portable proof.
 
 **Key Characteristics:**
 
@@ -265,7 +265,7 @@ Spacing follows a four-pixel base without a named token scale: 4–8px for tight
 
 At 1060px and below, the dock, transcript, and result sheet become mutually focused surfaces under a 118px command bar. At 720px the bar becomes 166px, the transcript collapses from time / marker / content columns to marker / content, and primary controls maintain at least 44px targets. At 440px the brand name yields space, History drops its separate column header, and record metadata stacks. Requested policy still precedes observed posture and portable proof.
 
-**The Composition Stays With the Run Rule.** Preserve the dock → transcript → result anatomy for this run workflow, but do not force those widths or three regions onto unrelated Coop surfaces.
+**The Composition Stays With the Run Rule.** Preserve the dock → transcript → result anatomy for this run workflow, but do not force those widths or three regions onto unrelated Rookhold surfaces.
 
 **The Sequence Never Reflows Rule.** Responsive layout may change which plane is visible, never the order from requested intent through accepted policy, execution, outcome, and proof.
 
@@ -283,7 +283,7 @@ The world is flat and material, not floating. Chalk and carbon planes are separa
 
 ## Shapes
 
-Coop uses square planes, one-pixel seams, and compact controls with a restrained four-pixel radius. Three-pixel corners belong to keycaps and nested output wells; six-pixel corners are reserved for true overlays and the blank-state glyph. Status dots and transcript markers remain circular.
+Rookhold uses square planes, one-pixel seams, and compact controls with a restrained four-pixel radius. Three-pixel corners belong to keycaps and nested output wells; six-pixel corners are reserved for true overlays and the blank-state glyph. Status dots and transcript markers remain circular.
 
 **The Square Desk Rule.** Composer, History, transcript, policy ribbon, and result sheet meet edge to edge; do not turn them into detached rounded cards.
 

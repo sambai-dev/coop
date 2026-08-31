@@ -6,7 +6,20 @@ import unittest
 import urllib.error
 import urllib.parse
 
-from coop import Coop, CoopError, Limits, _SameOriginRedirect, isolation_satisfies
+from coop import Coop, CoopError
+from rookhold import (
+    Limits,
+    Rookhold,
+    RookholdError,
+    _SameOriginRedirect,
+    isolation_satisfies,
+)
+
+
+class CompatibilityTests(unittest.TestCase):
+    def test_legacy_client_names_alias_rookhold(self):
+        self.assertIs(Coop, Rookhold)
+        self.assertIs(CoopError, RookholdError)
 
 
 class Response:
@@ -88,8 +101,8 @@ class CoopTests(unittest.TestCase):
         def opener(_request, **_kwargs):
             return TruncatedResponse()
 
-        client = Coop("https://example.test", "secret", opener=opener)
-        with self.assertRaises(CoopError) as raised:
+        client = Rookhold("https://example.test", "secret", opener=opener)
+        with self.assertRaises(RookholdError) as raised:
             client.jobs()
 
         self.assertEqual(raised.exception.code, "transport_error")
@@ -108,9 +121,9 @@ class CoopTests(unittest.TestCase):
             {"Retry-After": "2", "x-request-id": "req-truncated"},
             body,
         )
-        client = Coop("https://example.test", "secret", opener=QueueOpener(error))
+        client = Rookhold("https://example.test", "secret", opener=QueueOpener(error))
 
-        with self.assertRaises(CoopError) as raised:
+        with self.assertRaises(RookholdError) as raised:
             client.jobs()
 
         self.assertEqual(raised.exception.status, 503)
@@ -125,7 +138,7 @@ class CoopTests(unittest.TestCase):
         opener = QueueOpener(
             {"job_id": "j", "status": "queued", "stream_url": "/s", "replay_url": "/r"}
         )
-        client = Coop("https://example.test/prefix/", "secret", opener=opener)
+        client = Rookhold("https://example.test/prefix/", "secret", opener=opener)
         client.submit("python", "print(1)", limits={"mem_mb": 128})
         body = json.loads(opener.requests[0].data)
         self.assertEqual(body["limits"], {"mem_mb": 128})
@@ -137,7 +150,7 @@ class CoopTests(unittest.TestCase):
         opener = QueueOpener(
             {"job_id": "j", "status": "queued", "stream_url": "/s", "replay_url": "/r"}
         )
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         client.submit("bash", "true", limits=Limits(mem_mb=64), wall_seconds=3)
         body = json.loads(opener.requests[0].data)
         self.assertEqual(body["limits"], {"mem_mb": 64, "wall_seconds": 3})
@@ -146,7 +159,7 @@ class CoopTests(unittest.TestCase):
         opener = QueueOpener(
             {"job_id": "j", "status": "queued", "stream_url": "/s", "replay_url": "/r"}
         )
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         client.submit(
             "python",
             "pass",
@@ -161,7 +174,7 @@ class CoopTests(unittest.TestCase):
         opener = QueueOpener(
             {"job_id": "j", "status": "queued", "stream_url": "/s", "replay_url": "/r"}
         )
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         client.submit("python", "pass", requirements={})
         self.assertEqual(json.loads(opener.requests[0].data)["requirements"], {})
 
@@ -175,7 +188,7 @@ class CoopTests(unittest.TestCase):
                 "replay_url": "/r",
             },
         )
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
 
         submitted = client.submit(
             "python",
@@ -216,7 +229,7 @@ class CoopTests(unittest.TestCase):
                 },
             ),
         )
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         first = client.submit_result("python", "pass", idempotency_key="submit-1")
         replay = client.submit_result("python", "pass", idempotency_key="submit-1")
         self.assertEqual(first["job"]["job_id"], "j")
@@ -229,9 +242,9 @@ class CoopTests(unittest.TestCase):
         opener = QueueOpener(
             urllib.error.URLError(TimeoutError("response was ambiguous"))
         )
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
 
-        with self.assertRaises(CoopError) as raised:
+        with self.assertRaises(RookholdError) as raised:
             client.submit("python", "pass", idempotency_key="submit-456")
 
         self.assertEqual(raised.exception.code, "request_timeout")
@@ -242,14 +255,14 @@ class CoopTests(unittest.TestCase):
         opener = QueueOpener(
             urllib.error.URLError(TimeoutError("response was ambiguous"))
         )
-        client = Coop("https://example.test", "secret", opener=opener)
-        with self.assertRaises(CoopError) as raised:
+        client = Rookhold("https://example.test", "secret", opener=opener)
+        with self.assertRaises(RookholdError) as raised:
             client.submit("python", "pass")
         self.assertFalse(raised.exception.retryable)
         self.assertIsNone(raised.exception.idempotency_key)
 
     def test_submit_rejects_unsafe_retry_configuration_before_transport(self):
-        client = Coop("https://example.test", "secret", opener=QueueOpener())
+        client = Rookhold("https://example.test", "secret", opener=QueueOpener())
         for operation in (
             lambda: client.submit("python", "pass", idempotency_key="bad\nkey"),
             lambda: client.submit("python", "pass", idempotency_key="k" * 129),
@@ -272,7 +285,7 @@ class CoopTests(unittest.TestCase):
                 "replay_url": "/r",
             },
         )
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         client.submit("python", "pass", retry_ambiguous=True, retry_backoff=0)
         keys = [request.get_header("Idempotency-key") for request in opener.requests]
         self.assertEqual(len(set(keys)), 1)
@@ -286,7 +299,7 @@ class CoopTests(unittest.TestCase):
             headers={"Idempotency-Key": "submit-1"},
         )
         handler = _SameOriginRedirect("https://example.test")
-        with self.assertRaises(CoopError) as raised:
+        with self.assertRaises(RookholdError) as raised:
             handler.redirect_request(
                 request,
                 None,
@@ -304,7 +317,7 @@ class CoopTests(unittest.TestCase):
             headers={"Authorization": "Bearer tenant-secret"},
         )
         handler = _SameOriginRedirect("https://example.test")
-        with self.assertRaises(CoopError) as raised:
+        with self.assertRaises(RookholdError) as raised:
             handler.redirect_request(
                 request,
                 None,
@@ -332,8 +345,8 @@ class CoopTests(unittest.TestCase):
             {"Retry-After": "2", "x-request-id": "req-h"},
             io.BytesIO(json.dumps(payload).encode()),
         )
-        client = Coop("https://example.test", "secret", opener=QueueOpener(error))
-        with self.assertRaises(CoopError) as raised:
+        client = Rookhold("https://example.test", "secret", opener=QueueOpener(error))
+        with self.assertRaises(RookholdError) as raised:
             client.jobs()
         self.assertEqual(raised.exception.status, 503)
         self.assertEqual(raised.exception.code, "queue_full")
@@ -358,9 +371,9 @@ class CoopTests(unittest.TestCase):
             io.BytesIO(json.dumps(payload).encode()),
         )
         opener = QueueOpener(error)
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
 
-        with self.assertRaises(CoopError) as raised:
+        with self.assertRaises(RookholdError) as raised:
             client.result("missing", timeout=1)
 
         self.assertEqual(raised.exception.code, "job_not_found")
@@ -398,7 +411,7 @@ class CoopTests(unittest.TestCase):
                 "next_cursor": None,
             },
         )
-        result = Coop("https://example.test", "secret", opener=opener).result(
+        result = Rookhold("https://example.test", "secret", opener=opener).result(
             "j", timeout=1
         )
         self.assertEqual(result["stdout"], "ok")
@@ -406,7 +419,7 @@ class CoopTests(unittest.TestCase):
 
     def test_wait_and_result_deadlines_are_finite_and_zero_is_immediate(self):
         opener = QueueOpener()
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         for operation in (
             lambda: client.wait("j", timeout=0),
             lambda: client.result("j", timeout=0),
@@ -434,7 +447,7 @@ class CoopTests(unittest.TestCase):
             "violations": [],
         }
         opener = QueueOpener(terminal, result)
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         client.wait("j", timeout=0.25)
         client.result("j", timeout=0.25)
         timeouts = [call["timeout"] for call in opener.request_kwargs]
@@ -448,7 +461,7 @@ class CoopTests(unittest.TestCase):
                 "next_cursor": 4,
             },
         )
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         page = client.list(
             limit=10, cursor="before", status="running", language="python"
         )
@@ -465,14 +478,14 @@ class CoopTests(unittest.TestCase):
 
     def test_legacy_array_replay_is_filtered_client_side(self):
         opener = QueueOpener([{"seq": 1}, {"seq": 2}])
-        events = Coop("https://example.test", "secret", opener=opener).replay(
+        events = Rookhold("https://example.test", "secret", opener=opener).replay(
             "j", after=1
         )
         self.assertEqual([event["seq"] for event in events], [2])
 
     def test_legacy_minus_one_cursor_is_normalized_for_v02_servers(self):
         opener = QueueOpener([])
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         client.event_page("j", after=-1)
         query = urllib.parse.parse_qs(
             urllib.parse.urlsplit(opener.requests[0].full_url).query
@@ -484,7 +497,7 @@ class CoopTests(unittest.TestCase):
             {"events": [{"seq": 1}], "next_cursor": 1},
             {"events": [{"seq": 2}], "next_cursor": None},
         )
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         self.assertEqual([event["seq"] for event in client.replay("j")], [1, 2])
         self.assertEqual(
             urllib.parse.parse_qs(
@@ -513,7 +526,7 @@ class CoopTests(unittest.TestCase):
                 "next_cursor": None,
             }
         )
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         events = list(
             client.stream(
                 "j",
@@ -557,7 +570,7 @@ class CoopTests(unittest.TestCase):
                 return Response({"job_id": "j", "status": "succeeded"})
 
         opener = BacklogOpener()
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         events = list(
             client.stream(
                 "j",
@@ -597,7 +610,7 @@ class CoopTests(unittest.TestCase):
                 return Response({"job_id": "j", "status": "succeeded"})
 
         opener = RacingOpener()
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         events = list(
             client.stream(
                 "j",
@@ -611,7 +624,7 @@ class CoopTests(unittest.TestCase):
 
     def test_cancel_accepts_an_empty_success_response(self):
         opener = QueueOpener(None, None)
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         self.assertIsNone(client.cancel("j"))
         self.assertEqual(
             client.cancel_result("j"),
@@ -642,7 +655,7 @@ class CoopTests(unittest.TestCase):
                 "already_terminal": True,
             },
         )
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         self.assertEqual(client.cancel_result("j")["job"], job)
         self.assertEqual(client.cancel("j"), job)
         terminal = client.cancel_result("j")
@@ -677,7 +690,7 @@ class CoopTests(unittest.TestCase):
                 },
             },
         )
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
         self.assertEqual(client.whoami()["tenant"], "acme")
         capabilities = client.capabilities()
         self.assertTrue(capabilities["features"]["stream_tickets"])
@@ -698,7 +711,7 @@ class CoopTests(unittest.TestCase):
             "trust_notice": "Pin this key out of band.",
         }
         opener = QueueOpener(key)
-        client = Coop("https://example.test/prefix", "tenant-secret", opener=opener)
+        client = Rookhold("https://example.test/prefix", "tenant-secret", opener=opener)
 
         self.assertEqual(client.attestation_public_key(), key)
         request = opener.requests[0]
@@ -728,7 +741,7 @@ class CoopTests(unittest.TestCase):
             binary_response(envelope, "application/vnd.dsse.envelope.v1+json"),
             binary_response(artifact, "application/vnd.coop.execution-result.v1+json"),
         )
-        client = Coop("https://example.test", "tenant-secret", opener=opener)
+        client = Rookhold("https://example.test", "tenant-secret", opener=opener)
 
         downloaded_envelope = client.download_attestation("job/one")
         downloaded_artifact = client.download_result_artifact("job/one")
@@ -783,12 +796,12 @@ class CoopTests(unittest.TestCase):
         )
         for headers, expected_code in cases:
             with self.subTest(expected_code=expected_code, headers=headers):
-                client = Coop(
+                client = Rookhold(
                     "https://example.test",
                     "secret",
                     opener=QueueOpener(Response(None, raw=content, headers=headers)),
                 )
-                with self.assertRaises(CoopError) as raised:
+                with self.assertRaises(RookholdError) as raised:
                     client.download_attestation("job")
                 self.assertEqual(raised.exception.code, expected_code)
 
@@ -812,9 +825,9 @@ class CoopTests(unittest.TestCase):
             {"Content-Type": "application/json"},
             body,
         )
-        client = Coop("https://example.test", "secret", opener=QueueOpener(error))
+        client = Rookhold("https://example.test", "secret", opener=QueueOpener(error))
 
-        with self.assertRaises(CoopError) as raised:
+        with self.assertRaises(RookholdError) as raised:
             client.download_attestation("job")
 
         self.assertEqual(raised.exception.status, 404)
@@ -833,11 +846,11 @@ class CoopTests(unittest.TestCase):
             },
             url="https://attacker.example/evidence",
         )
-        client = Coop(
+        client = Rookhold(
             "https://example.test", "tenant-secret", opener=QueueOpener(response)
         )
 
-        with self.assertRaises(CoopError) as raised:
+        with self.assertRaises(RookholdError) as raised:
             client.download_result_artifact("job")
 
         self.assertEqual(raised.exception.code, "unsafe_redirect")
@@ -846,9 +859,9 @@ class CoopTests(unittest.TestCase):
 
     def test_artifact_download_timeout_is_bounded_and_retryable(self):
         opener = QueueOpener(urllib.error.URLError(TimeoutError("deadline")))
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
 
-        with self.assertRaises(CoopError) as raised:
+        with self.assertRaises(RookholdError) as raised:
             client.download_result_artifact("job", timeout=0.25)
 
         self.assertEqual(raised.exception.code, "request_timeout")
@@ -1035,7 +1048,7 @@ class CoopTests(unittest.TestCase):
             },
         }
         opener = QueueOpener(unknown, known, recovered)
-        client = Coop("https://example.test", "secret", opener=opener)
+        client = Rookhold("https://example.test", "secret", opener=opener)
 
         queued = client.get("queued")
         complete = client.get("done")
@@ -1069,7 +1082,7 @@ class CoopTests(unittest.TestCase):
         self.assertEqual(restarted["receipt"]["requested_limits"], {"wall_seconds": 15})
 
     def test_limit_names_are_checked_before_transport(self):
-        client = Coop("https://example.test", "secret", opener=QueueOpener())
+        client = Rookhold("https://example.test", "secret", opener=QueueOpener())
         with self.assertRaises(TypeError):
             client.submit("python", "pass", limits={"memory": 1})
         with self.assertRaises(ValueError):
@@ -1094,7 +1107,7 @@ class CoopTests(unittest.TestCase):
             urls.append(url)
             return socket
 
-        client = Coop(
+        client = Rookhold(
             "https://example.test/prefix",
             "secret",
             opener=opener,
@@ -1141,7 +1154,7 @@ class CoopTests(unittest.TestCase):
             },
         )
         socket_urls = []
-        client = Coop(
+        client = Rookhold(
             "https://example.test",
             "secret",
             opener=opener,
@@ -1187,7 +1200,7 @@ class CoopTests(unittest.TestCase):
             },
         )
         default_socket_urls = []
-        default_client = Coop(
+        default_client = Rookhold(
             "https://example.test",
             "secret",
             opener=default_opener,
@@ -1215,7 +1228,7 @@ class CoopTests(unittest.TestCase):
             opted_in_urls.append(url)
             return opted_in_socket
 
-        opted_in_client = Coop(
+        opted_in_client = Rookhold(
             "https://example.test",
             "secret",
             opener=opted_in_opener,
@@ -1238,14 +1251,14 @@ class CoopTests(unittest.TestCase):
             "https://example.test?q=1",
         ):
             with self.assertRaises(ValueError):
-                Coop(url, "secret")
+                Rookhold(url, "secret")
 
         for timeout in (float("nan"), float("inf"), 0):
             with self.assertRaises(ValueError):
-                Coop("https://example.test", "secret", timeout=timeout)
+                Rookhold("https://example.test", "secret", timeout=timeout)
 
     def test_stream_rejects_non_finite_polling_before_transport(self):
-        client = Coop("https://example.test", "secret", opener=QueueOpener())
+        client = Rookhold("https://example.test", "secret", opener=QueueOpener())
         for interval in (float("nan"), float("inf")):
             with self.assertRaises(ValueError):
                 list(

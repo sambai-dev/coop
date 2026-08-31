@@ -39,7 +39,7 @@ use tokio::process::{Child, Command};
 pub const REVIEWED_RUNSC_VERSION: &str = "runsc version release-20260817.0";
 pub const REVIEWED_RUNSC_SHA256_X86_64: &str =
     "048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c";
-pub const OCI_INIT_PATH: &str = "/usr/local/bin/coop-oci-init";
+pub const OCI_INIT_PATH: &str = "/usr/local/bin/rookhold-oci-init";
 pub const ROOTFS_MANIFEST_PATH: &str = "/.coop-rootfs.manifest";
 
 const CONTROL_TICK: Duration = Duration::from_millis(20);
@@ -103,7 +103,7 @@ impl GvisorPlatform {
             "kvm" => Ok(Self::Kvm),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "COOP_GVISOR_PLATFORM must be systrap or kvm",
+                "ROOKHOLD_GVISOR_PLATFORM must be systrap or kvm",
             )),
         }
     }
@@ -147,13 +147,13 @@ impl GvisorProvider {
             ));
         }
         validate_host_settings()?;
-        let runsc = validate_trusted_executable(&runsc, "COOP_GVISOR_RUNSC")?;
+        let runsc = validate_trusted_executable(&runsc, "ROOKHOLD_GVISOR_RUNSC")?;
         let runtime_sha256 = hash_file(&runsc)?;
         if runtime_sha256 != REVIEWED_RUNSC_SHA256_X86_64 {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "COOP_GVISOR_RUNSC digest {runtime_sha256} is not the reviewed {REVIEWED_RUNSC_SHA256_X86_64}"
+                    "ROOKHOLD_GVISOR_RUNSC digest {runtime_sha256} is not the reviewed {REVIEWED_RUNSC_SHA256_X86_64}"
                 ),
             ));
         }
@@ -215,7 +215,7 @@ impl GvisorProvider {
             isolated: ready,
             private_rootfs: ready,
             dedicated_bootstrap: ready,
-            // This is distinct from runsc's own host seccomp sandbox. Coop
+            // This is distinct from runsc's own host seccomp sandbox. Rookhold
             // does not claim that its namespace guest filter was installed.
             seccomp: false,
             network_allowed: observed.map(|()| false),
@@ -963,7 +963,7 @@ impl GvisorProvider {
             .arg("--gofer-network-namespace=new")
             .arg("--gvisor-marker-file=true")
             .arg("--sidecar-release-enforcement-policy=ALWAYS")
-            // Host settings are validated by Coop before the protected
+            // Host settings are validated by Rookhold before the protected
             // service starts. runsc must not need write access to kernel
             // tunables from inside the systemd sandbox.
             .arg("--host-settings=check")
@@ -1514,7 +1514,7 @@ fn random_nonce() -> io::Result<String> {
 }
 
 fn validate_rootfs_root(path: &Path) -> io::Result<PathBuf> {
-    ensure_absolute_trusted_path(path, "COOP_ROOTFS")?;
+    ensure_absolute_trusted_path(path, "ROOKHOLD_ROOTFS")?;
     let canonical = fs::canonicalize(path)?;
     if canonical == Path::new("/") || !canonical.is_dir() {
         return Err(io::Error::new(
@@ -1547,7 +1547,7 @@ fn validate_host_settings() -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "vm.max_map_count is {value}; reviewed gVisor production requires at least {MIN_HOST_MAX_MAP_COUNT} before the protected Coop service starts"
+                "vm.max_map_count is {value}; reviewed gVisor production requires at least {MIN_HOST_MAX_MAP_COUNT} before the protected Rookhold service starts"
             ),
         ));
     }
@@ -1618,7 +1618,7 @@ fn validate_rootfs_manifest(
     }
     let mut init_entries = actual
         .iter()
-        .filter(|entry| entry.path == "usr/local/bin/coop-oci-init");
+        .filter(|entry| entry.path == "usr/local/bin/rookhold-oci-init");
     if init_entries
         .next()
         .and_then(|entry| entry.sha256.as_deref())

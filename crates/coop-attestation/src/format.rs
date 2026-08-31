@@ -17,7 +17,9 @@ use std::num::NonZeroUsize;
 pub const DSSE_PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 /// The in-toto Statement schema URI used by this profile.
 pub const IN_TOTO_STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
-/// The globally unique Coop execution-predicate type URI.
+/// The globally unique Rookhold execution-predicate type URI.
+///
+/// The legacy repository URL is immutable wire identity for predicate v1.
 pub const COOP_EXECUTION_PREDICATE_TYPE: &str =
     "https://github.com/sambai-dev/coop/blob/main/crates/coop-attestation/FORMAT.md#predicate-v1";
 /// The predicate's integer schema discriminator.
@@ -108,7 +110,7 @@ impl ArtifactDigest {
     }
 }
 
-/// Authenticated metadata describing the one result artifact in a Coop statement.
+/// Authenticated metadata describing the one result artifact in a Rookhold statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubjectArtifact {
     name: String,
@@ -158,7 +160,7 @@ impl SubjectArtifact {
     }
 }
 
-/// Strict Coop profile of an in-toto ResourceDescriptor.
+/// Strict Rookhold profile of an in-toto ResourceDescriptor.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ResourceDescriptor {
     name: String,
@@ -216,7 +218,7 @@ impl CoopResultDescriptorV1 {
     }
 }
 
-/// Version 1 Coop execution predicate carried by the in-toto statement.
+/// Version 1 Rookhold execution predicate carried by the in-toto statement.
 #[derive(Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CoopExecutionPredicateV1 {
@@ -233,7 +235,7 @@ impl CoopExecutionPredicateV1 {
         self.schema_version
     }
 
-    /// Stable Coop execution/job identifier supplied by the control plane.
+    /// Stable Rookhold execution/job identifier supplied by the control plane.
     pub fn execution_id(&self) -> &str {
         &self.execution_id
     }
@@ -248,7 +250,7 @@ impl CoopExecutionPredicateV1 {
         &self.result
     }
 
-    /// Existing Coop receipt object embedded without exposing it through CLI output.
+    /// Existing Rookhold receipt object embedded without exposing it through CLI output.
     pub fn receipt(&self) -> &Value {
         &self.receipt
     }
@@ -267,7 +269,7 @@ impl fmt::Debug for CoopExecutionPredicateV1 {
     }
 }
 
-/// Strict Coop profile of an in-toto Statement/v1.
+/// Strict Rookhold profile of an in-toto Statement/v1.
 #[derive(Clone, Serialize, PartialEq)]
 pub struct StatementV1 {
     #[serde(rename = "_type")]
@@ -284,7 +286,7 @@ impl StatementV1 {
         &self.statement_type
     }
 
-    /// Statement subjects. A verified Coop profile contains exactly one.
+    /// Statement subjects. A verified Rookhold profile contains exactly one.
     pub fn subjects(&self) -> &[ResourceDescriptor] {
         &self.subject
     }
@@ -294,7 +296,7 @@ impl StatementV1 {
         &self.predicate_type
     }
 
-    /// Authenticated Coop execution predicate.
+    /// Authenticated Rookhold execution predicate.
     pub fn predicate(&self) -> &CoopExecutionPredicateV1 {
         &self.predicate
     }
@@ -628,7 +630,7 @@ impl fmt::Debug for VerifiedAttestation {
     }
 }
 
-/// Build a tenant-bound in-toto Statement/v1 around one result artifact and Coop receipt.
+/// Build a tenant-bound in-toto Statement/v1 around one result artifact and Rookhold receipt.
 pub fn build_statement(
     tenant: impl Into<String>,
     execution_id: impl Into<String>,
@@ -680,7 +682,7 @@ pub fn build_statement(
     Ok(statement)
 }
 
-/// Strictly parse a stored receipt JSON object and build the tenant-bound Coop statement.
+/// Strictly parse a stored receipt JSON object and build the tenant-bound Rookhold statement.
 ///
 /// This is the preferred server-integration entry point when the existing
 /// receipt is available as canonical JSON text. It rejects duplicate keys
@@ -696,7 +698,7 @@ pub fn build_statement_from_receipt_json(
             max_bytes: MAX_STATEMENT_BYTES,
         });
     }
-    let receipt: Value = strict_json::from_slice(receipt_json, "Coop receipt")?;
+    let receipt: Value = strict_json::from_slice(receipt_json, "Rookhold receipt")?;
     build_statement(tenant, execution_id, subject, receipt)
 }
 
@@ -762,7 +764,7 @@ pub fn sign_statement(
     })
 }
 
-/// Build, encode, and sign a Coop execution attestation.
+/// Build, encode, and sign a Rookhold execution attestation.
 pub fn create_attestation(
     tenant: impl Into<String>,
     execution_id: impl Into<String>,
@@ -1238,7 +1240,7 @@ fn write_canonical_json(value: &Value, output: &mut String) -> Result<(), Attest
         Value::Number(value) => output.push_str(&value.to_string()),
         Value::String(value) => output.push_str(&serde_json::to_string(value).map_err(|_| {
             AttestationError::JsonEncoding {
-                document: "Coop receipt",
+                document: "Rookhold receipt",
             }
         })?),
         Value::Array(values) => {
@@ -1261,7 +1263,7 @@ fn write_canonical_json(value: &Value, output: &mut String) -> Result<(), Attest
                 }
                 output.push_str(&serde_json::to_string(key).map_err(|_| {
                     AttestationError::JsonEncoding {
-                        document: "Coop receipt",
+                        document: "Rookhold receipt",
                     }
                 })?);
                 output.push(':');
@@ -1284,7 +1286,7 @@ fn decode_dsse_base64(encoded: &str, field: &'static str) -> Result<Vec<u8>, Att
 
 /// Encode DSSE v1 pre-authentication encoding (PAE) for exact payload bytes.
 ///
-/// This helper applies the Coop profile's payload and media-type limits. It
+/// This helper applies the Rookhold profile's payload and media-type limits. It
 /// does not sign, parse, or canonicalize either input.
 pub fn dsse_v1_pae(payload_type: &str, payload: &[u8]) -> Result<Vec<u8>, AttestationError> {
     if payload_type.len() > MAX_MEDIA_TYPE_BYTES {

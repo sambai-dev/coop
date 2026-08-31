@@ -3,5 +3,5 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["coop.ts", "tests/typecheck-usage.ts"]
+  "include": ["rookhold.ts", "coop.ts", "tests/typecheck-usage.ts"]
 }

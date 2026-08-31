@@ -1332,7 +1332,9 @@ async fn finish_via(
 /// sweep must never take the server down.
 pub fn spawn_retention_sweeper(state: AppState) {
     if state.cfg.retention_hours == 0 {
-        tracing::info!("retention disabled (COOP_RETENTION_HOURS=0); event log grows unbounded");
+        tracing::info!(
+            "retention disabled (ROOKHOLD_RETENTION_HOURS=0); event log grows unbounded"
+        );
         return;
     }
     let max_age_ms = (state.cfg.retention_hours * 3600 * 1000) as i64;

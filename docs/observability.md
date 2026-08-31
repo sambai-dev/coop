@@ -1,6 +1,6 @@
 # Observability contract
 
-Coop emits privacy-bounded structured logs and process-local metrics. Neither
+Rookhold emits privacy-bounded structured logs and process-local metrics. Neither
 surface is an evidence ledger: job events, receipts, exact result artifacts,
 and signed envelopes remain the durable source of truth.
 
@@ -10,7 +10,7 @@ Every HTTP request receives a server-generated UUIDv7 `x-request-id`. The same
 identifier appears in structured request logs and in an error envelope. A
 caller-supplied `x-request-id` is never trusted or reflected.
 
-Coop validates W3C `traceparent` and `tracestate`, then starts a fresh local
+Rookhold validates W3C `traceparent` and `tracestate`, then starts a fresh local
 trace. A valid remote trace/span pair is retained only as a link; it is not the
 local parent and its sampling flag cannot force local recording. Invalid input
 is reduced to a closed rejection reason. Raw `tracestate`, `baggage`, query
@@ -26,15 +26,15 @@ hook—schema v4 does not persist trace headers or baggage.
 
 ## Logs
 
-`COOP_LOG_FORMAT=json` selects newline-delimited JSON. Production mode defaults
-to JSON; development defaults to compact text. `COOP_LOG_FORMAT=compact` (or
+`ROOKHOLD_LOG_FORMAT=json` selects newline-delimited JSON. Production mode defaults
+to JSON; development defaults to compact text. `ROOKHOLD_LOG_FORMAT=compact` (or
 `text`) overrides either default. `RUST_LOG` continues to control filtering.
 
 JSON request and job records carry `request_id`, `trace_id`, `span_id`, local
 `trace_flags`, matched route templates, and bounded upstream-link fields. Job
 IDs may appear in logs for operator investigation, but never as metric labels.
 Attestation retry warnings identify the job and bounded failure context but
-never key material or result bytes. Coop does not send logs or traces over the network and has no Collector health
+never key material or result bytes. Rookhold does not send logs or traces over the network and has no Collector health
 dependency. A future exporter must be bounded, optional, fail-open, and flushed
 under an explicit shutdown deadline.
 
@@ -43,12 +43,12 @@ under an explicit shutdown deadline.
 Set a dedicated credential of at least 16 characters:
 
 ```dotenv
-COOP_METRICS_TOKEN=replace-with-an-operator-only-secret
+ROOKHOLD_METRICS_TOKEN=replace-with-an-operator-only-secret
 ```
 
 This enables `GET /metrics`. The token is accepted only by that endpoint; tenant
 API keys are rejected. Keep the endpoint on the operator network and scrape it
-with `Authorization: Bearer $COOP_METRICS_TOKEN`. If the setting is absent, the
+with `Authorization: Bearer $ROOKHOLD_METRICS_TOKEN`. If the setting is absent, the
 endpoint returns `404` and tenant/job service is unaffected.
 
 The endpoint negotiates OpenMetrics 1.0 when the `Accept` header permits it and

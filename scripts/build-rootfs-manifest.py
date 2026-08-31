@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build Coop's canonical, content-complete trusted-rootfs manifest."""
+"""Build Rookhold's canonical, content-complete trusted-rootfs manifest."""
 
 from __future__ import annotations
 

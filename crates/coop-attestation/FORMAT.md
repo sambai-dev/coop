@@ -1,13 +1,13 @@
-# Coop execution attestation profile
+# Rookhold execution attestation profile
 
-This component implements a narrow portable format for signing one Coop
+This component implements a narrow portable format for signing one Rookhold
 execution result. It composes three independent contracts:
 
 1. in-toto Attestation Framework `Statement/v1`;
-2. the Coop execution predicate v1 defined below;
+2. the Rookhold execution predicate v1 defined below;
 3. DSSE v1 pre-authentication encoding signed with Ed25519.
 
-The profile authenticates what a Coop control plane claims it observed. A
+The profile authenticates what a Rookhold control plane claims it observed. A
 valid signature does not prove that the claim is true, that an external side
 effect happened, that execution was deterministic, or that the executor was a
 TEE or remotely attested environment.
@@ -34,7 +34,7 @@ PAE(type, body) = "DSSEv1" SP LEN(type) SP type SP LEN(body) SP body
 emits padded standard Base64. In accordance with DSSE v1.0.2 and RFC 4648,
 verifiers accept padded standard or padded URL-safe Base64.
 
-`keyid` is an unauthenticated hint. Coop emits
+`keyid` is an unauthenticated hint. Rookhold emits
 `sha256:<lowercase SHA-256 of the raw 32-byte Ed25519 public key>`. The verifier
 may use the hint to choose trial order, but a signature is accepted only when
 one of the configured trusted public keys verifies it. Thresholds count
@@ -117,23 +117,27 @@ does not permit a different schema under the same predicate URI.
 `executionId`, `tenant`, `result`, and `receipt` are required. `tenant` is the
 1–128 character authoritative owner identity read from the durable job row,
 not from a download request or receipt extension. `receipt` is the existing
-Coop v1 terminal receipt. Its `job_id` must equal `executionId`; its outcome,
+Rookhold v1 terminal receipt. Its `job_id` must equal `executionId`; its outcome,
 receipt SHA-256, and v1 event-chain core are structurally validated. A receipt
 may omit tenant so v0.3 terminal rows remain byte-for-byte backfillable. If a
 receipt extension named `tenant` is present, it must equal the predicate
 tenant. The predicate uses lowerCamelCase following in-toto predicate
-guidance. The embedded receipt retains Coop's existing snake_case field names
+guidance. The embedded receipt retains Rookhold's existing snake_case field names
 and may carry additional fields.
 
 Predicate v1 was finalized with required tenant binding before the first
-release of portable Coop attestations. No supported v0.3 release emitted this
+release of portable Rookhold attestations. No supported v0.3 release emitted this
 profile, so this closes the contract without creating an intentionally
 unbound legacy attestation variant.
 
-### Coop receipt hash
+The predicate URI deliberately retains the former `sambai-dev/coop` repository
+path. It is signed wire identity, not a documentation redirect, and changing it
+would make v1 evidence incompatible with existing verifiers.
 
-The attestation verifies the existing Coop receipt v1 checksum before signing
-and after DSSE verification. Its canonicalization is the same versioned Coop
+### Rookhold receipt hash
+
+The attestation verifies the existing Rookhold receipt v1 checksum before signing
+and after DSSE verification. Its canonicalization is the same versioned Rookhold
 algorithm used by `coop-store`:
 
 1. remove the top-level `receipt_sha256` member;
@@ -144,7 +148,7 @@ algorithm used by `coop-store`:
 6. encode keys and strings with `serde_json` JSON escaping;
 7. SHA-256 the resulting bytes and lowercase-hex encode the digest.
 
-All receipt extension fields participate. Coop v1's own numeric evidence fields
+All receipt extension fields participate. Rookhold v1's own numeric evidence fields
 are integers. An extension that depends on cross-language floating-point
 canonicalization should use strings or define its own independently hashed
 artifact; this v1 algorithm is not an RFC 8785 claim.

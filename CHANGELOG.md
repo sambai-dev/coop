@@ -1,6 +1,27 @@
 # Changelog
 
-All notable changes are documented here. Coop follows semantic versioning while pre-1.0; minor versions can contain API and deployment changes.
+All notable changes are documented here. Rookhold follows semantic versioning while pre-1.0; minor versions can contain API and deployment changes.
+
+## 0.6.0 — 2026-08-31
+
+### Rookhold identity
+
+- Rename the public product, repository, dashboard, release archives, Docker image, service templates, SDK distributions, CLI commands, MCP tools, documentation, and release metadata from Coop to Rookhold.
+- Make `rookhold`, `rookhold-verify`, `rookhold-sandbox-init`, `rookhold-oci-init`, `rookhold-mcp`, the `rookhold` Python module, and the `rookhold-sdk` TypeScript package the primary interfaces.
+- Keep the Rust workspace crate names as an implementation namespace so the rename does not create an unnecessary internal migration.
+
+### Compatibility and evidence stability
+
+- Retain the legacy `coop` binaries, Python imports and class aliases, TypeScript `./coop` export, `coop-mcp` command, old MCP tool names, and every `COOP_*` configuration variable as migration aliases.
+- Prefer `ROOKHOLD_*` values, fall back to `COOP_*`, and fail closed when matching non-empty old and new variables disagree.
+- Preserve `/v1`, `application/vnd.coop...` media types, `coop://` subject names, evidence schema names, the predicate-v1 URI, metrics names, receipt canonicalization, event hashes, and MCP submission-reconciliation domain separators. Existing databases and signed evidence remain valid.
+- Adopt existing default `coop.db`, job data, the Compose `coop-data` volume, and `.coop-runtime` state when present; new installations use Rookhold names.
+
+### Release and documentation
+
+- Publish the exact eight-asset v0.6 release under Rookhold archive, SDK, SBOM, checksum, attestation, and workflow-artifact names while carrying legacy executable aliases inside platform archives.
+- Update the beginner quick start, agent integrations, deployment examples, systemd templates, migration guide, release checks, and production verification commands for the new identity.
+- Refresh the embedded execution desk branding and its exact Content Security Policy hash without changing the operator workflow or security boundary.
 
 ## 0.5.0 — 2026-08-31
 

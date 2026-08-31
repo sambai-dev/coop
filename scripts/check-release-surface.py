@@ -45,7 +45,7 @@ def toml_string(relative: str, section: str, key: str) -> str:
 
 def check_versions() -> str:
     version = toml_string("Cargo.toml", "workspace.package", "version")
-    require(version == "0.5.0", f"unexpected workspace release version: {version}")
+    require(version == "0.6.0", f"unexpected workspace release version: {version}")
 
     toolchain = toml_string("rust-toolchain.toml", "toolchain", "channel")
     rust_version = toml_string("Cargo.toml", "workspace.package", "rust-version")
@@ -143,22 +143,22 @@ def check_versions() -> str:
     ]:
         require(candidate == version, f"{label} version {candidate} differs from {version}")
     require(
-        f'__version__ = "{version}"' in read("sdks/python/coop.py"),
+        f'__version__ = "{version}"' in read("sdks/python/rookhold.py"),
         "Python module version differs from its package metadata",
     )
     require(
-        f'__version__ = "{version}"' in read("sdks/python/coop_mcp.py"),
+        f'__version__ = "{version}"' in read("sdks/python/rookhold_mcp.py"),
         "Python MCP module version differs from its package metadata",
     )
-    typescript_source = read("sdks/typescript/coop.ts")
-    typescript_client_header = f'"X-Coop-Client": "typescript/{version}"'
+    typescript_source = read("sdks/typescript/rookhold.ts")
+    typescript_client_header = f'"X-Rookhold-Client": "typescript/{version}"'
     require(
         typescript_source.count(typescript_client_header) == 2,
         "TypeScript HTTP and artifact clients do not identify the package release version",
     )
     python_lock = read("sdks/python/uv.lock")
     locked_python_project = re.search(
-        r'\[\[package\]\]\s+name = "coop-sdk"\s+version = "([^"]+)"',
+        r'\[\[package\]\]\s+name = "rookhold-sdk"\s+version = "([^"]+)"',
         python_lock,
     )
     require(
@@ -192,7 +192,7 @@ def check_versions() -> str:
     for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"]:
         workflow_source = read(workflow)
         require(
-            f"assert coop.__version__ == '{version}'" in workflow_source,
+            f"assert rookhold.__version__ == '{version}'" in workflow_source,
             f"{workflow} Python distribution assertion differs from the workspace version",
         )
         for configured in re.findall(r"^\s*toolchain:\s*([^\s#]+)", workflow_source, re.MULTILINE):
@@ -222,7 +222,7 @@ def check_versions() -> str:
         "release workflow does not reject an unfinalized changelog",
     )
     require(
-        "[v${version}](https://github.com/sambai-dev/coop/releases/tag/v${version})"
+        "[v${version}](https://github.com/sambai-dev/rookhold/releases/tag/v${version})"
         in release_workflow,
         "release workflow does not require the matching README release link",
     )
@@ -232,7 +232,7 @@ def check_versions() -> str:
         "release workflow does not require the matching supported-version line",
     )
     require(
-        f"[v{version}](https://github.com/sambai-dev/coop/releases/tag/v{version})"
+        f"[v{version}](https://github.com/sambai-dev/rookhold/releases/tag/v{version})"
         in read("README.md"),
         "README current-release link differs from the workspace version",
     )
@@ -258,15 +258,15 @@ def check_versions() -> str:
         "docs/sdks.md": [
             f"v{version} release",
             f"version={version}",
-            f"coop_sdk-{version}.tar.gz",
+            f"rookhold_sdk-{version}.tar.gz",
         ],
         "sdks/python/README.md": [
             f"v{version}",
-            f"coop_sdk-{version}-py3-none-any.whl",
+            f"rookhold_sdk-{version}-py3-none-any.whl",
         ],
         "sdks/typescript/README.md": [
             f"v{version}",
-            f"coop-sdk-{version}.tgz",
+            f"rookhold-sdk-{version}.tgz",
         ],
         ".github/ISSUE_TEMPLATE/bug_report.yml": [f"v{version} or a commit SHA"],
     }
@@ -337,21 +337,21 @@ def check_pins_and_packaging() -> int:
         )
 
     for required in [
-        'COOP_GIT_REVISION="${VCS_REF}" cargo build --locked --release',
+        'ROOKHOLD_GIT_REVISION="${VCS_REF}" cargo build --locked --release',
         "-p coop-server -p coop-exec -p coop-attestation --bins",
-        'COOP_GIT_REVISION="${VCS_REF}" cargo build',
+        'ROOKHOLD_GIT_REVISION="${VCS_REF}" cargo build',
         "COPY .cargo ./.cargo",
-        "coop-sandbox-init /usr/local/bin/coop-sandbox-init",
-        "coop-oci-init /usr/local/bin/coop-oci-init",
-        "coop-verify /usr/local/bin/coop-verify",
-        "scripts/container-entrypoint.sh /usr/local/bin/coop-container-entrypoint",
-        'ENTRYPOINT ["/usr/local/bin/coop-container-entrypoint"]',
-        'CMD ["/usr/local/bin/coop"]',
-        "COOP_ROOTFS=/opt/coop/rootfs",
-        "COOP_SANDBOX_HELPER=/usr/local/bin/coop-sandbox-init",
-        "install -d -o root -g root -m 0700 /data /var/lib/coop/jobs /opt/coop",
-        "install -d -o root -g root -m 0755 /opt/coop/rootfs",
-        "/run/coop-bootstrap /run/coop-runtime /run/coop-secrets",
+        "rookhold-sandbox-init /usr/local/bin/rookhold-sandbox-init",
+        "rookhold-oci-init /usr/local/bin/rookhold-oci-init",
+        "rookhold-verify /usr/local/bin/rookhold-verify",
+        "scripts/container-entrypoint.sh /usr/local/bin/rookhold-container-entrypoint",
+        'ENTRYPOINT ["/usr/local/bin/rookhold-container-entrypoint"]',
+        'CMD ["/usr/local/bin/rookhold"]',
+        "ROOKHOLD_ROOTFS=/opt/rookhold/rootfs",
+        "ROOKHOLD_SANDBOX_HELPER=/usr/local/bin/rookhold-sandbox-init",
+        "install -d -o root -g root -m 0700 /data /var/lib/rookhold/jobs /opt/rookhold",
+        "install -d -o root -g root -m 0755 /opt/rookhold/rootfs",
+        "/run/rookhold-bootstrap /run/rookhold-runtime /run/rookhold-secrets",
         'test "$(dpkg --print-architecture)" = amd64',
     ]:
         require(required in dockerfile, f"Docker helper/rootfs contract missing: {required}")
@@ -370,7 +370,7 @@ def check_pins_and_packaging() -> int:
     for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"]:
         workflow_source = read(workflow)
         require(
-            "COOP_GIT_REVISION: ${{ github.sha }}" in workflow_source,
+            "ROOKHOLD_GIT_REVISION: ${{ github.sha }}" in workflow_source,
             f"{workflow} does not embed the checked-out revision",
         )
         require(
@@ -394,14 +394,14 @@ def check_pins_and_packaging() -> int:
             f"{workflow} hostile gate does not write-probe cgroup.kill",
         )
         for image_mode_contract in [
-            'test "$(stat -c %a /opt/coop)" = 700',
-            'test "$(stat -c %U:%G /opt/coop)" = root:root',
-            'test "$(stat -c %a /opt/coop/rootfs)" = 755',
-            'test "$(stat -c %U:%G /opt/coop/rootfs)" = root:root',
+            'test "$(stat -c %a /opt/rookhold)" = 700',
+            'test "$(stat -c %U:%G /opt/rookhold)" = root:root',
+            'test "$(stat -c %a /opt/rookhold/rootfs)" = 755',
+            'test "$(stat -c %U:%G /opt/rookhold/rootfs)" = root:root',
             'test "$(stat -c %a /data)" = 700',
             'test "$(stat -c %U:%G /data)" = root:root',
-            'test "$(stat -c %a /var/lib/coop/jobs)" = 700',
-            'test "$(stat -c %U:%G /var/lib/coop/jobs)" = root:root',
+            'test "$(stat -c %a /var/lib/rookhold/jobs)" = 700',
+            'test "$(stat -c %U:%G /var/lib/rookhold/jobs)" = root:root',
         ]:
             require(
                 image_mode_contract in workflow_source,
@@ -424,10 +424,10 @@ def check_pins_and_packaging() -> int:
             "python -m twine check",
             "python -m pip install --no-deps --target",
             'PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v',
-            "import coop, coop_mcp",
+            "import coop, coop_mcp, rookhold, rookhold_mcp",
             "coop_mcp.py",
-            "-name 'coop_sdk-*.whl'",
-            "-name 'coop_sdk-*.tar.gz'",
+            "-name 'rookhold_sdk-*.whl'",
+            "-name 'rookhold_sdk-*.tar.gz'",
         ]:
             require(
                 invariant in workflow_source,
@@ -436,9 +436,9 @@ def check_pins_and_packaging() -> int:
 
     release = read(".github/workflows/release.yml")
     for revision_contract in [
-        '[[ "$COOP_GIT_REVISION" =~ ^[0-9a-f]{40}$ ]]',
+        '[[ "$ROOKHOLD_GIT_REVISION" =~ ^[0-9a-f]{40}$ ]]',
         "checkout_revision=$(git rev-parse --verify 'HEAD^{commit}')",
-        'test "$COOP_GIT_REVISION" = "$checkout_revision"',
+        'test "$ROOKHOLD_GIT_REVISION" = "$checkout_revision"',
     ]:
         require(
             revision_contract in release,
@@ -451,7 +451,7 @@ def check_pins_and_packaging() -> int:
             f"moving or retiring runner label is still configured: {moving_or_retiring}",
         )
     require("os: macos-15" in release, "Apple-silicon release is not built on the GA arm64 runner")
-    require("COOP_RELEASE_GOVERNANCE" in release, "release workflow lacks repository-governance acknowledgement")
+    require("ROOKHOLD_RELEASE_GOVERNANCE" in release, "release workflow lacks repository-governance acknowledgement")
     require(
         "environment:\n      name: release" in release,
         "publish job lacks the protected release environment hook",
@@ -468,9 +468,9 @@ def check_pins_and_packaging() -> int:
         "aarch64-unknown-linux" not in release,
         "release workflow publishes an unsupported Linux architecture",
     )
-    require("coop-sandbox-init" in release, "Linux release artifact omits the sandbox helper")
-    require("coop-oci-init" in release, "Linux release artifact omits the gVisor OCI init")
-    require("coop-verify" in release, "release artifacts omit the offline attestation verifier")
+    require("rookhold-sandbox-init" in release, "Linux release artifact omits the sandbox helper")
+    require("rookhold-oci-init" in release, "Linux release artifact omits the gVisor OCI init")
+    require("rookhold-verify" in release, "release artifacts omit the offline attestation verifier")
     gvisor_smoke = read("scripts/smoke-gvisor.sh")
     for required in [
         "release-20260817.0",
@@ -478,14 +478,16 @@ def check_pins_and_packaging() -> int:
         "gvisor-application-kernel",
         "NETWORK_BLOCKED",
         "crash reconciliation passed",
-        "COOP_ATTESTATION_MODE=sign",
-        "coop-verify",
+        "ROOKHOLD_ATTESTATION_MODE=sign",
+        "rookhold-verify",
     ]:
         require(required in gvisor_smoke, f"gVisor release gate missing contract: {required}")
     python_manifest = read("sdks/python/pyproject.toml")
     for required in [
         'requires = ["hatchling==1.27.0"]',
+        'rookhold-mcp = "rookhold_mcp:main"',
         'coop-mcp = "coop_mcp:main"',
+        '"rookhold.py" = "rookhold/__init__.py"',
         '"coop_mcp.py" = "coop_mcp.py"',
     ]:
         require(required in python_manifest, f"Python MCP packaging contract missing: {required}")
@@ -497,16 +499,16 @@ def check_pins_and_packaging() -> int:
         )
     bootstrap = read("scripts/bootstrap-production.sh")
     for required in [
-        "COOP_PRODUCTION_VM_ACKNOWLEDGED",
+        "ROOKHOLD_PRODUCTION_VM_ACKNOWLEDGED",
         'test "$(uname -m)" = x86_64',
         "scripts/verify-production.py",
-        "COOP_VERIFY_MINIMUM_ISOLATION",
+        "ROOKHOLD_VERIFY_MINIMUM_ISOLATION",
         "reviewed_runsc_sha256",
-        "COOP_GVISOR_ROOTFS_SHA256",
+        "ROOKHOLD_GVISOR_ROOTFS_SHA256",
         "attestation-key.pem",
         "attestation-public-key.pem",
-        "COOP_VERIFY_CONTAINER_IMAGE",
-        "/usr/local/bin/coop-verify public-key",
+        "ROOKHOLD_VERIFY_CONTAINER_IMAGE",
+        "/usr/local/bin/rookhold-verify public-key",
         "gvisor-application-kernel",
         "target.write_text",
         "target.chmod(0o600)",
@@ -516,22 +518,22 @@ def check_pins_and_packaging() -> int:
     for required in [
         "scripts/verify-production.py",
         "scripts/verify-python-adapter.py",
-        "COOP_VERIFY_LANGUAGES=python,node,bash",
-        "COOP_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel",
-        "COOP_ATTESTATION_MODE=sign",
-        "COOP_ATTESTATION_KEY_FILE",
-        "COOP_ATTESTATION_KEY_SOURCE",
-        "COOP_VERIFY_PUBLIC_KEY_FILE",
-        "COOP_VERIFY_CONTAINER_IMAGE",
+        "ROOKHOLD_VERIFY_LANGUAGES=python,node,bash",
+        "ROOKHOLD_VERIFY_MINIMUM_ISOLATION=linux-shared-kernel",
+        "ROOKHOLD_ATTESTATION_MODE=sign",
+        "ROOKHOLD_ATTESTATION_KEY_FILE",
+        "ROOKHOLD_ATTESTATION_KEY_SOURCE",
+        "ROOKHOLD_VERIFY_PUBLIC_KEY_FILE",
+        "ROOKHOLD_VERIFY_CONTAINER_IMAGE",
         'host_uid=$(id -u)',
         '--user "$host_uid:$host_gid"',
-        "/usr/local/bin/coop-verify generate-key",
-        "/usr/local/bin/coop-verify public-key",
+        "/usr/local/bin/rookhold-verify generate-key",
+        "/usr/local/bin/rookhold-verify public-key",
     ]:
         require(required in container_smoke, f"container smoke contract missing: {required}")
     require(
         "openssl genpkey" not in container_smoke,
-        "container smoke must generate canonical keys with packaged coop-verify",
+        "container smoke must generate canonical keys with packaged rookhold-verify",
     )
     production_verifier = read("scripts/verify-production.py")
     for required in [
@@ -539,7 +541,7 @@ def check_pins_and_packaging() -> int:
         "verify_receipt",
         "parse_minimum_isolation",
         "isolation_satisfies",
-        "COOP_VERIFY_MINIMUM_ISOLATION",
+        "ROOKHOLD_VERIFY_MINIMUM_ISOLATION",
         '"requirements": {"minimum_isolation": minimum_isolation}',
         'for field in ["runtime_sha256", "rootfs_sha256", "config_sha256"]',
         'receipt.get("receipt_sha256")',
@@ -551,11 +553,11 @@ def check_pins_and_packaging() -> int:
         'document.get("networking") == "disabled"',
         'hashlib.sha256(canonical.encode("utf-8")).hexdigest() == recorded',
         "OfflineVerifier",
-        "COOP_VERIFY_PUBLIC_KEY_FILE",
-        "COOP_VERIFY_BIN",
+        "ROOKHOLD_VERIFY_PUBLIC_KEY_FILE",
+        "ROOKHOLD_VERIFY_BIN",
         '"--subject-name"',
         '"--public-key"',
-        "/usr/local/bin/coop-verify",
+        "/usr/local/bin/rookhold-verify",
     ]:
         require(required in production_verifier, f"production verifier contract missing: {required}")
     require(
@@ -564,9 +566,9 @@ def check_pins_and_packaging() -> int:
     )
     container_entrypoint = read("scripts/container-entrypoint.sh")
     for required in [
-        "COOP_GVISOR_RUNSC_SOURCE",
-        "COOP_ATTESTATION_KEY_SOURCE",
-        "COOP_VERIFY_PUBLIC_KEY_SOURCE",
+        "ROOKHOLD_GVISOR_RUNSC_SOURCE",
+        "ROOKHOLD_ATTESTATION_KEY_SOURCE",
+        "ROOKHOLD_VERIFY_PUBLIC_KEY_SOURCE",
         "install -o 0 -g 0",
     ]:
         require(required in container_entrypoint, f"container staging contract missing: {required}")
@@ -581,7 +583,7 @@ def check_pins_and_packaging() -> int:
             f"{workflow} does not smoke the final container image",
         )
         require(
-            'COOP_SMOKE_ALLOW_PRIVILEGED: "true"' in read(workflow),
+            'ROOKHOLD_SMOKE_ALLOW_PRIVILEGED: "true"' in read(workflow),
             f"{workflow} does not explicitly acknowledge the privileged image smoke",
         )
     require(
@@ -603,10 +605,10 @@ def check_pins_and_packaging() -> int:
             f"release workflow does not explicitly stage {asset}",
         )
     for artifact_name in [
-        "coop-sdks",
-        "coop-x86_64-unknown-linux-musl",
-        "coop-aarch64-apple-darwin",
-        "coop-x86_64-pc-windows-msvc",
+        "rookhold-sdks",
+        "rookhold-x86_64-unknown-linux-musl",
+        "rookhold-aarch64-apple-darwin",
+        "rookhold-x86_64-pc-windows-msvc",
     ]:
         require(
             f"name: {artifact_name}" in release,
@@ -623,8 +625,8 @@ def check_pins_and_packaging() -> int:
         "path: sbom-input",
         "syft-version: v1.51.1",
         "SYFT_FILE_METADATA_SELECTION: all",
-        "SYFT_SOURCE_NAME: coop-release-${{ needs.preflight.outputs.version }}",
-        "sbom-path: dist/coop-${{ needs.preflight.outputs.version }}.spdx.json",
+        "SYFT_SOURCE_NAME: rookhold-release-${{ needs.preflight.outputs.version }}",
+        "sbom-path: dist/rookhold-${{ needs.preflight.outputs.version }}.spdx.json",
         "--predicate-type https://spdx.dev/Document/v2.3",
     ]:
         require(sbom_contract in release, f"artifact-scoped SBOM contract missing: {sbom_contract}")
@@ -650,8 +652,8 @@ def check_pins_and_packaging() -> int:
             f"remote draft reconciliation contract missing: {draft_contract}",
         )
     require(
-        "subject-checksums: ${{ runner.temp }}/coop-payload-subjects.sha256" in release
-        and "subject-checksums: ${{ runner.temp }}/coop-release-subjects.sha256" in release,
+        "subject-checksums: ${{ runner.temp }}/rookhold-payload-subjects.sha256" in release
+        and "subject-checksums: ${{ runner.temp }}/rookhold-release-subjects.sha256" in release,
         "release workflow must use exact checksum subject lists for SBOM and provenance",
     )
     require(release.count("actions/attest@") == 2, "release workflow must create SBOM and provenance attestations")
@@ -666,7 +668,7 @@ def check_pins_and_packaging() -> int:
     for verification_contract in [
         "set -euo pipefail",
         "gh release verify-asset",
-        "--signer-workflow sambai-dev/coop/.github/workflows/release.yml",
+        "--signer-workflow sambai-dev/rookhold/.github/workflows/release.yml",
         '--source-ref "refs/tags/v${version}"',
         "--predicate-type https://slsa.dev/provenance/v1",
         "--deny-self-hosted-runners",
@@ -681,23 +683,26 @@ def check_pins_and_packaging() -> int:
     )
 
     compose = read("docker-compose.yml")
-    require("127.0.0.1:7300:7300" in compose, "Compose must publish Coop on loopback only")
-    require("COOP_API_KEYS: \"${COOP_API_KEYS:?" in compose, "Compose must require an API key")
+    require("127.0.0.1:7300:7300" in compose, "Compose must publish Rookhold on loopback only")
+    require(
+        "COOP_API_KEYS:?Set ROOKHOLD_API_KEYS" in compose,
+        "Compose must require either the primary or legacy API-key variable",
+    )
     for contract in [
-        'COOP_SANDBOX: "${COOP_SANDBOX:-gvisor}"',
-        "COOP_GVISOR_RUNSC_SOURCE: /run/coop-bootstrap/runsc",
-        "COOP_GVISOR_RUNSC: /run/coop-runtime/runsc",
-        "COOP_GVISOR_ROOTFS_SHA256",
-        "COOP_ATTESTATION_MODE: sign",
-        "COOP_ATTESTATION_KEY_SOURCE",
-        "COOP_ATTESTATION_KEY_FILE: /run/coop-secrets/attestation-key.pem",
+        'ROOKHOLD_SANDBOX: "${ROOKHOLD_SANDBOX:-${COOP_SANDBOX:-gvisor}}"',
+        "ROOKHOLD_GVISOR_RUNSC_SOURCE: /run/rookhold-bootstrap/runsc",
+        "ROOKHOLD_GVISOR_RUNSC: /run/rookhold-runtime/runsc",
+        "ROOKHOLD_GVISOR_ROOTFS_SHA256",
+        "ROOKHOLD_ATTESTATION_MODE: sign",
+        "ROOKHOLD_ATTESTATION_KEY_SOURCE",
+        "ROOKHOLD_ATTESTATION_KEY_FILE: /run/rookhold-secrets/attestation-key.pem",
         "coop_attestation_key",
-        "/run/coop-runtime:rw,exec,nosuid,nodev,mode=0700,uid=0,gid=0",
-        "/run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0",
+        "/run/rookhold-runtime:rw,exec,nosuid,nodev,mode=0700,uid=0,gid=0",
+        "/run/rookhold-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0",
         "privileged: true",
     ]:
         require(contract in compose, f"Compose production contract missing: {contract}")
-    require(read(".env.example").split("COOP_API_KEYS=", 1)[1].splitlines()[0] == "", ".env example must not contain a key")
+    require(read(".env.example").split("ROOKHOLD_API_KEYS=", 1)[1].splitlines()[0] == "", ".env example must not contain a key")
     return action_count
 
 
@@ -716,7 +721,7 @@ def check_documented_boundary() -> None:
                 claim in document,
                 f"{relative} omits the current architecture boundary: {claim}",
             )
-    service = read("deploy/coop.service")
+    service = read("deploy/rookhold.service")
     require(
         "ConditionArchitecture=x86-64" in service,
         "systemd production template does not reject unsupported architectures",

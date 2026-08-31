@@ -323,7 +323,7 @@ pub(crate) async fn run_observed(
     let rootfs = validate_rootfs(
         ctx.rootfs
             .as_deref()
-            .ok_or_else(|| io::Error::other("namespace sandbox requires COOP_ROOTFS"))?,
+            .ok_or_else(|| io::Error::other("namespace sandbox requires ROOKHOLD_ROOTFS"))?,
         &ctx.workdir,
     )?;
     let helper = validate_helper(resolve_helper(ctx.helper_path.as_deref())?)?;
@@ -985,26 +985,26 @@ fn validate_job_key(job_key: &str) -> io::Result<()> {
 }
 
 pub(crate) fn validate_rootfs(rootfs: &Path, workdir: &Path) -> io::Result<PathBuf> {
-    ensure_absolute_no_symlinks(rootfs, "COOP_ROOTFS")?;
+    ensure_absolute_no_symlinks(rootfs, "ROOKHOLD_ROOTFS")?;
     let rootfs = fs::canonicalize(rootfs)?;
     if rootfs == Path::new("/") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "COOP_ROOTFS must never be host /",
+            "ROOKHOLD_ROOTFS must never be host /",
         ));
     }
     let metadata = fs::metadata(&rootfs)?;
     if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "COOP_ROOTFS must be a root-owned directory that is not group/world writable",
+            "ROOKHOLD_ROOTFS must be a root-owned directory that is not group/world writable",
         ));
     }
     let workdir = fs::canonicalize(workdir)?;
     if workdir.starts_with(&rootfs) || rootfs.starts_with(&workdir) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "COOP_ROOTFS and the job workdir must not overlap",
+            "ROOKHOLD_ROOTFS and the job workdir must not overlap",
         ));
     }
     for required in [".pivot_old", "tmp", "proc", "dev", "work"] {
@@ -1012,20 +1012,20 @@ pub(crate) fn validate_rootfs(rootfs: &Path, workdir: &Path) -> io::Result<PathB
         let required_metadata = fs::symlink_metadata(&path).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("COOP_ROOTFS is missing required directory /{required}"),
+                format!("ROOKHOLD_ROOTFS is missing required directory /{required}"),
             )
         })?;
         if required_metadata.file_type().is_symlink() || !required_metadata.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("COOP_ROOTFS /{required} must be a real directory"),
+                format!("ROOKHOLD_ROOTFS /{required} must be a real directory"),
             ));
         }
     }
     if fs::read_dir(rootfs.join(".pivot_old"))?.next().is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "COOP_ROOTFS /.pivot_old must be empty",
+            "ROOKHOLD_ROOTFS /.pivot_old must be empty",
         ));
     }
     Ok(rootfs)
@@ -1076,15 +1076,22 @@ fn resolve_helper(configured: Option<&Path>) -> io::Result<PathBuf> {
         return Ok(path.to_path_buf());
     }
     let current = std::env::current_exe()?;
-    let sibling = current
+    let parent = current
         .parent()
-        .ok_or_else(|| io::Error::other("current executable has no parent directory"))?
-        .join("coop-sandbox-init");
-    Ok(sibling)
+        .ok_or_else(|| io::Error::other("current executable has no parent directory"))?;
+    let primary = parent.join("rookhold-sandbox-init");
+    if primary.exists() {
+        return Ok(primary);
+    }
+    let legacy = parent.join("coop-sandbox-init");
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    Ok(primary)
 }
 
 fn validate_helper(helper: PathBuf) -> io::Result<PathBuf> {
-    ensure_absolute_no_symlinks(&helper, "COOP_SANDBOX_HELPER")?;
+    ensure_absolute_no_symlinks(&helper, "ROOKHOLD_SANDBOX_HELPER")?;
     let metadata = fs::metadata(&helper)?;
     if !metadata.is_file()
         || metadata.uid() != 0
@@ -1132,7 +1139,7 @@ pub(crate) fn resolve_rootfs_interpreter(rootfs: &Path, configured: &str) -> io:
     }
     Err(io::Error::new(
         io::ErrorKind::NotFound,
-        format!("interpreter {configured:?} was not found inside COOP_ROOTFS"),
+        format!("interpreter {configured:?} was not found inside ROOKHOLD_ROOTFS"),
     ))
 }
 
@@ -1337,7 +1344,7 @@ fn evacuate_delegation_processes(delegation: &Path) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "cgroup delegation {} is a shared host scope; run Coop in a dedicated systemd unit or container",
+                "cgroup delegation {} is a shared host scope; run Rookhold in a dedicated systemd unit or container",
                 delegation.display()
             ),
         ));

@@ -9,13 +9,13 @@ if [[ "$(id -u)" != "0" ]]; then
   exit 1
 fi
 
-rootfs="${COOP_ROOTFS:-/opt/coop/rootfs}"
-helper_source="${1:-target/debug/coop-sandbox-init}"
-oci_init_source="${2:-target/debug/coop-oci-init}"
-helper_target="${COOP_SANDBOX_HELPER:-/usr/local/bin/coop-sandbox-init}"
+rootfs="${ROOKHOLD_ROOTFS:-/opt/rookhold/rootfs}"
+helper_source="${1:-target/debug/rookhold-sandbox-init}"
+oci_init_source="${2:-target/debug/rookhold-oci-init}"
+helper_target="${ROOKHOLD_SANDBOX_HELPER:-/usr/local/bin/rookhold-sandbox-init}"
 
-if [[ "$rootfs" != "/opt/coop/rootfs" ]]; then
-  if [[ "${COOP_TEST_ROOTFS_ALLOW_CUSTOM:-}" != "true" || ! "$rootfs" =~ ^/opt/coop-gvisor-test-[a-zA-Z0-9_-]+/rootfs$ ]]; then
+if [[ "$rootfs" != "/opt/rookhold/rootfs" ]]; then
+  if [[ "${ROOKHOLD_TEST_ROOTFS_ALLOW_CUSTOM:-}" != "true" || ! "$rootfs" =~ ^/opt/rookhold-gvisor-test-[a-zA-Z0-9_-]+/rootfs$ ]]; then
     echo "refusing unexpected test rootfs path: $rootfs" >&2
     exit 1
   fi
@@ -36,7 +36,7 @@ fi
 install -o root -g root -m 0755 "$helper_source" "$helper_target"
 install -d -o root -g root -m 0755 "$rootfs" "$rootfs/usr" "$rootfs/etc"
 install -d -o root -g root -m 0755 "$rootfs/usr/local" "$rootfs/usr/local/bin"
-install -o root -g root -m 0755 "$oci_init_source" "$rootfs/usr/local/bin/coop-oci-init"
+install -o root -g root -m 0755 "$oci_init_source" "$rootfs/usr/local/bin/rookhold-oci-init"
 
 # Debian's merged-/usr links preserve the interpreter paths used outside and
 # inside the pivot. Copy distribution runtimes/libraries, but not /usr/local.

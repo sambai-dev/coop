@@ -3,9 +3,9 @@
 # Linux VM, then verify its real API posture and one canary per runtime.
 set -euo pipefail
 
-if [[ "${COOP_PRODUCTION_VM_ACKNOWLEDGED:-}" != true ]]; then
-  echo "Coop's privileged Compose service is host-equivalent and must run only on a dedicated disposable x86_64 Linux VM." >&2
-  echo "Set COOP_PRODUCTION_VM_ACKNOWLEDGED=true after verifying that boundary." >&2
+if [[ "${ROOKHOLD_PRODUCTION_VM_ACKNOWLEDGED:-}" != true ]]; then
+  echo "Rookhold's privileged Compose service is host-equivalent and must run only on a dedicated disposable x86_64 Linux VM." >&2
+  echo "Set ROOKHOLD_PRODUCTION_VM_ACKNOWLEDGED=true after verifying that boundary." >&2
   exit 1
 fi
 
@@ -90,13 +90,13 @@ cmp <(openssl pkey -in "$attestation_key_path" -pubout) "$attestation_public_key
 if [[ ! -e .env ]]; then
   key=$(openssl rand -hex 32)
   umask 0077
-  COOP_BOOTSTRAP_KEY="$key" python3 - <<'PY'
+  ROOKHOLD_BOOTSTRAP_KEY="$key" python3 - <<'PY'
 import os
 from pathlib import Path
 
 source = Path(".env.example").read_text(encoding="utf-8")
-value = "agent-a:" + os.environ["COOP_BOOTSTRAP_KEY"]
-rendered = source.replace("COOP_API_KEYS=", "COOP_API_KEYS=" + value, 1)
+value = "agent-a:" + os.environ["ROOKHOLD_BOOTSTRAP_KEY"]
+rendered = source.replace("ROOKHOLD_API_KEYS=", "ROOKHOLD_API_KEYS=" + value, 1)
 target = Path(".env")
 target.write_text(rendered, encoding="utf-8", newline="\n")
 target.chmod(0o600)
@@ -106,7 +106,7 @@ else
 from pathlib import Path
 
 for raw in Path(".env").read_text(encoding="utf-8").splitlines():
-    if not raw.startswith("COOP_API_KEYS="):
+    if not raw.startswith("ROOKHOLD_API_KEYS="):
         continue
     entries = raw.split("=", 1)[1].split(",")
     for entry in entries:
@@ -120,9 +120,9 @@ PY
 fi
 
 docker compose build --pull
-coop_image=$(docker image inspect --format '{{.Id}}' "$(docker compose images -q coop)")
-if [[ ! "$coop_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  echo "Compose did not produce one immutable Coop image ID" >&2
+rookhold_image=$(docker image inspect --format '{{.Id}}' "$(docker compose images -q rookhold)")
+if [[ ! "$rookhold_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "Compose did not produce one immutable Rookhold image ID" >&2
   exit 1
 fi
 
@@ -144,47 +144,47 @@ docker run --rm \
   --cap-add DAC_OVERRIDE \
   --cap-add CHOWN \
   --security-opt no-new-privileges \
-  --tmpfs /run/coop-runtime:rw,exec,nosuid,nodev,mode=0700,uid=0,gid=0 \
-  --tmpfs /run/coop-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0 \
-  --mount "type=bind,src=$runsc_absolute,dst=/run/coop-bootstrap/runsc,readonly" \
-  --mount "type=bind,src=$attestation_key_absolute,dst=/run/coop-bootstrap/attestation-key.pem,readonly" \
-  --mount "type=bind,src=$attestation_public_key_absolute,dst=/run/coop-bootstrap/attestation-public-key.pem,readonly" \
-  --env COOP_GVISOR_RUNSC_SOURCE=/run/coop-bootstrap/runsc \
-  --env COOP_GVISOR_RUNSC=/run/coop-runtime/runsc \
-  --env COOP_ATTESTATION_KEY_SOURCE=/run/coop-bootstrap/attestation-key.pem \
-  --env COOP_ATTESTATION_KEY_FILE=/run/coop-secrets/attestation-key.pem \
-  --env COOP_VERIFY_PUBLIC_KEY_SOURCE=/run/coop-bootstrap/attestation-public-key.pem \
-  --env COOP_VERIFY_PUBLIC_KEY_FILE=/run/coop-secrets/attestation-public-key.pem \
-  --env "COOP_BOOTSTRAP_RUNSC_VERSION=$reviewed_runsc_version" \
-  --env "COOP_BOOTSTRAP_RUNSC_SHA256=$reviewed_runsc_sha256" \
-  "$coop_image" /bin/sh -ec '
-    test "$(stat -c %u:%g /run/coop-runtime/runsc)" = 0:0
-    test "$(stat -c %a /run/coop-runtime/runsc)" = 755
-    test "$(sha256sum /run/coop-runtime/runsc | awk '\''{print $1}'\'')" = "$COOP_BOOTSTRAP_RUNSC_SHA256"
-    test "$(/run/coop-runtime/runsc --version | head -n1)" = "runsc version $COOP_BOOTSTRAP_RUNSC_VERSION"
-    test "$(stat -c %u:%g /run/coop-secrets/attestation-key.pem)" = 0:0
-    test "$(stat -c %a /run/coop-secrets/attestation-key.pem)" = 600
-    /usr/local/bin/coop-verify public-key \
-      --private-key /run/coop-secrets/attestation-key.pem \
-      --output /run/coop-secrets/derived-public-key.pem >/dev/null
-    cmp /run/coop-secrets/derived-public-key.pem \
-      /run/coop-secrets/attestation-public-key.pem
+  --tmpfs /run/rookhold-runtime:rw,exec,nosuid,nodev,mode=0700,uid=0,gid=0 \
+  --tmpfs /run/rookhold-secrets:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0 \
+  --mount "type=bind,src=$runsc_absolute,dst=/run/rookhold-bootstrap/runsc,readonly" \
+  --mount "type=bind,src=$attestation_key_absolute,dst=/run/rookhold-bootstrap/attestation-key.pem,readonly" \
+  --mount "type=bind,src=$attestation_public_key_absolute,dst=/run/rookhold-bootstrap/attestation-public-key.pem,readonly" \
+  --env ROOKHOLD_GVISOR_RUNSC_SOURCE=/run/rookhold-bootstrap/runsc \
+  --env ROOKHOLD_GVISOR_RUNSC=/run/rookhold-runtime/runsc \
+  --env ROOKHOLD_ATTESTATION_KEY_SOURCE=/run/rookhold-bootstrap/attestation-key.pem \
+  --env ROOKHOLD_ATTESTATION_KEY_FILE=/run/rookhold-secrets/attestation-key.pem \
+  --env ROOKHOLD_VERIFY_PUBLIC_KEY_SOURCE=/run/rookhold-bootstrap/attestation-public-key.pem \
+  --env ROOKHOLD_VERIFY_PUBLIC_KEY_FILE=/run/rookhold-secrets/attestation-public-key.pem \
+  --env "ROOKHOLD_BOOTSTRAP_RUNSC_VERSION=$reviewed_runsc_version" \
+  --env "ROOKHOLD_BOOTSTRAP_RUNSC_SHA256=$reviewed_runsc_sha256" \
+  "$rookhold_image" /bin/sh -ec '
+    test "$(stat -c %u:%g /run/rookhold-runtime/runsc)" = 0:0
+    test "$(stat -c %a /run/rookhold-runtime/runsc)" = 755
+    test "$(sha256sum /run/rookhold-runtime/runsc | awk '\''{print $1}'\'')" = "$ROOKHOLD_BOOTSTRAP_RUNSC_SHA256"
+    test "$(/run/rookhold-runtime/runsc --version | head -n1)" = "runsc version $ROOKHOLD_BOOTSTRAP_RUNSC_VERSION"
+    test "$(stat -c %u:%g /run/rookhold-secrets/attestation-key.pem)" = 0:0
+    test "$(stat -c %a /run/rookhold-secrets/attestation-key.pem)" = 600
+    /usr/local/bin/rookhold-verify public-key \
+      --private-key /run/rookhold-secrets/attestation-key.pem \
+      --output /run/rookhold-secrets/derived-public-key.pem >/dev/null
+    cmp /run/rookhold-secrets/derived-public-key.pem \
+      /run/rookhold-secrets/attestation-public-key.pem
   '
 
-rootfs_digest=$(docker compose run --rm --no-deps --entrypoint /bin/sh coop -ec \
-  "sha256sum /opt/coop/rootfs/.coop-rootfs.manifest | awk '{print \$1}'")
+rootfs_digest=$(docker compose run --rm --no-deps --entrypoint /bin/sh rookhold -ec \
+  "sha256sum /opt/rookhold/rootfs/.coop-rootfs.manifest | awk '{print \$1}'")
 if [[ ! "$rootfs_digest" =~ ^[0-9a-f]{64}$ ]]; then
   echo "built private-rootfs manifest did not produce a SHA-256 digest" >&2
   exit 1
 fi
-COOP_BOOTSTRAP_ROOTFS_DIGEST="$rootfs_digest" python3 - <<'PY'
+ROOKHOLD_BOOTSTRAP_ROOTFS_DIGEST="$rootfs_digest" python3 - <<'PY'
 import os
 from pathlib import Path
 
 path = Path(".env")
 lines = path.read_text(encoding="utf-8").splitlines()
-name = "COOP_GVISOR_ROOTFS_SHA256"
-replacement = name + "=" + os.environ["COOP_BOOTSTRAP_ROOTFS_DIGEST"]
+name = "ROOKHOLD_GVISOR_ROOTFS_SHA256"
+replacement = name + "=" + os.environ["ROOKHOLD_BOOTSTRAP_ROOTFS_DIGEST"]
 for index, line in enumerate(lines):
     if line.startswith(name + "="):
         lines[index] = replacement
@@ -198,7 +198,7 @@ PY
 # gVisor systrap needs enough virtual-memory map slots for its application
 # kernel. The privileged, host-cgroup deployment makes this host setting
 # visible; fail if the exact built image cannot establish the reviewed floor.
-docker compose run --rm --no-deps --entrypoint /bin/sh coop -ec '
+docker compose run --rm --no-deps --entrypoint /bin/sh rookhold -ec '
   current=$(cat /proc/sys/vm/max_map_count)
   if [ "$current" -lt 4194304 ]; then
     echo 4194304 > /proc/sys/vm/max_map_count
@@ -207,11 +207,11 @@ docker compose run --rm --no-deps --entrypoint /bin/sh coop -ec '
 '
 docker compose up --detach --wait
 
-COOP_CLIENT_KEY="$key" \
-COOP_VERIFY_BASE_URL="${COOP_VERIFY_BASE_URL:-http://127.0.0.1:7300}" \
-COOP_VERIFY_MINIMUM_ISOLATION="${COOP_VERIFY_MINIMUM_ISOLATION:-gvisor-application-kernel}" \
-COOP_VERIFY_CONTAINER_IMAGE="$coop_image" \
-COOP_VERIFY_PUBLIC_KEY_FILE="$attestation_public_key_absolute" \
+ROOKHOLD_CLIENT_KEY="$key" \
+ROOKHOLD_VERIFY_BASE_URL="${ROOKHOLD_VERIFY_BASE_URL:-http://127.0.0.1:7300}" \
+ROOKHOLD_VERIFY_MINIMUM_ISOLATION="${ROOKHOLD_VERIFY_MINIMUM_ISOLATION:-gvisor-application-kernel}" \
+ROOKHOLD_VERIFY_CONTAINER_IMAGE="$rookhold_image" \
+ROOKHOLD_VERIFY_PUBLIC_KEY_FILE="$attestation_public_key_absolute" \
 python3 scripts/verify-production.py
 
-echo "Coop is running and independently verified. Tenant credentials remain in .env; the mode-0600 signing key and pinned public key remain in .coop-runtime." >&2
+echo "Rookhold is running and independently verified. Tenant credentials remain in .env; the mode-0600 signing key and pinned public key remain in .coop-runtime." >&2

@@ -638,7 +638,7 @@ console.log('NODE-CSPRNG-OK');
 }
 
 /// The Windows resolver must select a native Bash that accepts `C:\\...`
-/// script paths and retains Git's external Unix tools under Coop's sanitized
+/// script paths and retains Git's external Unix tools under Rookhold's sanitized
 /// environment. A bare `bash` used to select System32's WSL launcher and fail
 /// every default Bash job with exit 127.
 #[cfg(windows)]
@@ -1096,12 +1096,17 @@ async fn gvisor_mode_requires_the_explicit_provider_and_never_falls_back() {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires root, delegated cgroup v2, COOP_ROOTFS, and COOP_SANDBOX_HELPER"]
+#[ignore = "requires root, delegated cgroup v2, ROOKHOLD_ROOTFS, and ROOKHOLD_SANDBOX_HELPER"]
 async fn aborting_namespace_execution_reaps_its_cgroup() {
-    let rootfs =
-        std::path::PathBuf::from(std::env::var("COOP_ROOTFS").expect("COOP_ROOTFS is required"));
+    let rootfs = std::path::PathBuf::from(
+        std::env::var("ROOKHOLD_ROOTFS")
+            .or_else(|_| std::env::var("COOP_ROOTFS"))
+            .expect("ROOKHOLD_ROOTFS is required"),
+    );
     let helper = std::path::PathBuf::from(
-        std::env::var("COOP_SANDBOX_HELPER").expect("COOP_SANDBOX_HELPER is required"),
+        std::env::var("ROOKHOLD_SANDBOX_HELPER")
+            .or_else(|_| std::env::var("COOP_SANDBOX_HELPER"))
+            .expect("ROOKHOLD_SANDBOX_HELPER is required"),
     );
     let key = format!("abort-reap-{}", std::process::id());
     let dir = workdir("namespace-abort-reap");
@@ -1162,12 +1167,17 @@ async fn aborting_namespace_execution_reaps_its_cgroup() {
 /// namespace and seccomp path.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires root, delegated cgroup v2, COOP_ROOTFS, and COOP_SANDBOX_HELPER"]
+#[ignore = "requires root, delegated cgroup v2, ROOKHOLD_ROOTFS, and ROOKHOLD_SANDBOX_HELPER"]
 async fn namespace_preflight_runs_all_configured_interpreters() {
-    let rootfs =
-        std::path::PathBuf::from(std::env::var("COOP_ROOTFS").expect("COOP_ROOTFS is required"));
+    let rootfs = std::path::PathBuf::from(
+        std::env::var("ROOKHOLD_ROOTFS")
+            .or_else(|_| std::env::var("COOP_ROOTFS"))
+            .expect("ROOKHOLD_ROOTFS is required"),
+    );
     let helper = std::path::PathBuf::from(
-        std::env::var("COOP_SANDBOX_HELPER").expect("COOP_SANDBOX_HELPER is required"),
+        std::env::var("ROOKHOLD_SANDBOX_HELPER")
+            .or_else(|_| std::env::var("COOP_SANDBOX_HELPER"))
+            .expect("ROOKHOLD_SANDBOX_HELPER is required"),
     );
     let jobs_root = workdir("namespace-preflight");
     coop_exec::namespace_sandbox_execution_preflight(

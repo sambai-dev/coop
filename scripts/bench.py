@@ -21,7 +21,7 @@ def make_request(base, key, method, path, payload=None, timeout=75, retries=5):
             headers={
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
-                "User-Agent": "coop-bench/0.3",
+                "User-Agent": "rookhold-bench/0.6",
             },
         )
         try:
@@ -74,9 +74,9 @@ def percentile(sorted_values, p):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark Coop end-to-end job latency")
+    parser = argparse.ArgumentParser(description="Benchmark Rookhold end-to-end job latency")
     parser.add_argument("--url", default="http://127.0.0.1:7300")
-    parser.add_argument("--key", default="coop-dev-key")
+    parser.add_argument("--key", default="rookhold-dev-key")
     parser.add_argument("--jobs", type=int, default=50)
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--wait-seconds", type=int, default=60)

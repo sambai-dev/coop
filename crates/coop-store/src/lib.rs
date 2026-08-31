@@ -58,10 +58,10 @@ pub enum IdempotencyLookup {
 
 const CURRENT_SCHEMA_VERSION: i64 = 4;
 const ROW_VALIDATION_REVISION: i64 = 3;
-// Transaction-local durable sentinel used to distinguish Coop-owned writes
+// Transaction-local durable sentinel used to distinguish Rookhold-owned writes
 // from offline/raw SQL changes in the validation-dirty triggers. SQLite's
 // immediate writer lock prevents another connection from observing or using
-// the sentinel until the transaction commits (which Coop never does).
+// the sentinel until the transaction commits (which Rookhold never does).
 const OWNED_ROW_WRITE_REVISION: i64 = ROW_VALIDATION_REVISION + 1;
 const STORAGE_GUARD_REVISION_MARKER: &str = "coop-storage-guard-r3";
 // Revision 2 proves the exact terminal-pending attestation reserve. Revision 1
@@ -96,6 +96,7 @@ const FREE_SPACE_MARKER: &str = "coop-capacity:filesystem-reserve";
 const IDEMPOTENCY_CONFLICT_MARKER: &str = "coop-idempotency:fingerprint-conflict";
 const DSSE_PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 const IN_TOTO_STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
+// Immutable predicate-v1 wire identity retained across the repository rename.
 const COOP_EXECUTION_PREDICATE_TYPE: &str =
     "https://github.com/sambai-dev/coop/blob/main/crates/coop-attestation/FORMAT.md#predicate-v1";
 
@@ -272,7 +273,7 @@ pub struct EventRow {
     /// SHA-256 of this event's versioned canonical payload. Empty only for
     /// migrated legacy events.
     pub event_hash: String,
-    /// Zero denotes a legacy/unverified event; one is Coop's canonical v1
+    /// Zero denotes a legacy/unverified event; one is Rookhold's canonical v1
     /// event-chain format.
     pub hash_version: i64,
 }
@@ -839,7 +840,7 @@ impl Store {
 
         // SQLite derives sidecar permissions from the database mode. Enforce
         // them explicitly too, both as defense in depth and for pre-existing
-        // WAL/SHM files created by an older Coop version.
+        // WAL/SHM files created by an older Rookhold version.
         harden_storage_files(path)?;
         Ok(store)
     }
@@ -984,7 +985,7 @@ impl Store {
         // Validate the columns and cascade that all current read/write paths
         // rely on before reconciling either version marker.
         Self::validate_current_schema(conn).await?;
-        // sqlite_sequence is writable outside Coop and cannot be guarded by a
+        // sqlite_sequence is writable outside Rookhold and cannot be guarded by a
         // table trigger. This indexed high-watermark check is cheap enough for
         // every open and prevents cursor reuse/exhaustion on the fast path.
         validated_event_sequence_counter(conn, "events").await?;
@@ -1192,7 +1193,7 @@ impl Store {
         .await?;
         if updated.rows_affected() != 1 {
             return Err(sqlx::Error::Protocol(
-                "row validation is stale during a Coop write; run validate_integrity before retrying"
+                "row validation is stale during a Rookhold write; run validate_integrity before retrying"
                     .to_string(),
             ));
         }
@@ -1217,7 +1218,7 @@ impl Store {
         .await?;
         if updated.rows_affected() != 1 {
             return Err(sqlx::Error::Protocol(
-                "row-validation ownership was lost during a Coop write".to_string(),
+                "row-validation ownership was lost during a Rookhold write".to_string(),
             ));
         }
         Ok(())
@@ -5075,7 +5076,7 @@ async fn validate_foreign_keys(conn: &mut SqliteConnection) -> StoreResult<()> {
 }
 
 async fn create_storage_guard_triggers(conn: &mut SqliteConnection) -> StoreResult<()> {
-    // These names are owned by Coop. Recreate them transactionally on every
+    // These names are owned by Rookhold. Recreate them transactionally on every
     // open so a stale same-version definition cannot silently weaken newly
     // added invariants.
     for trigger in STORAGE_GUARD_NAMES {

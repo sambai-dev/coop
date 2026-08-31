@@ -17,7 +17,7 @@ use utoipa::{Modify, OpenApi};
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "Coop API",
+        title = "Rookhold API",
         version = crate::VERSION,
         description = "Self-hosted, audit-first execution gateway for AI agents. Submit policy-bound code, stream output, and verify retained hash-chained execution evidence.",
     ),

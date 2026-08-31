@@ -186,7 +186,7 @@ pub(crate) enum TracestateStatus {
 
 /// A validated reference to an upstream trace at an untrusted boundary.
 ///
-/// Coop always creates a fresh local trace rather than making this remote
+/// Rookhold always creates a fresh local trace rather than making this remote
 /// context its parent. This structure is suitable for a tracing SDK `Link`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ExternalTraceLink {

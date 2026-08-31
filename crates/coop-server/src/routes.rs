@@ -2177,7 +2177,7 @@ pub async fn operator_metrics(State(state): State<AppState>, headers: HeaderMap)
         );
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
-            HeaderValue::from_static("Bearer realm=\"coop-metrics\""),
+            HeaderValue::from_static("Bearer realm=\"rookhold-metrics\""),
         );
         return no_store(response);
     }
@@ -3206,7 +3206,7 @@ pub async fn status(
     .into_response()
 }
 
-const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-Y0uFn/S8W0UUKq4qSxVmQaGA4NcJvCi6aeq08AqTt8c='; style-src 'sha256-X2GFZjZLz2UDmVclWmMnlDJVaiJNJHPlcwsX4RSYVqA='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+const DASHBOARD_CSP: &str = "default-src 'none'; script-src 'sha256-F4Jfbts5NGULA30jcXFv7DX593iVAzPCeJK0gL+oi1w='; style-src 'sha256-2yKveexTlgndN9h8kvvqXY/1uu7pjXw5etsx29BP1fM='; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 #[cfg(test)]
 const DASHBOARD_MAX_BYTES: usize = 192 * 1024;
 
@@ -4034,10 +4034,10 @@ mod tests {
         let db = base.join("coop.db");
         let jobs = base.join("jobs");
         let source = |key: &str| match key {
-            "COOP_API_KEYS" => Some("tenant:test-key-with-enough-entropy".to_string()),
-            "COOP_SANDBOX" => Some("off".to_string()),
-            "COOP_STORAGE_FREE_RESERVE_MB" => Some("0".to_string()),
-            "COOP_JOBS_ROOT" => Some(jobs.to_string_lossy().into_owned()),
+            "ROOKHOLD_API_KEYS" => Some("tenant:test-key-with-enough-entropy".to_string()),
+            "ROOKHOLD_SANDBOX" => Some("off".to_string()),
+            "ROOKHOLD_STORAGE_FREE_RESERVE_MB" => Some("0".to_string()),
+            "ROOKHOLD_JOBS_ROOT" => Some(jobs.to_string_lossy().into_owned()),
             _ => None,
         };
         let cfg = crate::config::Config::from_sources(&source, false).unwrap();

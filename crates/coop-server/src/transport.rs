@@ -197,7 +197,7 @@ where
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         // Reserve capacity before accepting. When full, the kernel listen
-        // backlog provides bounded backpressure and Coop never creates an
+        // backlog provides bounded backpressure and Rookhold never creates an
         // extra accepted FD or Hyper task. Cancellation during shutdown drops
         // the reservation before the listener itself is dropped.
         let permit = Arc::clone(&self.connection_slots)
@@ -463,7 +463,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteTimeoutIo<T> {
     }
 }
 
-/// Serve the Coop router with the transport invariants that `axum::serve`
+/// Serve the Rookhold router with the transport invariants that `axum::serve`
 /// does not currently expose. In particular, Hyper's default HTTP/1 header
 /// timeout is inert unless a runtime timer is installed explicitly.
 pub async fn serve<L, F>(

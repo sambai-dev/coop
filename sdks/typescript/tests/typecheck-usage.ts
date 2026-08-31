@@ -5,9 +5,9 @@ import type {
   AttestationPublicKey,
   CancellationResult,
   Capabilities,
-  CoopEvent,
+  RookholdEvent,
   ExecutorOutputEvidence,
-  HashedCoopEvent,
+  HashedRookholdEvent,
   JobDetail,
   JobAttestationStatus,
   OutputEvidence,
@@ -16,10 +16,15 @@ import type {
   IsolationClass,
   SubmitResult,
   WhoAmI,
-} from "../coop.js";
-import { Coop, CoopError, isolationSatisfies } from "../coop.js";
+} from "../rookhold.js";
+import { Rookhold, RookholdError, isolationSatisfies } from "../rookhold.js";
+import { Coop, CoopError } from "../coop.js";
 
-const client = new Coop("https://coop.example", "tenant-key", { timeoutMs: 5_000 });
+const client = new Rookhold("https://rookhold.example", "tenant-key", { timeoutMs: 5_000 });
+const legacyClient: Coop = new Coop("https://rookhold.example", "tenant-key");
+const legacyError: CoopError = new CoopError("compatibility");
+void legacyClient;
+void legacyError;
 
 async function consume(): Promise<void> {
   const submitted = await client.submit("python", "print(42)", {
@@ -40,7 +45,7 @@ async function consume(): Promise<void> {
   const executorOutput: ExecutorOutputEvidence | null | undefined =
     receipt?.executor_output;
   const durableOutput: OutputEvidence | undefined = receipt?.output;
-  const events: CoopEvent[] = await client.replay(submitted.job_id);
+  const events: RookholdEvent[] = await client.replay(submitted.job_id);
   const cancellation: CancellationResult = await client.cancelResult(submitted.job_id);
   const cancelledJob: JobDetail["job_id"] | undefined = cancellation.job?.job_id;
   const identity: WhoAmI = await client.whoami();
@@ -66,7 +71,7 @@ async function consume(): Promise<void> {
     events[0]?.hash_version === 1 &&
     typeof events[0].event_hash === "string"
   ) {
-    const hashed = events[0] as HashedCoopEvent;
+    const hashed = events[0] as HashedRookholdEvent;
     void hashed.event_hash;
   }
   const cancelled: void = await client.cancel(submitted.job_id);
@@ -92,7 +97,7 @@ async function consume(): Promise<void> {
 }
 
 function preserveAmbiguousSubmission(error: unknown): string | undefined {
-  return error instanceof CoopError ? error.idempotencyKey : undefined;
+  return error instanceof RookholdError ? error.idempotencyKey : undefined;
 }
 
 void [consume, preserveAmbiguousSubmission];

@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email `sambai.codes@gmail.com` with a subject beginning `[coop security]`. If GitHub private vulnerability reporting is enabled for the repository, the **Security** tab's **Report a vulnerability** form is also acceptable. Do not include exploit details, tenant data, credentials, or unredacted execution evidence in a public issue.
+Email `sambai.codes@gmail.com` with a subject beginning `[rookhold security]`. If GitHub private vulnerability reporting is enabled for the repository, the **Security** tab's **Report a vulnerability** form is also acceptable. Do not include exploit details, tenant data, credentials, or unredacted execution evidence in a public issue.
 
 Include, when safe:
 
@@ -20,10 +20,11 @@ We aim to acknowledge a complete report within 72 hours. Timelines for validatio
 | Version | Security support |
 |---|---|
 | latest `main` | Active development; may include unreleased changes |
-| tagged `0.5.x` releases | Supported |
-| tagged `0.4.x` releases | Unsupported; upgrade to 0.5.x |
-| tagged `0.3.x` releases | Unsupported; upgrade to 0.5.x |
-| tagged `0.2.x` releases | Unsupported; upgrade to 0.5.x |
+| tagged `0.6.x` releases | Supported |
+| tagged `0.5.x` releases | Unsupported; upgrade to 0.6.x |
+| tagged `0.4.x` releases | Unsupported; upgrade to 0.6.x |
+| tagged `0.3.x` releases | Unsupported; upgrade to 0.6.x |
+| tagged `0.2.x` releases | Unsupported; upgrade to 0.6.x |
 | `0.1.x` | Unsupported; do not expose to hostile tenants |
 | older versions | Unsupported |
 
@@ -31,7 +32,7 @@ We aim to acknowledge a complete report within 72 hours. Timelines for validatio
 
 ## Boundary summary
 
-Coop v0.5 retains three materially different execution modes:
+Rookhold v0.6 retains three materially different execution modes:
 
 - `gvisor`: the guarded production default on Linux x86_64. Every job receives a separate OCI workload under the reviewed, digest-pinned `runsc` application kernel, an immutable private-rootfs manifest, cgroup v2/rlimits, a dedicated OCI init, and denied networking.
 - `namespaces`: a weaker shared-host-kernel Linux x86_64 fallback requiring a private rootfs, cgroup v2, rlimits, the x86_64 seccomp policy, checked privilege drop, and isolated namespaces. Run it only on a dedicated x86_64 VM.
@@ -39,7 +40,7 @@ Coop v0.5 retains three materially different execution modes:
   submitted code has the service account's authority, and only wall time (not
   requested CPU, memory, process-count, or file-size limits) is enforced.
 
-Isolated execution is unsupported on macOS, Windows, and non-x86_64 Linux; those platforms can use only the unisolated development subprocess backend. Coop integrates with a separately provisioned, exact-version gVisor binary but does not claim a hardware VM or confidential-computing boundary. The supplied Compose service has host-equivalent **outer-container** authority even though jobs use separate runsc workloads, so it is appropriate only inside a dedicated x86_64 Linux VM. For the exact assumptions and invariants, read [docs/security-boundary.md](docs/security-boundary.md).
+Isolated execution is unsupported on macOS, Windows, and non-x86_64 Linux; those platforms can use only the unisolated development subprocess backend. Rookhold integrates with a separately provisioned, exact-version gVisor binary but does not claim a hardware VM or confidential-computing boundary. The supplied Compose service has host-equivalent **outer-container** authority even though jobs use separate runsc workloads, so it is appropriate only inside a dedicated x86_64 Linux VM. For the exact assumptions and invariants, read [docs/security-boundary.md](docs/security-boundary.md).
 
 ## Security invariants
 
@@ -48,18 +49,18 @@ Production deployments must:
 1. run gVisor or the namespace fallback only on supported x86_64 Linux and validate the exact host with their non-skipping gates;
 2. pin the reviewed `runsc`, private-rootfs manifest digest, and generated OCI configuration evidence when using gVisor;
 3. use scoped indexed credentials or strict RFC 9068 JWTs; if legacy keys remain, use a separate high-entropy key per tenant;
-4. provision an owner-only Ed25519 attestation key, distribute its public key out of band, and treat `COOP_ATTESTATION_MODE=off` as an explicit loss of signed evidence;
+4. provision an owner-only Ed25519 attestation key, distribute its public key out of band, and treat `ROOKHOLD_ATTESTATION_MODE=off` as an explicit loss of signed evidence;
 5. keep API traffic private or behind TLS;
-6. use a dedicated non-symlink `COOP_JOBS_ROOT`;
-7. provide a trusted private `COOP_ROOTFS` and never use host `/`;
+6. use a dedicated non-symlink `ROOKHOLD_JOBS_ROOT`;
+7. provide a trusted private `ROOKHOLD_ROOTFS` and never use host `/`;
 8. keep namespace seccomp enabled and job networking denied in every isolated provider;
 9. keep the database, backups, signing/identity secrets, outer filesystem, and sockets outside the job rootfs;
 10. set measured tenant/global storage, aggregate memory, queue, and disk-reserve policies;
 11. monitor authenticated status, metrics, receipts, and signed canaries—not only `/healthz`.
 
-For every deployment mode, tenant ownership must be checked before job detail, result, event, stream, cancellation, attestation, or result-artifact access. Exported signed evidence must also bind the authoritative durable tenant in both its predicate and exact result; route authorization alone is not a portable identity claim. Isolated providers must fail closed instead of falling back to a subprocess, job networking must remain denied, resource/output/storage policies must remain bounded, and the job rootfs must never include Coop's database, credentials, keys, sockets, or outer host root. Development subprocess mode retains host networking, enforces only wall time among requested execution controls, and must report that posture. Per-job isolation claims must come from the executor's observed ready boundary; contradictory terminal provenance is an error. A status, receipt, or signature that reports a stronger policy or different result than was actually retained is a security defect.
+For every deployment mode, tenant ownership must be checked before job detail, result, event, stream, cancellation, attestation, or result-artifact access. Exported signed evidence must also bind the authoritative durable tenant in both its predicate and exact result; route authorization alone is not a portable identity claim. Isolated providers must fail closed instead of falling back to a subprocess, job networking must remain denied, resource/output/storage policies must remain bounded, and the job rootfs must never include Rookhold's database, credentials, keys, sockets, or outer host root. Development subprocess mode retains host networking, enforces only wall time among requested execution controls, and must report that posture. Per-job isolation claims must come from the executor's observed ready boundary; contradictory terminal provenance is an error. A status, receipt, or signature that reports a stronger policy or different result than was actually retained is a security defect.
 
-Setting `COOP_UNSAFE_ALLOW_NAIVE=true` is an acknowledgement, not a mitigation. It must never be used to process mutually untrusted code.
+Setting `ROOKHOLD_UNSAFE_ALLOW_NAIVE=true` is an acknowledgement, not a mitigation. It must never be used to process mutually untrusted code.
 
 ## Data sensitivity
 
@@ -82,4 +83,4 @@ Host or cross-tenant code execution and secret disclosure are the highest-impact
 - availability under traffic beyond configured host/tenant capacity
 - secrets deliberately placed in submitted code, stdin, environment, or rootfs
 
-These issues may still be worth reporting if Coop makes exploitation materially easier or its documentation/configuration creates an unsafe default.
+These issues may still be worth reporting if Rookhold makes exploitation materially easier or its documentation/configuration creates an unsafe default.

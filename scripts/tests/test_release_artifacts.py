@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[2]
 RELEASE = runpy.run_path(str(ROOT / "scripts" / "release-artifacts.py"))
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 
 def archive_entries(asset: str) -> dict[str, bytes | None]:
@@ -35,7 +35,11 @@ def write_tar(path: Path, entries: dict[str, bytes | None]) -> None:
                 archive.addfile(member)
             else:
                 member.size = len(content)
-                member.mode = 0o755 if Path(name).name.startswith("coop") else 0o644
+                member.mode = (
+                    0o755
+                    if Path(name).name.startswith(("rookhold", "coop"))
+                    else 0o644
+                )
                 archive.addfile(member, io.BytesIO(content))
 
 
@@ -62,15 +66,15 @@ class ReleaseArtifactsTests(unittest.TestCase):
             root = Path(temporary)
             downloads = root / "downloads"
             containers = {
-                "coop-sdks": (
-                    f"coop-sdk-{VERSION}.tgz",
-                    f"coop_sdk-{VERSION}-py3-none-any.whl",
-                    f"coop_sdk-{VERSION}.tar.gz",
+                "rookhold-sdks": (
+                    f"rookhold-sdk-{VERSION}.tgz",
+                    f"rookhold_sdk-{VERSION}-py3-none-any.whl",
+                    f"rookhold_sdk-{VERSION}.tar.gz",
                 ),
-                "coop-aarch64-apple-darwin": ("coop-aarch64-apple-darwin.tar.gz",),
-                "coop-x86_64-pc-windows-msvc": ("coop-x86_64-pc-windows-msvc.zip",),
-                "coop-x86_64-unknown-linux-musl": (
-                    "coop-x86_64-unknown-linux-musl.tar.gz",
+                "rookhold-aarch64-apple-darwin": ("rookhold-aarch64-apple-darwin.tar.gz",),
+                "rookhold-x86_64-pc-windows-msvc": ("rookhold-x86_64-pc-windows-msvc.zip",),
+                "rookhold-x86_64-unknown-linux-musl": (
+                    "rookhold-x86_64-unknown-linux-musl.tar.gz",
                 ),
             }
             for container, assets in containers.items():
@@ -89,13 +93,13 @@ class ReleaseArtifactsTests(unittest.TestCase):
             sbom = dist / RELEASE["sbom_name"](VERSION)
             document = {
                 "spdxVersion": "SPDX-2.3",
-                "name": f"coop-release-{VERSION}",
+                "name": f"rookhold-release-{VERSION}",
                 "packages": [
-                    {"name": f"coop-release-{VERSION}", "versionInfo": VERSION},
+                    {"name": f"rookhold-release-{VERSION}", "versionInfo": VERSION},
                     {"name": "fixture-package", "versionInfo": "1"},
                 ],
                 "files": [
-                    {"fileName": f"./{asset}/.coop-release-artifact.json"}
+                    {"fileName": f"./{asset}/.rookhold-release-artifact.json"}
                     for asset in RELEASE["payload_names"](VERSION)
                 ],
             }

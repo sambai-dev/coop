@@ -8,15 +8,15 @@ web
 
 ## Users
 
-Coop is primarily for operators and platform engineers who need to run short agent-generated or user-supplied programs behind a separately operated policy boundary. SDK and MCP integrators are a secondary audience; they need the execution contract to stay predictable without exposing credentials or policy controls to a model.
+Rookhold is primarily for operators and platform engineers who need to run short agent-generated or user-supplied programs behind a separately operated policy boundary. SDK and MCP integrators are a secondary audience; they need the execution contract to stay predictable without exposing credentials or policy controls to a model.
 
 ## Product Purpose
 
-Coop authenticates a caller, clamps a short Python, Node.js, or Bash job to configured policy, runs it through the selected execution provider, bounds its output, and records durable evidence of what happened. Success means an operator can quickly submit or inspect a run and answer: what ran, who submitted it, which controls became effective, what output or violations were observed, and how the run ended.
+Rookhold authenticates a caller, clamps a short Python, Node.js, or Bash job to configured policy, runs it through the selected execution provider, bounds its output, and records durable evidence of what happened. Success means an operator can quickly submit or inspect a run and answer: what ran, who submitted it, which controls became effective, what output or violations were observed, and how the run ended.
 
 ## Positioning
 
-Coop is a small self-hosted execution control plane, not an LLM, agent framework, general-purpose IDE, or replacement for a harness workspace. Its differentiator is the combination of an independently operated API boundary, per-job execution policy, bounded live output, durable receipts, and portable signed evidence.
+Rookhold is a small self-hosted execution control plane, not an LLM, agent framework, general-purpose IDE, or replacement for a harness workspace. Its differentiator is the combination of an independently operated API boundary, per-job execution policy, bounded live output, durable receipts, and portable signed evidence.
 
 ## Operating Context
 
@@ -35,7 +35,7 @@ Coop is a small self-hosted execution control plane, not an LLM, agent framework
 
 ## Brand Commitments
 
-Keep the name Coop and its plainspoken, technically honest voice. Security posture must be legible without theatrics: never imply stronger isolation, attestation, or verification than the server actually reports. The replacement interface should feel like a current production control plane rather than a terminal-themed demo or a collection of decorative cards.
+Keep the name Rookhold and its plainspoken, technically honest voice. Security posture must be legible without theatrics: never imply stronger isolation, attestation, or verification than the server actually reports. The replacement interface should feel like a current production control plane rather than a terminal-themed demo or a collection of decorative cards.
 
 ## Evidence on Hand
 

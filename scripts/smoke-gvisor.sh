@@ -5,12 +5,12 @@ set -euo pipefail
 
 reviewed_version=release-20260817.0
 reviewed_sha256=048b89aada69dc3333422e139d6e9d02f8ab06bda52398060e0fbdacca00074c
-runsc=${COOP_GVISOR_RUNSC:-/usr/local/bin/runsc}
-rootfs=${COOP_ROOTFS:-/opt/coop/rootfs}
-server=${COOP_GVISOR_SERVER_BIN:-target/debug/coop}
-verify_bin=${COOP_VERIFY_BIN:-"$(dirname "$server")/coop-verify"}
-port=${COOP_GVISOR_SMOKE_PORT:-7397}
-key=coop-gvisor-smoke-key-with-more-than-16-characters
+runsc=${ROOKHOLD_GVISOR_RUNSC:-/usr/local/bin/runsc}
+rootfs=${ROOKHOLD_ROOTFS:-/opt/rookhold/rootfs}
+server=${ROOKHOLD_GVISOR_SERVER_BIN:-target/debug/rookhold}
+verify_bin=${ROOKHOLD_VERIFY_BIN:-"$(dirname "$server")/rookhold-verify"}
+port=${ROOKHOLD_GVISOR_SMOKE_PORT:-7397}
+key=rookhold-gvisor-smoke-key-with-more-than-16-characters
 
 test "$(uname -s)" = Linux
 test "$(uname -m)" = x86_64
@@ -18,7 +18,7 @@ test "$(id -u)" = 0
 test -x "$runsc"
 test -x "$server"
 test -x "$verify_bin"
-test -x "$rootfs/usr/local/bin/coop-oci-init"
+test -x "$rootfs/usr/local/bin/rookhold-oci-init"
 test -f "$rootfs/.coop-rootfs.manifest"
 test -r /sys/fs/cgroup/cgroup.controllers
 if [[ "$(cat /proc/sys/vm/max_map_count)" -lt 4194304 ]]; then
@@ -28,9 +28,9 @@ test "$(cat /proc/sys/vm/max_map_count)" -ge 4194304
 test "$(sha256sum "$runsc" | awk '{print $1}')" = "$reviewed_sha256"
 "$runsc" --version | grep -Fx "runsc version $reviewed_version"
 
-base=$(mktemp -d /var/lib/coop-gvisor-smoke.XXXXXX)
+base=$(mktemp -d /var/lib/rookhold-gvisor-smoke.XXXXXX)
 case "$base" in
-  /var/lib/coop-gvisor-smoke.*) ;;
+  /var/lib/rookhold-gvisor-smoke.*) ;;
   *) echo "unsafe gVisor smoke directory: $base" >&2; exit 1 ;;
 esac
 install -d -o root -g root -m 0700 "$base/jobs"
@@ -58,18 +58,18 @@ cleanup() {
 trap cleanup EXIT
 
 start_server() {
-  COOP_ENV=production \
-  COOP_ADDR="127.0.0.1:$port" \
-  COOP_DB="$base/coop.db" \
-  COOP_JOBS_ROOT="$base/jobs" \
-  COOP_ROOTFS="$rootfs" \
-  COOP_SANDBOX=gvisor \
-  COOP_GVISOR_RUNSC="$runsc" \
-  COOP_GVISOR_ROOTFS_SHA256="$rootfs_digest" \
-  COOP_GVISOR_PLATFORM=systrap \
-  COOP_ATTESTATION_MODE=sign \
-  COOP_ATTESTATION_KEY_FILE="$base/attestation.pem" \
-  COOP_API_KEYS="smoke:$key" \
+  ROOKHOLD_ENV=production \
+  ROOKHOLD_ADDR="127.0.0.1:$port" \
+  ROOKHOLD_DB="$base/rookhold.db" \
+  ROOKHOLD_JOBS_ROOT="$base/jobs" \
+  ROOKHOLD_ROOTFS="$rootfs" \
+  ROOKHOLD_SANDBOX=gvisor \
+  ROOKHOLD_GVISOR_RUNSC="$runsc" \
+  ROOKHOLD_GVISOR_ROOTFS_SHA256="$rootfs_digest" \
+  ROOKHOLD_GVISOR_PLATFORM=systrap \
+  ROOKHOLD_ATTESTATION_MODE=sign \
+  ROOKHOLD_ATTESTATION_KEY_FILE="$base/attestation.pem" \
+  ROOKHOLD_API_KEYS="smoke:$key" \
   RUST_LOG=info,coop_exec=debug \
     "$server" >>"$base/server.log" 2>&1 &
   server_pid=$!
@@ -95,7 +95,7 @@ wait_ready() {
 start_server
 wait_ready
 
-BASE_URL="http://127.0.0.1:$port" COOP_CLIENT_KEY="$key" CRASH_ID_FILE="$base/crash-id" python3 - <<'PY'
+BASE_URL="http://127.0.0.1:$port" ROOKHOLD_CLIENT_KEY="$key" CRASH_ID_FILE="$base/crash-id" python3 - <<'PY'
 import json
 import os
 import time
@@ -104,7 +104,7 @@ import urllib.request
 
 base = os.environ["BASE_URL"]
 headers = {
-    "Authorization": f"Bearer {os.environ['COOP_CLIENT_KEY']}",
+    "Authorization": f"Bearer {os.environ['ROOKHOLD_CLIENT_KEY']}",
     "Content-Type": "application/json",
 }
 
@@ -224,15 +224,15 @@ test -n "$(find "$base/jobs" -name lease.json -print -quit)"
 # Switching providers is not allowed to strand a live gVisor workload. The
 # Off startup must first kill the discoverable cgroup, then fail closed because
 # only the matching reviewed runtime may delete its persistent sandbox state.
-if COOP_ENV=production \
-  COOP_ADDR="127.0.0.1:$port" \
-  COOP_DB="$base/coop.db" \
-  COOP_JOBS_ROOT="$base/jobs" \
-  COOP_SANDBOX=off \
-  COOP_UNSAFE_ALLOW_NAIVE=true \
-  COOP_ATTESTATION_MODE=sign \
-  COOP_ATTESTATION_KEY_FILE="$base/attestation.pem" \
-  COOP_API_KEYS="smoke:$key" \
+if ROOKHOLD_ENV=production \
+  ROOKHOLD_ADDR="127.0.0.1:$port" \
+  ROOKHOLD_DB="$base/rookhold.db" \
+  ROOKHOLD_JOBS_ROOT="$base/jobs" \
+  ROOKHOLD_SANDBOX=off \
+  ROOKHOLD_UNSAFE_ALLOW_NAIVE=true \
+  ROOKHOLD_ATTESTATION_MODE=sign \
+  ROOKHOLD_ATTESTATION_KEY_FILE="$base/attestation.pem" \
+  ROOKHOLD_API_KEYS="smoke:$key" \
   "$server" >>"$base/server.log" 2>&1; then
   echo "Off provider unexpectedly accepted stale gVisor state" >&2
   exit 1
@@ -246,12 +246,12 @@ fi
 start_server
 wait_ready
 
-BASE_URL="http://127.0.0.1:$port" COOP_CLIENT_KEY="$key" CRASH_ID_FILE="$base/crash-id" python3 - <<'PY'
+BASE_URL="http://127.0.0.1:$port" ROOKHOLD_CLIENT_KEY="$key" CRASH_ID_FILE="$base/crash-id" python3 - <<'PY'
 import json, os, urllib.request
 job = open(os.environ["CRASH_ID_FILE"], encoding="utf-8").read().strip()
 req = urllib.request.Request(
     os.environ["BASE_URL"] + f"/v1/jobs/{job}",
-    headers={"Authorization": f"Bearer {os.environ['COOP_CLIENT_KEY']}"},
+    headers={"Authorization": f"Bearer {os.environ['ROOKHOLD_CLIENT_KEY']}"},
 )
 with urllib.request.urlopen(req, timeout=5) as response:
     detail = json.load(response)
@@ -268,7 +268,7 @@ test -z "$(find "$base/jobs" -mindepth 1 -print -quit)"
 
 stop_server
 if find /sys/fs/cgroup -type d -name 'job-*' -path '*coop-jobs*' -print -quit | grep -q .; then
-  echo "gVisor smoke leaked a Coop job cgroup" >&2
+  echo "gVisor smoke leaked a Rookhold job cgroup" >&2
   exit 1
 fi
 

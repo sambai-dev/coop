@@ -1,6 +1,6 @@
 # Security boundary and trust tiers
 
-Coop runs code supplied by API clients. That makes containment configuration part of the product contract, not an optional deployment detail.
+Rookhold runs code supplied by API clients. That makes containment configuration part of the product contract, not an optional deployment detail.
 
 ## Trust tiers
 
@@ -21,7 +21,7 @@ A gVisor job is expected to fail closed unless all of these are true:
 2. the private rootfs and its content-complete manifest validate before workload creation; the OCI root is read-only;
 3. each job receives a unique runtime ID, OCI bundle, payload directory, cgroup, private `/tmp`/`/var/tmp`, and non-root uid/gid;
 4. the OCI configuration drops capabilities, sets `noNewPrivileges`, denies networking, applies rlimits/cgroup controls, and binds its canonical SHA-256 into provenance;
-5. the dedicated `coop-oci-init` confirms `/.coop-rootfs.manifest`, `/proc/gvisor/kernel_is_gvisor`, and Coop's marker before launching user code;
+5. the dedicated `rookhold-oci-init` confirms `/.coop-rootfs.manifest`, `/proc/gvisor/kernel_is_gvisor`, and Rookhold's marker before launching user code;
 6. a nonce-bound pass-fd ready frame is observed before any gVisor isolation class or effective control is reported;
 7. normal exit, cancellation, timeout, bootstrap failure, server crash, and provider switching all converge through runsc wait/kill/delete plus cgroup drain/removal;
 8. terminal evidence records the exact runtime, rootfs-manifest, and OCI-config digests, and the scheduler rejects contradictory observed isolation.
@@ -34,8 +34,8 @@ VM/confidential-computing claims.
 
 A production namespace job is expected to fail closed unless all of these are true:
 
-1. Coop runs on x86_64 Linux 5.14 or newer with cgroup v2, `cgroup.kill`, recursive `mount_setattr`, and the required privileges.
-2. `COOP_ROOTFS` names a trusted, purpose-built, absolute directory.
+1. Rookhold runs on x86_64 Linux 5.14 or newer with cgroup v2, `cgroup.kill`, recursive `mount_setattr`, and the required privileges.
+2. `ROOKHOLD_ROOTFS` names a trusted, purpose-built, absolute directory.
 3. The rootfs is not `/`, does not traverse symlinks, and is not writable by job credentials.
 4. The job receives its own mount, PID, network, IPC, and UTS namespaces.
 5. The process that follows PID-namespace creation becomes namespace PID 1 and reaps descendants.
@@ -51,11 +51,11 @@ The authenticated `/v1/status` response and startup logs expose the selected bac
 
 ## Filesystem model
 
-The private rootfs contains only the interpreters and libraries intended for jobs. It has an empty `/.pivot_old` plus `/proc`, `/dev`, `/tmp`, `/tmp/home`, and `/work` mount points; bootstrap replaces the mutable paths with job-private mounts. The Docker image builds this tree at `/opt/coop/rootfs`; source deployments must create an equivalent tree and set `COOP_ROOTFS` explicitly.
+The private rootfs contains only the interpreters and libraries intended for jobs. It has an empty `/.pivot_old` plus `/proc`, `/dev`, `/tmp`, `/tmp/home`, and `/work` mount points; bootstrap replaces the mutable paths with job-private mounts. The Docker image builds this tree at `/opt/rookhold/rootfs`; source deployments must create an equivalent tree and set `ROOKHOLD_ROOTFS` explicitly.
 
-Do not put secrets, the Coop database, host sockets, cloud credentials, SSH material, or a Docker socket in the rootfs. Do not bind the server data volume into it. Interpreter overrides must resolve to a path present inside the rootfs.
+Do not put secrets, the Rookhold database, host sockets, cloud credentials, SSH material, or a Docker socket in the rootfs. Do not bind the server data volume into it. Interpreter overrides must resolve to a path present inside the rootfs.
 
-`COOP_JOBS_ROOT` is server-side staging, not a shared workspace. It must be a dedicated absolute non-symlink directory. Coop rejects broad locations because applying owner-only permissions to `/`, `/var`, a home root, or a redirected path could damage the host.
+`ROOKHOLD_JOBS_ROOT` is server-side staging, not a shared workspace. It must be a dedicated absolute non-symlink directory. Rookhold rejects broad locations because applying owner-only permissions to `/`, `/var`, a home root, or a redirected path could damage the host.
 
 ## Network model
 
@@ -70,7 +70,7 @@ A future egress feature should be a host-side policy proxy with explicit destina
   issuer/audience/JWKS/tenant mapping. Legacy tenant keys are migration-only.
 - Grant only the required `jobs:submit`, `jobs:read`, `jobs:cancel`,
   `service:read`, and `metrics:read` scopes; use a distinct global scrape token.
-- Keep Coop on a private network or loopback behind a TLS-terminating proxy.
+- Keep Rookhold on a private network or loopback behind a TLS-terminating proxy.
 - Do not put API keys in URLs. Query strings are commonly logged by browsers and proxies.
 - Prefer the `Authorization` header for WebSocket clients that support it.
 - Clear dashboard state and close streams when rotating credentials.
@@ -110,7 +110,7 @@ Preserve configuration plus binary/runtime/rootfs/OCI digests alongside them.
 ## Deployment rules
 
 - Use a dedicated x86_64 Linux VM with no unrelated workloads.
-- Patch the kernel, container runtime, interpreters, and Coop promptly.
+- Patch the kernel, container runtime, interpreters, and Rookhold promptly.
 - Never mount `/var/run/docker.sock` or host credential directories.
 - Keep the API loopback-only unless a private TLS proxy is present.
 - Restrict access to the database, its WAL/SHM companions, backups, and rootfs.
