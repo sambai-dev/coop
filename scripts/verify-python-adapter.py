@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import os
 import uuid
 from typing import cast
 
 from rookhold import IsolationClass, Rookhold, RookholdError, isolation_satisfies
+from rookhold_cli import CliConfig, RookholdCli
 from rookhold_mcp import McpConfig, RookholdMcpServer
 
 
@@ -174,6 +176,37 @@ def main() -> None:
     require(
         not cancel_content["already_terminal"], "adapter cancel raced terminal state"
     )
+
+    cli_output = io.StringIO()
+    cli = RookholdCli(
+        CliConfig(
+            base_url=base_url,
+            api_key=api_key,
+            minimum_isolation=minimum,
+            wait_seconds=60,
+            color=False,
+            json_output=False,
+        ),
+        client=client,
+        input_stream=io.StringIO("/quit\n"),
+        output_stream=cli_output,
+    )
+    cli.connect()
+    cli.banner()
+    require(
+        cli.mcp_tools()
+        == [
+            "rookhold_run_code",
+            "rookhold_job_result",
+            "rookhold_job_events",
+            "rookhold_cancel_job",
+        ],
+        "CLI did not expose the exact live MCP tool surface",
+    )
+    cli_result = cli.run_code("python", "print('rookhold-cli-live')")
+    require(cli_result["status"] == "succeeded", "live CLI canary failed")
+    require(cli_result["stdout"] == "rookhold-cli-live", "live CLI output changed")
+    require(api_key not in cli_output.getvalue(), "CLI rendered its API key")
 
 
 if __name__ == "__main__":

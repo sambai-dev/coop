@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rookhold CLI and MCP recording</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+      background: #272a36;
+      color: #f5f7ff;
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 960px; height: 540px; margin: 0; overflow: hidden; }
+    body { background: #272a36; }
+    .stage { position: relative; width: 960px; height: 540px; padding: 25px 30px; }
+    .rail { position: absolute; inset: 25px auto 24px 13px; width: 1px; background: #555b6d; }
+    .meta { display: flex; justify-content: space-between; color: #7f8597; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+    .meta strong { color: #9babff; }
+    .hero { display: grid; grid-template-columns: 128px 1fr; gap: 22px; align-items: center; height: 151px; }
+    .rook { margin: 0; color: #f5f7ff; font-size: 15px; font-weight: 700; line-height: .92; letter-spacing: -1px; white-space: pre; }
+    h1 { margin: 0 0 7px; font-size: 22px; letter-spacing: -.03em; }
+    .sub { margin: 0; color: #8f95a7; font-size: 14px; }
+    .facts { display: grid; grid-template-columns: 82px 1fr; gap: 3px 12px; margin-top: 13px; font-size: 12px; color: #abb0c0; }
+    .facts dt { color: #676d80; }
+    .facts dd { margin: 0; }
+    .warning { color: #e9b96e; }
+    .terminal { position: absolute; left: 30px; right: 30px; bottom: 25px; height: 325px; border: 1px solid #555b6d; border-radius: 6px; background: #20232e; overflow: hidden; }
+    .bar { display: flex; justify-content: space-between; align-items: center; height: 36px; padding: 0 13px; border-bottom: 1px solid #414657; color: #777d90; font-size: 11px; }
+    .ready { color: #65d6a2; }
+    .screen { padding: 12px 17px; font-size: 13px; line-height: 1.45; }
+    .line { min-height: 19px; white-space: pre; }
+    .prompt { color: #9babff; }
+    .strong { color: #f5f7ff; font-weight: 600; }
+    .muted { color: #73798c; }
+    .accent { color: #9babff; }
+    .success { color: #65d6a2; }
+    .indent { padding-left: 18px; }
+    .cursor { display: inline-block; width: 7px; height: 14px; margin-left: 2px; vertical-align: -2px; background: #f5f7ff; }
+    .spacer { height: 5px; }
+    @media (prefers-reduced-motion: reduce) { .cursor { opacity: 1 !important; } }
+  </style>
+</head>
+<body>
+  <main class="stage" aria-label="Recording of the real Rookhold terminal client and MCP catalog">
+    <div class="rail" aria-hidden="true"></div>
+    <div class="meta"><strong>Rookhold / terminal</strong><span>live local canary · v0.7.0</span></div>
+    <section class="hero">
+      <pre class="rook" aria-hidden="true">    ██  ██
+  ██████████
+  ██████████
+    ██████
+    ██████
+  ██████████</pre>
+      <div>
+        <h1>Rookhold CLI v0.7.0</h1>
+        <p class="sub">Controlled execution for AI agents</p>
+        <dl class="facts">
+          <dt>Endpoint</dt><dd>http://127.0.0.1:7300</dd>
+          <dt>Tenant</dt><dd>local</dd>
+          <dt>Runtime</dt><dd>off · isolation none</dd>
+          <dt>MCP</dt><dd>4 tools ready</dd>
+        </dl>
+      </div>
+    </section>
+    <section class="terminal">
+      <div class="bar"><span>rookhold-cli</span><span class="ready">● connected</span></div>
+      <div class="screen">
+        <div class="line warning">local demo · unisolated · submit trusted code only</div>
+        <div class="spacer"></div>
+        <div class="line"><span class="prompt">rookhold › </span><span class="strong" id="mcpCommand"></span><span class="cursor" id="cursorA"></span></div>
+        <div class="line accent" id="mcpTitle"></div>
+        <div class="line indent" id="tool1"></div>
+        <div class="line indent" id="tool2"></div>
+        <div class="line indent" id="tool3"></div>
+        <div class="line indent" id="tool4"></div>
+        <div class="line muted" id="policy"></div>
+        <div class="line"><span class="prompt" id="promptB"></span><span class="strong" id="runCommand"></span><span class="cursor" id="cursorB"></span></div>
+        <div class="line" id="accepted"></div>
+        <div class="line success" id="result"></div>
+        <div class="line accent" id="stdoutLabel"></div>
+        <div class="line indent" id="stdout"></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const queryTime = new URLSearchParams(location.search).get("t");
+    const duration = 8.5;
+    const byId = (id) => document.getElementById(id);
+    const reveal = (text, start, end, time) => {
+      if (time <= start) return "";
+      if (time >= end) return text;
+      return text.slice(0, Math.floor(text.length * (time - start) / (end - start)));
+    };
+    function render(time) {
+      const t = Math.max(0, Math.min(duration, time));
+      byId("mcpCommand").textContent = reveal("/mcp", .35, 1.05, t);
+      byId("mcpTitle").textContent = t >= 1.2 ? "  rookhold-mcp" : "";
+      const tools = ["rookhold_run_code", "rookhold_job_result", "rookhold_job_events", "rookhold_cancel_job"];
+      tools.forEach((tool, index) => { byId(`tool${index + 1}`).textContent = t >= 1.45 + index * .22 ? `● ${tool}` : ""; });
+      byId("policy").textContent = t >= 2.45 ? "  policy minimum: none" : "";
+      byId("promptB").textContent = t >= 2.85 ? "rookhold › " : "";
+      byId("runCommand").textContent = reveal('/run python "print(6 * 7)"', 3.0, 4.6, t);
+      byId("accepted").textContent = t >= 4.85 ? "  accepted · job 01a05621…2b8c · waiting up to 60s" : "";
+      byId("result").textContent = t >= 6.0 ? "  ✓ succeeded · exit 0 · 127 ms" : "";
+      byId("stdoutLabel").textContent = t >= 6.55 ? "  stdout" : "";
+      byId("stdout").textContent = t >= 6.9 ? "42" : "";
+      byId("cursorA").style.opacity = t < 1.2 && Math.floor(t * 4) % 2 === 0 ? "1" : "0";
+      byId("cursorB").style.opacity = t >= 2.85 && t < 4.85 && Math.floor(t * 4) % 2 === 0 ? "1" : "0";
+      window.__ready = true;
+    }
+    if (queryTime !== null) render(Number(queryTime));
+    else if (matchMedia("(prefers-reduced-motion: reduce)").matches) render(duration);
+    else {
+      const started = performance.now();
+      (function loop(now) {
+        render(((now - started) / 1000) % duration);
+        requestAnimationFrame(loop);
+      })(started);
+    }
+  </script>
+</body>
+</html>

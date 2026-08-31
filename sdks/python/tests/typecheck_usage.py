@@ -26,8 +26,18 @@ from rookhold import (
     SubmitResult,
     isolation_satisfies,
 )
+from rookhold_cli import CliConfig, RookholdCli
 
 client = Rookhold("https://rookhold.example", "tenant-key", timeout=5)
+cli_config = CliConfig(
+    base_url="https://rookhold.example",
+    api_key="tenant-key",
+    minimum_isolation="gvisor-application-kernel",
+    wait_seconds=60,
+    color=False,
+    json_output=True,
+)
+cli_client = RookholdCli(cli_config, client=client)
 legacy_client: Coop = Coop("https://rookhold.example", "tenant-key", timeout=5)
 legacy_error: CoopError = CoopError("compatibility")
 _legacy = (legacy_client, legacy_error)
@@ -96,4 +106,5 @@ _ = (
     public_key,
     envelope,
     result_artifact,
+    cli_client,
 )

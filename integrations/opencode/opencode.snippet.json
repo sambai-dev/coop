@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "rookhold": {
+        "type": "local",
+        "command": ["rookhold-mcp"],
+        "environment": {
+          "ROOKHOLD_BASE_URL": "{env:ROOKHOLD_BASE_URL}",
+          "ROOKHOLD_API_KEY": "{env:ROOKHOLD_API_KEY}",
+          "ROOKHOLD_MCP_MINIMUM_ISOLATION": "{env:ROOKHOLD_MCP_MINIMUM_ISOLATION}",
+          "ROOKHOLD_MCP_ALLOWED_LANGUAGES": "{env:ROOKHOLD_MCP_ALLOWED_LANGUAGES}"
+        }
+      }
+    }
+  }
+}

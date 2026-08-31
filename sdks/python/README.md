@@ -17,14 +17,30 @@ The PyPI package is not published yet. After it is published, install it with:
 python -m pip install "rookhold-sdk[stream]"
 ```
 
-The exact v0.6.0 GitHub release wheel is
-`rookhold_sdk-0.6.0-py3-none-any.whl`; follow the
+The exact v0.7.0 GitHub release wheel is
+`rookhold_sdk-0.7.0-py3-none-any.whl`; follow the
 [checksum, attestation, and installation commands](../../docs/sdks.md) rather
 than using a moving release URL.
 
-Installation also provides the `rookhold-mcp` command. It exposes run, result,
-evidence, and cancellation tools to MCP hosts while keeping the Rookhold URL and
-key outside model-visible arguments:
+Installation provides two commands:
+
+- `rookhold-cli` is an interactive human/operator terminal with one-shot
+  subcommands for runs, jobs, results, events, cancellation, posture, and MCP
+  discovery.
+- `rookhold-mcp` is the stdio server launched by Claude Code, OpenCode, Codex,
+  Hermes, OpenClaw, and other MCP hosts. It exposes run, result, evidence, and
+  cancellation tools while keeping the Rookhold URL and key outside
+  model-visible arguments.
+
+Open the operator terminal:
+
+```bash
+export ROOKHOLD_BASE_URL=http://127.0.0.1:7300
+export ROOKHOLD_API_KEY=rookhold-dev-key
+rookhold-cli
+```
+
+Or launch the MCP transport directly for a protocol host:
 
 ```bash
 export ROOKHOLD_BASE_URL=http://127.0.0.1:7300
@@ -32,8 +48,8 @@ export ROOKHOLD_API_KEY=rookhold-dev-key
 rookhold-mcp
 ```
 
-Normally an MCP host launches the command. Use the [Hermes, OpenClaw, and
-generic host templates](../../integrations/README.md), and set
+Normally an MCP host launches the command. Use the [Claude Code, OpenCode,
+Hermes, OpenClaw, and generic host templates](../../integrations/README.md), and set
 `ROOKHOLD_MCP_MINIMUM_ISOLATION=gvisor-application-kernel` in the guarded
 production deployment. The legacy `COOP_MCP_REQUIRE_ISOLATION=true` maps only
 to `linux-shared-kernel`; prefer the exact class name. Rookhold

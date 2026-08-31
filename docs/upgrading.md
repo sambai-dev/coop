@@ -174,3 +174,26 @@ Because there is no database migration, a drained rollback to v0.5 remains
 possible with the complete v0.5 binary/image/configuration set. New Rookhold
 paths and variables are not understood by v0.5, so retain the old deployment
 files until rollback is no longer needed.
+
+## From v0.6.x to v0.7.0
+
+v0.7 adds terminal clients and host registrations without changing the HTTP
+API, schema-v4 database, evidence formats, execution providers, or production
+boundary. Existing v0.6 servers and evidence remain compatible, but keep the
+server and SDK package versions aligned for support and telemetry.
+
+After the standard drain, backup, image rebuild, and canary procedure, install
+the v0.7 Python wheel in the operator-owned environment. It adds
+`rookhold-cli` beside the existing `rookhold-mcp`; no bearer key is migrated or
+written by the installer. Set `ROOKHOLD_API_KEY` in the launching environment,
+open `rookhold-cli`, verify the displayed tenant/backend/isolation posture, run
+`/mcp`, and submit one trusted canary.
+
+Claude Code and OpenCode users can merge the new templates under
+`integrations/`. Both launch the same stdio adapter and do not alter Rookhold's
+server-side policy. Review the host's other shell/code tools separately: MCP
+registration does not make Rookhold mandatory or disable a bypass route.
+
+There is no database migration, so a drained rollback to v0.6 remains possible
+with its complete binaries, SDKs, and deployment configuration. Remove or
+disable the new CLI/MCP host registration before removing its v0.7 wheel.

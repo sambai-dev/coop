@@ -110,7 +110,7 @@ jobs:
         run: python -m pyright
       - name: Type-check Python SDK with Mypy
         working-directory: sdks/python
-        run: python -m mypy --strict rookhold.py rookhold_mcp.py coop.py coop_mcp.py tests/typecheck_usage.py
+        run: python -m mypy --strict rookhold.py rookhold_cli.py rookhold_mcp.py coop.py coop_mcp.py tests/typecheck_usage.py
       - name: Build and verify Python wheel and source distribution
         shell: bash
         run: |
@@ -129,7 +129,7 @@ jobs:
             target="sdks/python/.verify-dist/${kind}-install"
             rm -rf "$target"
             python -m pip install --no-deps --target "$target" "$artifact"
-            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp, rookhold, rookhold_mcp; assert rookhold.__version__ == '0.6.0'; assert rookhold_mcp.__version__ == rookhold.__version__; assert coop.Coop is rookhold.Rookhold; assert coop_mcp.CoopMcpServer is rookhold_mcp.RookholdMcpServer; assert Path(rookhold.__file__).with_name('py.typed').is_file(); assert Path(coop.__file__).with_name('py.typed').is_file()"
+            PYTHONPATH="$target" python -S -c "from pathlib import Path; import coop, coop_mcp, rookhold, rookhold_cli, rookhold_mcp; assert rookhold.__version__ == '0.7.0'; assert rookhold_mcp.__version__ == rookhold.__version__; assert coop.Coop is rookhold.Rookhold; assert coop_mcp.CoopMcpServer is rookhold_mcp.RookholdMcpServer; assert callable(rookhold_cli.main); assert Path(rookhold.__file__).with_name('py.typed').is_file(); assert Path(coop.__file__).with_name('py.typed').is_file()"
             PYTHONPATH="$target" python -S -m unittest discover -s sdks/python/tests -v
           done
       - name: Install TypeScript SDK dependencies
@@ -149,7 +149,7 @@ jobs:
         run: |
           python -m pip install "./sdks/python[dev]"
           python -m unittest discover -s sdks/python/tests -v
-          python -m mypy --strict sdks/python/rookhold.py sdks/python/rookhold_mcp.py sdks/python/coop.py sdks/python/coop_mcp.py sdks/python/tests/typecheck_usage.py
+          python -m mypy --strict sdks/python/rookhold.py sdks/python/rookhold_cli.py sdks/python/rookhold_mcp.py sdks/python/coop.py sdks/python/coop_mcp.py sdks/python/tests/typecheck_usage.py
       - name: Set up latest supported Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

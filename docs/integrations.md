@@ -6,7 +6,7 @@ agent is involved, the harness decides when to call a tool and Rookhold owns the
 job's execution policy and evidence.
 
 ```text
-LLM ⇄ Hermes / OpenClaw / another MCP host ⇄ rookhold-mcp ⇄ Rookhold
+LLM ⇄ Claude Code / OpenCode / another MCP host ⇄ rookhold-mcp ⇄ Rookhold
 ```
 
 The Python SDK package installs a dependency-free `rookhold-mcp` stdio server.
@@ -14,6 +14,9 @@ It serves stateless MCP 2026 discovery and opt-in Tasks alongside the legacy
 initialize flow, with bounded concurrent requests and cancellation.
 Follow the runnable templates and operator-policy guidance in
 [`integrations/`](../integrations/README.md).
+That directory includes Claude Code's stdio `.mcp.json` form and OpenCode v2's
+`mcp.servers` local-command form. Both launch the same adapter; neither host
+receives the Rookhold key as a tool argument.
 
 ## Choosing Rookhold or a harness sandbox
 

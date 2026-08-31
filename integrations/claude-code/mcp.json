@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "rookhold": {
+      "type": "stdio",
+      "command": "rookhold-mcp",
+      "args": [],
+      "env": {
+        "ROOKHOLD_BASE_URL": "${ROOKHOLD_BASE_URL:-http://127.0.0.1:7300}",
+        "ROOKHOLD_API_KEY": "${ROOKHOLD_API_KEY}",
+        "ROOKHOLD_MCP_MINIMUM_ISOLATION": "${ROOKHOLD_MCP_MINIMUM_ISOLATION:-none}",
+        "ROOKHOLD_MCP_ALLOWED_LANGUAGES": "${ROOKHOLD_MCP_ALLOWED_LANGUAGES:-python,node,bash}"
+      }
+    }
+  }
+}
