@@ -26,6 +26,77 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def check_release_data(version: str) -> dict[str, str]:
+    """Validate the canonical public release URLs and consumer surfaces."""
+    release_data = json.loads(read("release.json"))
+    require(isinstance(release_data, dict), "release.json must contain an object")
+    base = f"https://github.com/sambai-dev/rookhold/releases/download/v{version}"
+    expected = {
+        "current_version": version,
+        "release_url": f"https://github.com/sambai-dev/rookhold/releases/tag/v{version}",
+        "windows_app_url": f"{base}/rookhold-x86_64-pc-windows-msvc.zip",
+        "mac_app_url": f"{base}/rookhold-aarch64-apple-darwin.tar.gz",
+        "linux_app_url": f"{base}/rookhold-x86_64-unknown-linux-musl.tar.gz",
+        "windows_client_url": f"{base}/rookhold-cli-x86_64-pc-windows-msvc.exe",
+        "mac_client_url": f"{base}/rookhold-cli-aarch64-apple-darwin",
+        "linux_client_url": f"{base}/rookhold-cli-x86_64-unknown-linux-gnu",
+    }
+    require(release_data == expected, "release.json differs from the eleven-asset release contract")
+
+    consumer_surfaces = {
+        "README.md": [
+            expected["release_url"],
+            expected["windows_app_url"],
+            expected["mac_app_url"],
+            expected["linux_app_url"],
+            expected["windows_client_url"],
+            expected["mac_client_url"],
+            expected["linux_client_url"],
+            "pip install rookhold",
+            "npm install rookhold",
+        ],
+        "docs/index.md": [
+            expected["windows_app_url"],
+            expected["mac_app_url"],
+            expected["linux_app_url"],
+            expected["windows_client_url"],
+            expected["mac_client_url"],
+            expected["linux_client_url"],
+            "pip install rookhold",
+            "npm install rookhold",
+        ],
+        "docs/getting-started/quickstart.md": [
+            expected["windows_app_url"],
+            expected["mac_app_url"],
+            expected["linux_app_url"],
+        ],
+        "docs/getting-started/installation.md": [
+            expected[key] for key in expected if key != "current_version"
+        ],
+    }
+    for relative, required_values in consumer_surfaces.items():
+        source = read(relative)
+        for required_value in required_values:
+            require(required_value in source, f"{relative} differs from release.json: {required_value}")
+
+    for relative in [
+        "README.md",
+        "docs/index.md",
+        "docs/getting-started/quickstart.md",
+        "docs/getting-started/installation.md",
+        "docs/use/cli.md",
+        "docs/use/mcp.md",
+        "sdks/python/README.md",
+        "sdks/typescript/README.md",
+    ]:
+        advertised_versions = set(re.findall(r"\bv(\d+\.\d+\.\d+)\b", read(relative)))
+        require(
+            advertised_versions <= {version},
+            f"{relative} advertises stale versions: {sorted(advertised_versions - {version})}",
+        )
+    return release_data
+
+
 def toml_string(relative: str, section: str, key: str) -> str:
     """Read one quoted TOML value without adding a Python-version dependency."""
     current = ""
@@ -46,6 +117,7 @@ def toml_string(relative: str, section: str, key: str) -> str:
 def check_versions() -> str:
     version = toml_string("Cargo.toml", "workspace.package", "version")
     require(version == "0.8.0", f"unexpected workspace release version: {version}")
+    check_release_data(version)
 
     toolchain = toml_string("rust-toolchain.toml", "toolchain", "channel")
     rust_version = toml_string("Cargo.toml", "workspace.package", "rust-version")
@@ -457,6 +529,8 @@ def check_pins_and_packaging() -> int:
         )
     require("os: macos-15" in release, "Apple-silicon release is not built on the GA arm64 runner")
     require("ROOKHOLD_RELEASE_GOVERNANCE" in release, "release workflow lacks repository-governance acknowledgement")
+    require("ROOKHOLD_PYPI_TRUSTED_PUBLISHER" in release, "release workflow lacks PyPI publisher acknowledgement")
+    require("ROOKHOLD_NPM_TRUSTED_PUBLISHER" in release, "release workflow lacks npm publisher acknowledgement")
     require(
         "environment:\n      name: release" in release,
         "publish job lacks the protected release environment hook",
@@ -763,6 +837,21 @@ def check_documented_boundary() -> None:
                 claim in document,
                 f"{relative} omits the current architecture boundary: {claim}",
             )
+    for relative in ["README.md", "docs/getting-started/quickstart.md"]:
+        source = read(relative)
+        for claim in ["network      host", "isolation    none"]:
+            require(claim in source, f"{relative} omits truthful local-demo output: {claim}")
+    compatibility = read(".github/workflows/compatibility.yml")
+    require(
+        "scripts/verify-local-demo.py local-demo.json" in compatibility,
+        "compatibility workflow does not execute the local documentation snapshot",
+    )
+    verifier = read("scripts/verify-local-demo.py")
+    for invariant in [
+        'receipt.get("networking") == "host"',
+        'receipt.get("isolation_class") == "none"',
+    ]:
+        require(invariant in verifier, f"local documentation verifier omits: {invariant}")
     service = read("deploy/rookhold.service")
     require(
         "ConditionArchitecture=x86-64" in service,

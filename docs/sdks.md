@@ -2,12 +2,15 @@
 
 Rookhold ships small reference clients under `sdks/`. They intentionally mirror the HTTP API and are suitable for embedding in agent tool loops. The OpenAPI document remains the canonical contract for generated clients.
 
-The v0.8 release workflow is prepared to test SDK source, install the built
-Python wheel and source distribution, pack the TypeScript client, and publish
-the exact gated artifacts to PyPI and npm with GitHub trusted publishing. The
-registry packages are not public until v0.8.0 is tagged and that workflow
-finishes. A final clean-environment job will install `rookhold==0.8.0` and
-`rookhold@0.8.0` from the public registries.
+Install the v0.8 clients from the public registries:
+
+```bash
+pip install rookhold==0.8.0
+npm install rookhold@0.8.0
+```
+
+The release workflow publishes both packages with registry trusted publishing
+and then installs those exact public versions in clean environments.
 
 To install the v0.8.0 release, activate the intended Python virtual environment and download the exact release assets into an otherwise empty working directory. This example verifies both the checksum manifest and GitHub provenance before installation:
 

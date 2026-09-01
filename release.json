@@ -1,0 +1,10 @@
+{
+  "current_version": "0.8.0",
+  "release_url": "https://github.com/sambai-dev/rookhold/releases/tag/v0.8.0",
+  "windows_app_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-pc-windows-msvc.zip",
+  "mac_app_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-aarch64-apple-darwin.tar.gz",
+  "linux_app_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-unknown-linux-musl.tar.gz",
+  "windows_client_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-pc-windows-msvc.exe",
+  "mac_client_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-aarch64-apple-darwin",
+  "linux_client_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-unknown-linux-gnu"
+}

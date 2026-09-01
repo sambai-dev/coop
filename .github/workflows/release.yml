@@ -37,6 +37,21 @@ jobs:
             echo "Configure the protected release environment/tag rules described in docs/releasing.md, then set ROOKHOLD_RELEASE_GOVERNANCE=enabled" >&2
             exit 1
           fi
+      - name: Require configured registry trusted publishers
+        env:
+          PYPI_TRUSTED_PUBLISHER: ${{ vars.ROOKHOLD_PYPI_TRUSTED_PUBLISHER }}
+          NPM_TRUSTED_PUBLISHER: ${{ vars.ROOKHOLD_NPM_TRUSTED_PUBLISHER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$PYPI_TRUSTED_PUBLISHER" != enabled ]; then
+            echo "Configure the pending PyPI publisher for release.yml and the release environment, then set ROOKHOLD_PYPI_TRUSTED_PUBLISHER=enabled" >&2
+            exit 1
+          fi
+          if [ "$NPM_TRUSTED_PUBLISHER" != enabled ]; then
+            echo "Bootstrap the npm package, configure its release.yml trusted publisher for the release environment, then set ROOKHOLD_NPM_TRUSTED_PUBLISHER=enabled" >&2
+            exit 1
+          fi
       - name: Require a concrete build revision
         shell: bash
         run: |

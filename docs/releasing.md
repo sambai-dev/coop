@@ -12,8 +12,24 @@ Configure these controls in GitHub before setting the repository variable `ROOKH
 4. Enable private vulnerability reporting and verify the contact in [SECURITY.md](https://github.com/sambai-dev/rookhold/blob/main/SECURITY.md).
 5. Enable GitHub immutable releases so a published tag or asset cannot be silently replaced. The workflow's draft-staging step remains editable until publication; immutability applies to the published release.
 6. Review Actions access so only required, SHA-pinned actions are allowed. Keep the default workflow token read-only; only the final publish job receives contents, attestation, and OIDC write permissions.
+7. On PyPI, configure a pending trusted publisher for project `rookhold`, owner
+   `sambai-dev`, repository `rookhold`, workflow `release.yml`, and environment
+   `release`. A pending publisher does not reserve the name until the first
+   publish, so complete the release promptly after this check.
+8. npm does not offer PyPI-style pending publishers. Before the final tag,
+   bootstrap the unclaimed `rookhold` package through the maintainer's
+   2FA-protected npm account (a prerelease is preferred), then configure its
+   GitHub Actions trusted publisher for owner `sambai-dev`, repository
+   `rookhold`, workflow `release.yml`, environment `release`, and `npm publish`.
+   Confirm the package's repository URL resolves exactly to this repository.
+   The final `0.8.0` publication must still come from the tagged OIDC workflow.
 
-The repository variable is an acknowledgement, not proof. Recheck the settings after ownership, plan, or organization-policy changes. An unset variable stops the tag workflow before any build or draft release is created.
+The repository variables are acknowledgements, not proof. Recheck the settings
+after ownership, plan, or organization-policy changes. Set
+`ROOKHOLD_RELEASE_GOVERNANCE`, `ROOKHOLD_PYPI_TRUSTED_PUBLISHER`, and
+`ROOKHOLD_NPM_TRUSTED_PUBLISHER` to `enabled` only after the corresponding
+checks. An unset variable stops the tag workflow before any build or draft
+release is created.
 
 ## Per-release checklist
 

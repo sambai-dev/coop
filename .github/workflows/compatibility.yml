@@ -69,8 +69,8 @@ jobs:
         run: |
           suffix=
           if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
-          "target/debug/rookhold${suffix}" run python 'print(6 * 7)' --json | \
-            python -c 'import json, sys; value=json.load(sys.stdin); assert value["result"]["stdout"] == "42" and value["result"]["status"] == "succeeded"'
+          "target/debug/rookhold${suffix}" run python 'print(6 * 7)' --json > local-demo.json
+          python scripts/verify-local-demo.py local-demo.json
 
   examples-and-mcp:
     name: recipes and MCP configuration
