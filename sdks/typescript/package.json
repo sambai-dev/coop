@@ -51,7 +51,7 @@
     "directory": "sdks/typescript"
   },
   "bugs": "https://github.com/sambai-dev/rookhold/issues",
-  "homepage": "https://sambai-dev.github.io/rookhold/",
+  "homepage": "https://rookhold.vercel.app/",
   "devDependencies": {
     "typescript": "^7.0.2"
   }

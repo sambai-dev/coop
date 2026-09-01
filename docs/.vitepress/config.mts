@@ -1,19 +1,26 @@
 import { defineConfig } from "vitepress";
 
+const isVercel = process.env.VERCEL === "1";
+const siteBase = isVercel ? "/" : "/rookhold/";
+const siteOrigin = isVercel
+  ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL ?? "rookhold.vercel.app"}`
+  : "https://sambai-dev.github.io/rookhold";
+
 export default defineConfig({
   title: "Rookhold Sandbox",
-  description: "Run short Python, Node, and Bash jobs with hard limits and verifiable receipts.",
+  description: "A controlled execution boundary for AI agents, with hard limits, live output, and verifiable receipts.",
   lang: "en-US",
-  base: "/rookhold/",
+  base: siteBase,
   cleanUrls: true,
   lastUpdated: true,
-  sitemap: { hostname: "https://sambai-dev.github.io/rookhold/" },
+  sitemap: { hostname: `${siteOrigin}/` },
   head: [
     ["meta", { name: "theme-color", content: "#12171e" }],
     ["meta", { property: "og:type", content: "website" }],
     ["meta", { property: "og:title", content: "Rookhold Sandbox" }],
-    ["meta", { property: "og:description", content: "Hard limits and a receipt for short untrusted code." }],
-    ["meta", { property: "og:image", content: "https://sambai-dev.github.io/rookhold/social-card.png" }],
+    ["meta", { property: "og:description", content: "Run agent code behind a boundary you control." }],
+    ["meta", { property: "og:image", content: `${siteOrigin}/social-card.png` }],
+    ["meta", { property: "og:url", content: `${siteOrigin}/` }],
     ["meta", { name: "twitter:card", content: "summary_large_image" }],
   ],
   themeConfig: {
@@ -22,8 +29,10 @@ export default defineConfig({
     nav: [
       { text: "Start", link: "/getting-started/quickstart" },
       { text: "Use", link: "/use/cli" },
+      { text: "MCP", link: "/use/mcp" },
       { text: "Understand", link: "/understand/receipts" },
       { text: "Operate", link: "/deployment" },
+      { text: "Download v0.7.1", link: "https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1" },
     ],
     sidebar: {
       "/getting-started/": [

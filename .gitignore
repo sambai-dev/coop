@@ -22,3 +22,5 @@ __pycache__/
 
 # Local design-research workbench state is never part of the maintained source tree.
 /.impeccable/
+
+/.vercel/
