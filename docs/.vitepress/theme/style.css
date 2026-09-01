@@ -142,6 +142,7 @@ body { background: #fdfeff; }
 .download-option:last-child { border-right: 0; }
 .download-option:hover { background: #1e55e6; color: #fff !important; }
 .download-option strong { font-size: 18px; letter-spacing: -.02em; }
+.download-compatibility { max-width: 720px; margin-top: 14px; font-size: 13px; line-height: 1.55; }
 
 .mcp-section { padding-block: 82px !important; }
 .mcp-layout { display: grid; grid-template-columns: 1.08fr .92fr; gap: 56px; align-items: center; margin-top: 38px; }

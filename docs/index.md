@@ -46,19 +46,20 @@ hero:
 <section id="download" class="download-section" aria-labelledby="download-heading">
   <div class="section-heading">
     <h2 id="download-heading">Download Rookhold.</h2>
-    <p>Choose your computer. Each option is one ready-to-run CLI file.</p>
+    <p>Choose your computer. Each option is one self-contained CLI file.</p>
   </div>
   <div class="download-grid">
-    <a class="download-option" aria-label="Download Rookhold for Windows" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-pc-windows-msvc.exe">
+    <a class="download-option" aria-label="Download Rookhold for 64-bit Windows" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-pc-windows-msvc.exe">
       <strong>Windows</strong>
     </a>
-    <a class="download-option" aria-label="Download Rookhold for Mac" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-aarch64-apple-darwin">
+    <a class="download-option" aria-label="Download Rookhold for Apple silicon Mac" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-aarch64-apple-darwin">
       <strong>Mac</strong>
     </a>
-    <a class="download-option" aria-label="Download Rookhold for Linux" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-unknown-linux-gnu">
+    <a class="download-option" aria-label="Download Rookhold for 64-bit Intel or AMD Linux" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-unknown-linux-gnu">
       <strong>Linux</strong>
     </a>
   </div>
+  <p class="download-compatibility">Windows and Linux: 64-bit Intel or AMD. Mac: Apple silicon. Mac and Linux users run <code>chmod +x</code> once after downloading.</p>
 </section>
 
 <section class="mcp-section" aria-labelledby="mcp-heading">
