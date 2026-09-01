@@ -14,7 +14,7 @@
   --vp-button-alt-hover-text: #111827;
   --vp-button-alt-hover-bg: #f5f6f9;
   --vp-font-family-base: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --vp-font-family-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --vp-font-family-mono: "SFMono-Regular", consolas, "Liberation Mono", menlo, monospace;
 }
 
 html { scroll-behavior: smooth; }

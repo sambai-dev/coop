@@ -108,7 +108,7 @@ features:
     <h2 id="boundary-heading">The website is hosted. The executor is yours.</h2>
   </div>
   <div class="boundary-copy">
-    <p>Vercel serves these public docs and downloads. It does not run Rookhold's privileged execution backend.</p>
+    <p>Vercel serves these public docs. Download links point directly to immutable GitHub Releases assets. Vercel does not run Rookhold's privileged execution backend.</p>
     <p>For untrusted code, operate Rookhold on a dedicated Linux x86_64 host with the pinned gVisor provider. Local development on Windows, macOS, or an unisolated Linux setup reports <code>isolation: none</code>.</p>
     <a class="home-text-link" href="./getting-started/first-secure-deployment">Build the secure boundary <span aria-hidden="true">→</span></a>
   </div>
