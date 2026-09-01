@@ -102,9 +102,9 @@ runs the MCP server for Claude Code, OpenCode, and other agent CLIs.
 
 | Your computer | Single-file CLI |
 |---|---|
-| Windows, 64-bit | [`rookhold-cli-x86_64-pc-windows-msvc.exe`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-pc-windows-msvc.exe) |
-| Mac with Apple silicon | [`rookhold-cli-aarch64-apple-darwin`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-aarch64-apple-darwin) |
-| Linux x86_64 | [`rookhold-cli-x86_64-unknown-linux-gnu`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-unknown-linux-gnu) |
+| Windows | [Download for Windows](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-pc-windows-msvc.exe) |
+| Mac | [Download for Mac](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-aarch64-apple-darwin) |
+| Linux | [Download for Linux](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-unknown-linux-gnu) |
 
 Run it normally for the interactive CLI. Register the same path plus the
 `mcp-server` argument in an MCP host. On macOS or Linux, mark the download
@@ -124,14 +124,13 @@ source checkout.
 
 ### 1. Download the app
 
-Open the current [v0.7.1 release](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1),
-then choose the archive for your computer:
+Choose the complete app bundle for your computer:
 
 | Your computer | Download the complete app bundle |
 |---|---|
-| Windows, 64-bit | [`rookhold-x86_64-pc-windows-msvc.zip`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-x86_64-pc-windows-msvc.zip) |
-| Mac with Apple silicon | [`rookhold-aarch64-apple-darwin.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-aarch64-apple-darwin.tar.gz) |
-| Linux x86_64 | [`rookhold-x86_64-unknown-linux-musl.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-x86_64-unknown-linux-musl.tar.gz) |
+| Windows | [Download the Windows app](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-x86_64-pc-windows-msvc.zip) |
+| Mac | [Download the Mac app](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-aarch64-apple-darwin.tar.gz) |
+| Linux | [Download the Linux app](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-x86_64-unknown-linux-musl.tar.gz) |
 
 Extract the archive. It contains the Rookhold service, `rookhold-cli`,
 `rookhold-mcp`, verification tools, and the copy-ready agent configurations.
