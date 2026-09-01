@@ -9,7 +9,15 @@ permissive CORS headers; a cross-origin frontend needs an explicitly
 allowlisted reverse-proxy policy, and its bearer key will be available to that
 frontend's JavaScript.
 
-Install from npm:
+Before v0.8.0 publishes, build and pack the checkout:
+
+```bash
+cd sdks/typescript
+npm ci
+npm pack
+```
+
+After publication, install from npm:
 
 ```bash
 npm install rookhold

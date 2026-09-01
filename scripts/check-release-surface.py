@@ -30,6 +30,8 @@ def check_release_data(version: str) -> dict[str, str]:
     """Validate the canonical public release URLs and consumer surfaces."""
     release_data = json.loads(read("release.json"))
     require(isinstance(release_data, dict), "release.json must contain an object")
+    release_status = release_data.get("release_status")
+    require(release_status in {"candidate", "current"}, "release.json has an invalid release_status")
     base = f"https://github.com/sambai-dev/rookhold/releases/download/v{version}"
     expected = {
         "current_version": version,
@@ -40,8 +42,14 @@ def check_release_data(version: str) -> dict[str, str]:
         "windows_client_url": f"{base}/rookhold-cli-x86_64-pc-windows-msvc.exe",
         "mac_client_url": f"{base}/rookhold-cli-aarch64-apple-darwin",
         "linux_client_url": f"{base}/rookhold-cli-x86_64-unknown-linux-gnu",
+        "python_wheel_url": f"{base}/rookhold-{version}-py3-none-any.whl",
+        "python_sdist_url": f"{base}/rookhold-{version}.tar.gz",
+        "npm_tarball_url": f"{base}/rookhold-{version}.tgz",
+        "spdx_url": f"{base}/rookhold-{version}.spdx.json",
+        "checksums_url": f"{base}/SHA256SUMS",
     }
-    require(release_data == expected, "release.json differs from the eleven-asset release contract")
+    actual_contract = {key: value for key, value in release_data.items() if key != "release_status"}
+    require(actual_contract == expected, "release.json differs from the eleven-asset release contract")
 
     consumer_surfaces = {
         "README.md": [
@@ -71,13 +79,36 @@ def check_release_data(version: str) -> dict[str, str]:
             expected["linux_app_url"],
         ],
         "docs/getting-started/installation.md": [
-            expected[key] for key in expected if key != "current_version"
+            expected[key]
+            for key in [
+                "release_url",
+                "windows_app_url",
+                "mac_app_url",
+                "linux_app_url",
+                "windows_client_url",
+                "mac_client_url",
+                "linux_client_url",
+            ]
+        ],
+        "docs/sdks.md": [
+            expected["python_wheel_url"],
+            expected["python_sdist_url"],
+            expected["npm_tarball_url"],
+            expected["spdx_url"],
+            expected["checksums_url"],
         ],
     }
     for relative, required_values in consumer_surfaces.items():
         source = read(relative)
         for required_value in required_values:
             require(required_value in source, f"{relative} differs from release.json: {required_value}")
+
+    if release_status == "candidate":
+        for relative in ["README.md", "docs/index.md"]:
+            require(
+                "release candidate" in read(relative).casefold(),
+                f"{relative} presents unpublished v{version} as current",
+            )
 
     for relative in [
         "README.md",

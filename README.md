@@ -7,7 +7,9 @@ verifiable receipt of what happened.
 [![Release](https://img.shields.io/github/v/release/sambai-dev/rookhold)](https://github.com/sambai-dev/rookhold/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Current release:** [v0.8.0](https://github.com/sambai-dev/rookhold/releases/tag/v0.8.0)
+**Release candidate:** [v0.8.0](https://github.com/sambai-dev/rookhold/releases/tag/v0.8.0).
+The download and registry links below become available when the release
+workflow publishes. Until then, use the [source build](#build-from-source).
 
 Rookhold is for applications, agents, evaluators, graders, and automations that
 receive a short piece of code but should not hand it the host machine. It is a
@@ -16,13 +18,14 @@ or general-purpose cloud sandbox.
 
 ## Try Rookhold locally
 
-Choose the complete **Rookhold app** bundle. It contains the unified `rookhold`
-command, the remote client, MCP adapter, offline verifier, and setup templates.
+After v0.8.0 publishes, choose the complete **Rookhold app** bundle. It contains
+the unified `rookhold` command, remote client, MCP adapter, offline verifier,
+and setup templates.
 
 | Your computer | App bundle |
 |---|---|
 | Windows, 64-bit | [Download for Windows](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-pc-windows-msvc.zip) |
-| Mac with Apple silicon | [Download for Mac](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-aarch64-apple-darwin.tar.gz) |
+| Mac with Apple Silicon | [Download for Mac](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-aarch64-apple-darwin.tar.gz) |
 | Linux x86_64 | [Download for Linux](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-unknown-linux-musl.tar.gz) |
 
 Extract the archive, then run one trusted local job:
@@ -74,6 +77,8 @@ untrusted workloads.
 
 ### Python
 
+After v0.8.0 publishes:
+
 ```bash
 pip install rookhold
 ```
@@ -86,6 +91,8 @@ print(result.stdout)
 ```
 
 ### TypeScript
+
+After v0.8.0 publishes:
 
 ```bash
 npm install rookhold
@@ -107,13 +114,14 @@ console.log(result.stdout);
 
 ## Connect to an existing Rookhold server
 
-The **Rookhold client** is the smallest download for a person or MCP host that
-already has a Rookhold endpoint. It does not include the local service.
+After v0.8.0 publishes, the **Rookhold client** is the smallest download for a
+person or MCP host that already has a Rookhold endpoint. It does not include
+the local service.
 
 | Your computer | Standalone client |
 |---|---|
 | Windows, 64-bit | [Download the Windows client](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-pc-windows-msvc.exe) |
-| Mac with Apple silicon | [Download the Mac client](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-aarch64-apple-darwin) |
+| Mac with Apple Silicon | [Download the Mac client](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-aarch64-apple-darwin) |
 | Linux x86_64 | [Download the Linux client](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-unknown-linux-gnu) |
 
 Run it normally for the operator terminal, or register the same file with the

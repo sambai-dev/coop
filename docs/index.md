@@ -22,6 +22,11 @@ hero:
       link: /use/mcp
 ---
 
+<section class="release-candidate-note" aria-label="v0.8.0 publication status">
+  <strong>v0.8.0 release candidate</strong>
+  <span>Downloads and registry commands activate after the release workflow publishes. Until then, <a href="https://github.com/sambai-dev/rookhold#build-from-source">build from main</a>.</span>
+</section>
+
 <section class="home-use-cases" aria-label="Common Rookhold use cases">
   <a href="https://github.com/sambai-dev/rookhold/tree/main/examples/llm-tool-call"><strong>Generated functions</strong><span>Run model-produced source outside the agent process.</span></a>
   <a href="https://github.com/sambai-dev/rookhold/tree/main/examples/json-transform"><strong>JSON transforms</strong><span>Apply user-defined code to structured input.</span></a>
@@ -47,11 +52,11 @@ hero:
 <section id="try" class="download-section" aria-labelledby="try-heading">
   <div class="section-heading">
     <h2 id="try-heading">Try the Rookhold app.</h2>
-    <p>The complete bundle contains the unified app, local service, remote client, MCP adapter, verifier, and setup templates.</p>
+    <p>After v0.8.0 publishes, the complete bundle contains the unified app, local service, remote client, MCP adapter, verifier, and setup templates.</p>
   </div>
   <div class="download-grid">
     <a class="download-option" aria-label="Download the Rookhold app for 64-bit Windows" href="https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-pc-windows-msvc.zip"><strong>Windows</strong></a>
-    <a class="download-option" aria-label="Download the Rookhold app for Apple silicon Mac" href="https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-aarch64-apple-darwin.tar.gz"><strong>Mac</strong></a>
+    <a class="download-option" aria-label="Download the Rookhold app for Apple Silicon Mac" href="https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-aarch64-apple-darwin.tar.gz"><strong>Mac</strong></a>
     <a class="download-option" aria-label="Download the Rookhold app for Linux x86_64" href="https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-unknown-linux-musl.tar.gz"><strong>Linux</strong></a>
   </div>
   <p class="download-compatibility">Windows and Linux: 64-bit Intel or AMD. Mac: Apple silicon. Mac and Linux users run <code>chmod +x</code> once after extracting.</p>
@@ -60,7 +65,7 @@ hero:
 <section id="sdk" class="sdk-section" aria-labelledby="sdk-heading">
   <div class="section-heading">
     <h2 id="sdk-heading">Add Rookhold to an application.</h2>
-    <p>The SDKs submit jobs to a Rookhold endpoint. They do not create the guarded Linux execution boundary by themselves.</p>
+    <p>After v0.8.0 publishes, install the SDKs from the registries. They submit jobs to an endpoint and do not create the guarded Linux boundary by themselves.</p>
   </div>
   <div class="sdk-layout">
     <div class="install-command"><span>Python</span><code>pip install rookhold</code><a href="./use/python">Python guide →</a></div>
@@ -71,7 +76,7 @@ hero:
 <section class="client-section" aria-labelledby="client-heading">
   <div class="section-heading">
     <h2 id="client-heading">Already have a Rookhold server?</h2>
-    <p>The standalone Rookhold client is the smaller human and MCP interface. It does not include the service or local-run workflow.</p>
+    <p>After v0.8.0 publishes, the standalone client is the smaller human and MCP interface. It does not include the service or local-run workflow.</p>
     <div class="home-demo-actions">
       <a class="home-text-link" href="./use/cli">Client guide <span aria-hidden="true">→</span></a>
       <a class="home-text-link" href="./use/mcp">MCP setup <span aria-hidden="true">→</span></a>

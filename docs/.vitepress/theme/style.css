@@ -81,6 +81,10 @@ body { background: #fdfeff; }
 .section-heading { max-width: 700px; }
 .section-heading > p:last-child { max-width: 650px; margin-top: 16px; font-size: 17px; line-height: 1.65; }
 
+.release-candidate-note { display: flex; gap: 18px; align-items: baseline; padding-block: 16px 30px; color: #5e6675; font-size: 13px; }
+.release-candidate-note strong { color: #a76400; white-space: nowrap; }
+.release-candidate-note a { color: #1e55e6; }
+
 .home-use-cases { display: grid; grid-template-columns: repeat(3, 1fr); padding-bottom: 80px; }
 .home-use-cases a {
   display: flex;
@@ -202,6 +206,7 @@ body { background: #fdfeff; }
   .VPHero .image { display: none; }
   .VPHero .text { font-size: 42px; }
   .VPHome section:not(.boundary-section):not(.final-cta) { padding-inline: 18px; }
+  .release-candidate-note { display: grid; gap: 6px; }
   .home-use-cases { grid-template-columns: 1fr; padding-bottom: 62px; }
   .home-use-cases a, .home-use-cases a:last-child { border: 1px solid #e1e4e9; border-bottom: 0; }
   .home-use-cases a:last-child { border-bottom: 1px solid #e1e4e9; }

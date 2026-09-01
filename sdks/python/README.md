@@ -4,7 +4,13 @@ A typed synchronous client and stdio MCP adapter with no required dependencies.
 Install the optional stream extra for a native WebSocket; otherwise `stream()`
 transparently uses cursor replay.
 
-Install from PyPI:
+Before v0.8.0 publishes, install from the checkout:
+
+```bash
+python -m pip install "./sdks/python[stream]"
+```
+
+After publication, install from PyPI:
 
 ```bash
 python -m pip install "rookhold[stream]"

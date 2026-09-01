@@ -9,8 +9,9 @@ rookhold setup opencode
 ```
 
 The command finds the normal configuration file, shows a diff, creates a
-timestamped backup, writes only after confirmation, keeps the API key in the
-environment, and runs `rookhold check` afterward.
+timestamped backup, prompts before writing by default, keeps the API key in the
+environment, and runs `rookhold check` afterward. Pass `--yes` only when an
+already-reviewed automation should bypass that confirmation prompt.
 
 The standalone existing-server client can serve MCP over stdio. Your host
 launches it with one argument:

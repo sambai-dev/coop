@@ -1,10 +1,16 @@
 {
   "current_version": "0.8.0",
+  "release_status": "candidate",
   "release_url": "https://github.com/sambai-dev/rookhold/releases/tag/v0.8.0",
   "windows_app_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-pc-windows-msvc.zip",
   "mac_app_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-aarch64-apple-darwin.tar.gz",
   "linux_app_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-unknown-linux-musl.tar.gz",
   "windows_client_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-pc-windows-msvc.exe",
   "mac_client_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-aarch64-apple-darwin",
-  "linux_client_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-unknown-linux-gnu"
+  "linux_client_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-unknown-linux-gnu",
+  "python_wheel_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0-py3-none-any.whl",
+  "python_sdist_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tar.gz",
+  "npm_tarball_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tgz",
+  "spdx_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.spdx.json",
+  "checksums_url": "https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/SHA256SUMS"
 }
