@@ -46,15 +46,15 @@ Use Rookhold when an agent or user supplies short-lived code and you need it
 bounded, cancellable, and inspectable. It is not a persistent development
 workspace, browser sandbox, remote IDE, or general-purpose container platform.
 
-[Quickstart](https://sambai-dev.github.io/rookhold/getting-started/quickstart) ·
-[Python](https://sambai-dev.github.io/rookhold/use/python) ·
-[TypeScript](https://sambai-dev.github.io/rookhold/use/typescript) ·
-[CLI](https://sambai-dev.github.io/rookhold/use/cli) ·
-[MCP](https://sambai-dev.github.io/rookhold/use/mcp) ·
-[Recipes](https://sambai-dev.github.io/rookhold/use/recipes) ·
-[Self-hosting](https://sambai-dev.github.io/rookhold/deployment) ·
-[Security model](https://sambai-dev.github.io/rookhold/security-boundary) ·
-[API](https://sambai-dev.github.io/rookhold/api)
+[Quickstart](https://rookhold.vercel.app/getting-started/quickstart) ·
+[Python](https://rookhold.vercel.app/use/python) ·
+[TypeScript](https://rookhold.vercel.app/use/typescript) ·
+[CLI](https://rookhold.vercel.app/use/cli) ·
+[MCP](https://rookhold.vercel.app/use/mcp) ·
+[Recipes](https://rookhold.vercel.app/use/recipes) ·
+[Self-hosting](https://rookhold.vercel.app/deployment) ·
+[Security model](https://rookhold.vercel.app/security-boundary) ·
+[API](https://rookhold.vercel.app/api)
 
 > [!WARNING]
 > With no configured endpoint, `rookhold run` manages an unisolated local
@@ -335,7 +335,7 @@ The event chain remains server-verifiable operational evidence. A signed envelop
 
 ## Build from source (optional)
 
-Most users should use the [one-command quickstart](https://sambai-dev.github.io/rookhold/getting-started/quickstart).
+Most users should use the [one-command quickstart](https://rookhold.vercel.app/getting-started/quickstart).
 This section is only for contributors or operators who specifically want to
 compile Rookhold themselves. Install Rust 1.98 and the runtimes you intend to use:
 
