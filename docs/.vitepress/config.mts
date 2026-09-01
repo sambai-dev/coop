@@ -34,7 +34,7 @@ export default defineConfig({
       { text: "MCP", link: "/use/mcp" },
       { text: "Security", link: "/security-boundary" },
       { text: "Deploy", link: "/deployment" },
-      { text: "Download v0.7.1", link: "https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1" },
+      { text: "Download", link: "/#download" },
     ],
     sidebar: {
       "/getting-started/": [

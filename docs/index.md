@@ -45,21 +45,21 @@ hero:
 
 <section id="download" class="download-section" aria-labelledby="download-heading">
   <div class="section-heading">
-    <h2 id="download-heading">Download Rookhold v0.7.1.</h2>
-    <p>Each link is one standalone CLI file from the immutable GitHub release. Keep it at a stable path; agent hosts launch the same file with <code>mcp-server</code>.</p>
+    <h2 id="download-heading">Download Rookhold.</h2>
+    <p>Choose your computer. Each option is one self-contained CLI file.</p>
   </div>
   <div class="download-grid">
-    <a class="download-option" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-pc-windows-msvc.exe">
-      <span class="download-os">Windows</span><strong>Download .exe</strong><small>x86_64 · 9.1 MB</small>
+    <a class="download-option" aria-label="Download Rookhold for 64-bit Windows" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-pc-windows-msvc.exe">
+      <strong>Windows</strong>
     </a>
-    <a class="download-option" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-aarch64-apple-darwin">
-      <span class="download-os">macOS</span><strong>Download binary</strong><small>Apple Silicon · 8.2 MB</small>
+    <a class="download-option" aria-label="Download Rookhold for Apple silicon Mac" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-aarch64-apple-darwin">
+      <strong>Mac</strong>
     </a>
-    <a class="download-option" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-unknown-linux-gnu">
-      <span class="download-os">Linux</span><strong>Download binary</strong><small>x86_64 GNU · 21.0 MB</small>
+    <a class="download-option" aria-label="Download Rookhold for 64-bit Intel or AMD Linux" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-unknown-linux-gnu">
+      <strong>Linux</strong>
     </a>
   </div>
-  <p class="download-footnote">Need the server, verifier, SDKs, checksums, or another platform? <a href="https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1">View every release asset</a>.</p>
+  <p class="download-compatibility">Windows and Linux: 64-bit Intel or AMD. Mac: Apple silicon. Mac and Linux users run <code>chmod +x</code> once after downloading.</p>
 </section>
 
 <section class="mcp-section" aria-labelledby="mcp-heading">

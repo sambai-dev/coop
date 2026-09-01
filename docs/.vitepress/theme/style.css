@@ -127,13 +127,13 @@ body { background: #fdfeff; }
 .terminal-receipt b { color: #7dd89b; font-weight: 650; }
 
 .download-section { padding-block: 78px !important; border-block: 1px solid #e1e4e9; }
-.download-grid { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 36px; border: 1px solid #c8cdd6; }
+.download-grid { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 32px; border: 1px solid #c8cdd6; }
 .download-option {
   display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-height: 148px;
-  padding: 22px;
+  align-items: center;
+  justify-content: center;
+  min-height: 88px;
+  padding: 20px;
   color: #111827 !important;
   border-right: 1px solid #c8cdd6;
   text-decoration: none !important;
@@ -141,11 +141,8 @@ body { background: #fdfeff; }
 }
 .download-option:last-child { border-right: 0; }
 .download-option:hover { background: #1e55e6; color: #fff !important; }
-.download-os { margin-bottom: auto; color: #5e6675; font: 700 11px/1.4 var(--vp-font-family-mono); text-transform: uppercase; }
-.download-option:hover .download-os, .download-option:hover small { color: #dce6ff; }
-.download-option strong { font-size: 20px; letter-spacing: -.02em; }
-.download-option small { color: #7a8392; font: 12px/1.4 var(--vp-font-family-mono); }
-.download-footnote { margin-top: 16px; font-size: 13px; }
+.download-option strong { font-size: 18px; letter-spacing: -.02em; }
+.download-compatibility { max-width: 720px; margin-top: 14px; font-size: 13px; line-height: 1.55; }
 
 .mcp-section { padding-block: 82px !important; }
 .mcp-layout { display: grid; grid-template-columns: 1.08fr .92fr; gap: 56px; align-items: center; margin-top: 38px; }
@@ -210,7 +207,7 @@ body { background: #fdfeff; }
   .home-demo { padding-bottom: 68px; }
   .download-section, .mcp-section, .faq-section { padding-block: 66px !important; }
   .download-grid { grid-template-columns: 1fr; }
-  .download-option, .download-option:last-child { min-height: 126px; border-right: 0; border-bottom: 1px solid #c8cdd6; }
+  .download-option, .download-option:last-child { min-height: 72px; border-right: 0; border-bottom: 1px solid #c8cdd6; }
   .download-option:last-child { border-bottom: 0; }
   .boundary-section, .final-cta { padding: 66px 18px !important; }
 }
