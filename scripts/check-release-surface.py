@@ -16,6 +16,18 @@ from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 
+CURRENT_CONSUMER_SURFACES = [
+    "README.md",
+    "docs/index.md",
+    "docs/getting-started/quickstart.md",
+    "docs/getting-started/installation.md",
+    "docs/use/cli.md",
+    "docs/use/mcp.md",
+    "docs/sdks.md",
+    "sdks/python/README.md",
+    "sdks/typescript/README.md",
+]
+
 
 def read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
@@ -24,6 +36,32 @@ def read(relative: str) -> str:
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def check_release_status_language(
+    release_status: str, version: str, surface_sources: dict[str, str]
+) -> None:
+    """Keep candidate and current consumer copy aligned with release state."""
+    if release_status == "candidate":
+        for relative in ["README.md", "docs/index.md"]:
+            require(
+                "release candidate" in surface_sources[relative].casefold(),
+                f"{relative} presents unpublished v{version} as current",
+            )
+        return
+
+    forbidden_phrases = [
+        "release candidate",
+        f"after v{version} publishes",
+        "until then",
+    ]
+    for relative, source in surface_sources.items():
+        folded = source.casefold()
+        for phrase in forbidden_phrases:
+            require(
+                phrase not in folded,
+                f"{relative} retains pre-publication wording for current v{version}: {phrase}",
+            )
 
 
 def check_release_data(version: str) -> dict[str, str]:
@@ -103,24 +141,11 @@ def check_release_data(version: str) -> dict[str, str]:
         for required_value in required_values:
             require(required_value in source, f"{relative} differs from release.json: {required_value}")
 
-    if release_status == "candidate":
-        for relative in ["README.md", "docs/index.md"]:
-            require(
-                "release candidate" in read(relative).casefold(),
-                f"{relative} presents unpublished v{version} as current",
-            )
+    current_sources = {relative: read(relative) for relative in CURRENT_CONSUMER_SURFACES}
+    check_release_status_language(release_status, version, current_sources)
 
-    for relative in [
-        "README.md",
-        "docs/index.md",
-        "docs/getting-started/quickstart.md",
-        "docs/getting-started/installation.md",
-        "docs/use/cli.md",
-        "docs/use/mcp.md",
-        "sdks/python/README.md",
-        "sdks/typescript/README.md",
-    ]:
-        advertised_versions = set(re.findall(r"\bv(\d+\.\d+\.\d+)\b", read(relative)))
+    for relative, source in current_sources.items():
+        advertised_versions = set(re.findall(r"\bv(\d+\.\d+\.\d+)\b", source))
         require(
             advertised_versions <= {version},
             f"{relative} advertises stale versions: {sorted(advertised_versions - {version})}",
@@ -809,7 +834,48 @@ def check_pins_and_packaging() -> int:
     )
     require(release.count("actions/attest@") == 2, "release workflow must create SBOM and provenance attestations")
     require("draft: true" in release, "release assets must stage in a draft")
-    require("--draft=false" in release, "release workflow never atomically publishes its draft")
+    stage_start = release.find("\n  stage-release:")
+    registries_start = release.find("\n  publish-registries:")
+    smoke_start = release.find("\n  registry-smoke:")
+    publish_start = release.find("\n  publish-release:")
+    require(
+        min(stage_start, registries_start, smoke_start, publish_start) >= 0,
+        "release workflow omits one or more ordered publication jobs",
+    )
+    require(
+        stage_start < registries_start < smoke_start < publish_start,
+        "release jobs must stage, publish registries, smoke registries, then publish GitHub",
+    )
+    stage_job = release[stage_start:registries_start]
+    registries_job = release[registries_start:smoke_start]
+    smoke_job = release[smoke_start:publish_start]
+    publish_job = release[publish_start:]
+    require(
+        "needs: [preflight, stage-release]" in registries_job,
+        "registry publication must depend on the reconciled draft",
+    )
+    require(
+        "needs: [preflight, publish-registries]" in smoke_job,
+        "registry smoke must depend on public package publication",
+    )
+    require(
+        "needs: [preflight, stage-release, registry-smoke]" in publish_job,
+        "public GitHub release must depend on both the draft and registry smoke",
+    )
+    require(
+        "name: rookhold-release-staged" in stage_job
+        and "name: rookhold-release-staged" in publish_job,
+        "final publication must re-use the exact reconciled eleven-asset set",
+    )
+    require(
+        "scripts/release-artifacts.py verify-release" in publish_job,
+        "final publication must re-verify the unchanged remote draft",
+    )
+    require("--draft=false" not in stage_job, "draft staging must not publish the GitHub release")
+    require(
+        "--draft=false" in publish_job,
+        "release workflow must publish its draft only after registry smoke",
+    )
 
     install_docs = read("docs/deployment.md") + read("docs/sdks.md")
     require(

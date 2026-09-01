@@ -11,7 +11,7 @@ Configure these controls in GitHub before setting the repository variable `ROOKH
 3. Create a `release` environment restricted to `v*` tags and require explicit reviewer approval. Use an independent trusted reviewer and prevent self-review whenever a second trusted maintainer is available. A solo-maintainer repository may temporarily designate its owner, must record the explicit approval, and should switch to independent approval as soon as another maintainer is established.
 4. Enable private vulnerability reporting and verify the contact in [SECURITY.md](https://github.com/sambai-dev/rookhold/blob/main/SECURITY.md).
 5. Enable GitHub immutable releases so a published tag or asset cannot be silently replaced. The workflow's draft-staging step remains editable until publication; immutability applies to the published release.
-6. Review Actions access so only required, SHA-pinned actions are allowed. Keep the default workflow token read-only; only the final publish job receives contents, attestation, and OIDC write permissions.
+6. Review Actions access so only required, SHA-pinned actions are allowed. Keep the default workflow token read-only; grant contents, attestation, and OIDC permissions only to the narrowly scoped release-staging, registry-publication, and final-publication jobs that require them.
 7. On PyPI, configure a pending trusted publisher for project `rookhold`, owner
    `sambai-dev`, repository `rookhold`, workflow `release.yml`, and environment
    `release`. A pending publisher does not reserve the name until the first
@@ -45,7 +45,7 @@ release is created.
    `rookhold-verify` vectors, and real pinned-runsc lifecycle without skips. Confirm
    the archive and image contain the matching `rookhold-verify`/init binaries.
 10. Create and push the protected `vVERSION` tag from the reviewed commit. The tag push starts the release workflow; do not move or reuse the tag.
-11. When the publish job reaches the protected `release` environment, obtain its required approval only after reviewing the completed gates and intended eleven-asset set.
+11. When the protected release jobs reach the `release` environment, obtain the required approval only after reviewing the completed gates, intended eleven-asset set, and registry-publisher configuration.
 
 No release command is run by this documentation. Do not reuse or move a published tag to correct a mistake; increment the version and publish a superseding release. The workflow verifies that the remote tag exists and that the checkout matches the event commit; it does **not** cryptographically verify a signed Git tag. Tag trust currently comes from protected refs, release-environment approval, immutable releases, and workflow OIDC attestations.
 
@@ -58,8 +58,10 @@ For a matching, finalized tag the workflow:
 3. downloads only four exactly named workflow artifacts, then requires exactly three platform archives and three SDK packages;
 4. safely extracts and inventories those nine payloads into a fresh staging tree and produces one combined, artifact-scoped SPDX JSON SBOM;
 5. binds the SPDX predicate to all nine payload digests, writes `SHA256SUMS` for the other ten public assets, and records SLSA provenance for the exact eleven-asset set through OIDC;
-6. uploads only those eight names to a draft release and reconciles every remote name, size, and SHA-256 digest against the local files; and
-7. publishes that draft only after every upload, attestation, and readback succeeds and the protected `release` environment approves the job.
+6. uploads only those eleven names to a draft release, reconciles every remote name, size, and SHA-256 digest against the local files, and preserves that exact staged set as an internal workflow artifact;
+7. publishes the Python and TypeScript packages through their GitHub OIDC trusted publishers;
+8. clean-installs and imports the exact versions from public PyPI and npm; and
+9. re-verifies the unchanged remote draft against the preserved eleven-asset set, then publishes the GitHub Release only after both registry smoke tests succeed.
 
 The public contract is exactly eleven assets: three complete platform archives, three direct single-file CLI downloads, the Python wheel and source distribution, the npm tarball, the combined SPDX JSON document, and `SHA256SUMS`. Every platform archive contains the native service and verifier plus standalone `rookhold-cli` and `rookhold-mcp` apps that do not require Python. The checksum manifest covers the other ten assets and cannot include its own digest; its release attestation and constrained workflow provenance authenticate the manifest itself. GitHub-generated source archives are outside this asset set.
 
