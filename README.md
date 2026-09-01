@@ -6,8 +6,12 @@ verifiable execution receipt.
 [![CI](https://github.com/sambai-dev/rookhold/actions/workflows/ci.yml/badge.svg)](https://github.com/sambai-dev/rookhold/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/sambai-dev/rookhold)](https://github.com/sambai-dev/rookhold/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/rookhold)](https://pypi.org/project/rookhold/)
-[![npm](https://img.shields.io/npm/v/rookhold)](https://www.npmjs.com/package/rookhold)
+
+> [!NOTE]
+> `rookhold run` and the `rookhold` registry packages are part of the upcoming
+> [v0.8.0](https://github.com/sambai-dev/rookhold/releases/tag/v0.8.0) release
+> and are available from `main` today. The current published release is
+> [v0.7.1](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1).
 
 ```console
 $ rookhold run python 'print(6 * 7)'
@@ -19,12 +23,17 @@ isolation    gvisor-application-kernel
 receipt      saved to .rookhold/runs/019…/receipt.json
 ```
 
-Install the SDK normally:
+Build the v0.8 SDKs from the current checkout:
 
 ```bash
-pip install rookhold
-npm install rookhold
+python -m pip install ./sdks/python
+cd sdks/typescript
+npm ci
+npm pack
 ```
+
+After v0.8.0 is published, those become `pip install rookhold` and
+`npm install rookhold`.
 
 ```python
 from rookhold import Rookhold
@@ -93,9 +102,9 @@ runs the MCP server for Claude Code, OpenCode, and other agent CLIs.
 
 | Your computer | Single-file CLI |
 |---|---|
-| Windows, 64-bit | [`rookhold-cli-x86_64-pc-windows-msvc.exe`](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-pc-windows-msvc.exe) |
-| Mac with Apple silicon | [`rookhold-cli-aarch64-apple-darwin`](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-aarch64-apple-darwin) |
-| Linux x86_64 | [`rookhold-cli-x86_64-unknown-linux-gnu`](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-unknown-linux-gnu) |
+| Windows, 64-bit | [`rookhold-cli-x86_64-pc-windows-msvc.exe`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-pc-windows-msvc.exe) |
+| Mac with Apple silicon | [`rookhold-cli-aarch64-apple-darwin`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-aarch64-apple-darwin) |
+| Linux x86_64 | [`rookhold-cli-x86_64-unknown-linux-gnu`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-unknown-linux-gnu) |
 
 Run it normally for the interactive CLI. Register the same path plus the
 `mcp-server` argument in an MCP host. On macOS or Linux, mark the download
@@ -115,14 +124,14 @@ source checkout.
 
 ### 1. Download the app
 
-Open the [v0.8.0 release](https://github.com/sambai-dev/rookhold/releases/tag/v0.8.0),
+Open the current [v0.7.1 release](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1),
 then choose the archive for your computer:
 
 | Your computer | Download the complete app bundle |
 |---|---|
-| Windows, 64-bit | [`rookhold-x86_64-pc-windows-msvc.zip`](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-pc-windows-msvc.zip) |
-| Mac with Apple silicon | [`rookhold-aarch64-apple-darwin.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-aarch64-apple-darwin.tar.gz) |
-| Linux x86_64 | [`rookhold-x86_64-unknown-linux-musl.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-unknown-linux-musl.tar.gz) |
+| Windows, 64-bit | [`rookhold-x86_64-pc-windows-msvc.zip`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-x86_64-pc-windows-msvc.zip) |
+| Mac with Apple silicon | [`rookhold-aarch64-apple-darwin.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-aarch64-apple-darwin.tar.gz) |
+| Linux x86_64 | [`rookhold-x86_64-unknown-linux-musl.tar.gz`](https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-x86_64-unknown-linux-musl.tar.gz) |
 
 Extract the archive. It contains the Rookhold service, `rookhold-cli`,
 `rookhold-mcp`, verification tools, and the copy-ready agent configurations.
@@ -249,7 +258,8 @@ complete every deployment check.
 > accepting untrusted jobs.
 
 > [!NOTE]
-> **Current release:** [v0.8.0](https://github.com/sambai-dev/rookhold/releases/tag/v0.8.0).
+> **Current stable release:** [v0.7.1](https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1).
+> The v0.8.0 source on `main` is validated but not yet tagged or published.
 > Its exact eleven-asset set includes checksums, a combined artifact-scoped SPDX
 > SBOM, GitHub SBOM/provenance attestations, and the offline `rookhold-verify`
 > verifier inside each platform archive. Older release lines are unsupported

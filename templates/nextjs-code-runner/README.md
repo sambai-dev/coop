@@ -1,5 +1,8 @@
 # Next.js Rookhold starter
 
+This starter targets the upcoming `rookhold@0.8.0` npm package. Until that
+package is public, install the packed SDK from the Rookhold source checkout.
+
 ```bash
 npm install
 npm run dev

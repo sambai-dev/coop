@@ -1,5 +1,8 @@
 # CLI
 
+These unified commands are available from `main` and ship with v0.8.0. The
+current stable v0.7.1 archive uses `rookhold-cli` for client commands.
+
 ```bash
 rookhold run python 'print(6 * 7)'
 rookhold run python script.py --wall-seconds 2
