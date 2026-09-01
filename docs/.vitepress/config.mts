@@ -7,17 +7,19 @@ const siteOrigin = isVercel
   : "https://sambai-dev.github.io/rookhold";
 
 export default defineConfig({
-  title: "Rookhold Sandbox",
+  title: "Rookhold",
   description: "A controlled execution boundary for AI agents, with hard limits, live output, and verifiable receipts.",
   lang: "en-US",
   base: siteBase,
   cleanUrls: true,
   lastUpdated: true,
+  appearance: false,
   sitemap: { hostname: `${siteOrigin}/` },
   head: [
     ["meta", { name: "theme-color", content: "#12171e" }],
+    ["link", { rel: "icon", type: "image/svg+xml", href: `${siteBase}rook.svg` }],
     ["meta", { property: "og:type", content: "website" }],
-    ["meta", { property: "og:title", content: "Rookhold Sandbox" }],
+    ["meta", { property: "og:title", content: "Rookhold" }],
     ["meta", { property: "og:description", content: "Run agent code behind a boundary you control." }],
     ["meta", { property: "og:image", content: `${siteOrigin}/social-card.png` }],
     ["meta", { property: "og:url", content: `${siteOrigin}/` }],
@@ -27,11 +29,11 @@ export default defineConfig({
     logo: "/rook.svg",
     search: { provider: "local" },
     nav: [
-      { text: "Start", link: "/getting-started/quickstart" },
-      { text: "Use", link: "/use/cli" },
+      { text: "Get started", link: "/getting-started/quickstart" },
+      { text: "CLI", link: "/use/cli" },
       { text: "MCP", link: "/use/mcp" },
-      { text: "Understand", link: "/understand/receipts" },
-      { text: "Operate", link: "/deployment" },
+      { text: "Security", link: "/security-boundary" },
+      { text: "Deploy", link: "/deployment" },
       { text: "Download v0.7.1", link: "https://github.com/sambai-dev/rookhold/releases/tag/v0.7.1" },
     ],
     sidebar: {

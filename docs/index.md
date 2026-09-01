@@ -1,13 +1,15 @@
 ---
 layout: home
-title: Rookhold Sandbox
+title: Rookhold
 titleTemplate: Controlled code execution for AI agents
 description: Download the Rookhold CLI and connect Claude Code, OpenCode, Hermes, or another MCP host to a controlled execution service.
 
 hero:
-  name: Rookhold
   text: Run agent code behind a boundary you control.
   tagline: One downloadable CLI connects your app or agent to short Python, Node, and Bash jobs with hard limits, bounded live output, and a verifiable receipt.
+  image:
+    src: /rook.svg
+    alt: Rookhold black-square emblem
   actions:
     - theme: brand
       text: Download the CLI
@@ -15,14 +17,6 @@ hero:
     - theme: alt
       text: Connect an MCP host
       link: /use/mcp
-
-features:
-  - title: One consumer file
-    details: Download rookhold-cli for Windows, macOS, or Linux. No Python, Node, Rust, or source checkout is required.
-  - title: CLI and MCP together
-    details: Use the terminal directly, or launch the same file with mcp-server from Claude Code, OpenCode, Hermes, and other MCP hosts.
-  - title: Evidence after every run
-    details: Limits, output hashes, runtime facts, isolation, completion state, and the event-chain head stay with the result.
 ---
 
 <section class="home-proof" aria-label="Release facts">
@@ -33,8 +27,7 @@ features:
 
 <section class="home-demo" aria-labelledby="demo-heading">
   <div class="home-demo-copy">
-    <p class="section-kicker">ONE FILE · TWO INTERFACES</p>
-    <h2 id="demo-heading">Use it yourself. Or give it to your agent.</h2>
+    <h2 id="demo-heading">One file for you and your agent.</h2>
     <p>The normal command opens Rookhold's operator CLI. The <code>mcp-server</code> argument turns that same executable into a concurrent stdio MCP server with four narrow execution tools.</p>
     <div class="home-demo-actions">
       <a class="home-text-link" href="./use/cli">Open the CLI guide <span aria-hidden="true">→</span></a>
@@ -52,9 +45,8 @@ features:
 
 <section id="download" class="download-section" aria-labelledby="download-heading">
   <div class="section-heading">
-    <p class="section-kicker">DOWNLOAD v0.7.1</p>
-    <h2 id="download-heading">Pick your operating system.</h2>
-    <p>Each link is a single standalone CLI file from the immutable GitHub release. Keep it at a stable path; agent hosts launch the same file with <code>mcp-server</code>.</p>
+    <h2 id="download-heading">Download Rookhold v0.7.1.</h2>
+    <p>Each link is one standalone CLI file from the immutable GitHub release. Keep it at a stable path; agent hosts launch the same file with <code>mcp-server</code>.</p>
   </div>
   <div class="download-grid">
     <a class="download-option" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-pc-windows-msvc.exe">
@@ -72,7 +64,6 @@ features:
 
 <section class="mcp-section" aria-labelledby="mcp-heading">
   <div class="section-heading">
-    <p class="section-kicker">AGENT INTEGRATION</p>
     <h2 id="mcp-heading">Connect any local MCP host.</h2>
     <p>Rookhold keeps the endpoint, credential, allowed languages, and minimum isolation outside the model's tool arguments.</p>
   </div>
@@ -104,7 +95,6 @@ features:
 
 <section class="boundary-section" aria-labelledby="boundary-heading">
   <div>
-    <p class="section-kicker">THE SECURITY BOUNDARY</p>
     <h2 id="boundary-heading">The website is hosted. The executor is yours.</h2>
   </div>
   <div class="boundary-copy">
@@ -115,7 +105,7 @@ features:
 </section>
 
 <section class="faq-section" aria-labelledby="faq-heading">
-  <div class="section-heading"><p class="section-kicker">BEFORE YOU START</p><h2 id="faq-heading">The short answers.</h2></div>
+  <div class="section-heading"><h2 id="faq-heading">The short answers.</h2></div>
   <div class="faq-list">
     <details><summary>Does the CLI include the sandbox service?</summary><p>The full release archive includes the service and verifier. The one-file CLI is the consumer interface and connects to a separately operated Rookhold endpoint.</p></details>
     <details><summary>Does MCP replace Claude Code or OpenCode?</summary><p>No. Your existing host owns the conversation and model. Rookhold adds four execution tools with policy and evidence.</p></details>
@@ -125,7 +115,6 @@ features:
 </section>
 
 <section class="final-cta" aria-label="Download Rookhold">
-  <p class="section-kicker">SHORT JOBS · HARD LIMITS · RECEIPTS</p>
   <h2>Give your agent a controlled place to run code.</h2>
   <a href="#download">Download Rookhold v0.7.1 <span aria-hidden="true">↓</span></a>
 </section>
