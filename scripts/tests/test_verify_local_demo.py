@@ -29,12 +29,73 @@ class VerifyLocalDemoTests(unittest.TestCase):
             "receipt_path": str(runs_root / self.JOB_ID / "receipt.json"),
         }
 
+    def write_receipt(self, runs_root: Path) -> None:
+        receipt = runs_root / self.JOB_ID / "receipt.json"
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text("{}", encoding="utf-8")
+
     def test_accepts_truthful_local_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".rookhold" / "runs"
-            MODULE.verify(
-                self.payload(root), expected_runs_root=root, require_receipt_file=False
-            )
+            self.write_receipt(root)
+            MODULE.verify(self.payload(root), expected_runs_root=root)
+
+    def test_rejects_missing_or_non_string_result_job_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".rookhold" / "runs"
+            for value in [None, 7]:
+                with self.subTest(value=value):
+                    payload = self.payload(root)
+                    payload["result"] = {"status": "succeeded", "stdout": "42", "job_id": value}
+                    with self.assertRaisesRegex(AssertionError, "result omits its job_id"):
+                        MODULE.verify(payload, expected_runs_root=root, require_receipt_file=False)
+
+    def test_rejects_mismatched_receipt_job_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".rookhold" / "runs"
+            payload = self.payload(root)
+            payload["receipt"] = {
+                "networking": "host",
+                "isolation_class": "none",
+                "job_id": self.OTHER_JOB_ID,
+            }
+            with self.assertRaisesRegex(AssertionError, "job IDs differ"):
+                MODULE.verify(payload, expected_runs_root=root, require_receipt_file=False)
+
+    def test_rejects_non_uuidv7_job_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".rookhold" / "runs"
+            payload = self.payload(root)
+            uuidv4 = "123e4567-e89b-42d3-a456-426614174000"
+            payload["result"] = {"status": "succeeded", "stdout": "42", "job_id": uuidv4}
+            payload["receipt"] = {
+                "networking": "host",
+                "isolation_class": "none",
+                "job_id": uuidv4,
+            }
+            payload["receipt_path"] = str(root / uuidv4 / "receipt.json")
+            with self.assertRaisesRegex(AssertionError, "not UUIDv7"):
+                MODULE.verify(payload, expected_runs_root=root, require_receipt_file=False)
+
+    def test_rejects_each_malformed_receipt_path_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".rookhold" / "runs"
+            cases = {
+                "missing": None,
+                "empty": "",
+                "nul": "receipt\x00.json",
+                "unexpected": str(root / self.JOB_ID / "result.json"),
+            }
+            for name, value in cases.items():
+                with self.subTest(name=name):
+                    payload = self.payload(root)
+                    if value is None:
+                        payload.pop("receipt_path")
+                    else:
+                        payload["receipt_path"] = value
+                    expected = "did not save" if name == "missing" else "malformed|unexpected"
+                    with self.assertRaisesRegex(AssertionError, expected):
+                        MODULE.verify(payload, expected_runs_root=root, require_receipt_file=False)
 
     def test_rejects_false_gvisor_claim(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

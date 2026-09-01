@@ -30,6 +30,18 @@ class ReleaseStatusLanguageTests(unittest.TestCase):
                 },
             )
 
+    def test_candidate_rejects_published_wording_on_a_secondary_surface(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "overstates candidate"):
+            CHECK_STATUS(
+                "candidate",
+                "0.8.0",
+                {
+                    "README.md": "Rookhold v0.8.0 release candidate",
+                    "docs/index.md": "v0.8.0 release candidate",
+                    "docs/sdks.md": "The current release is v0.8.0.",
+                },
+            )
+
     def test_current_rejects_every_prepublication_phrase(self) -> None:
         for phrase in [
             "release candidate",

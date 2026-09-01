@@ -59,7 +59,7 @@ For a matching, finalized tag the workflow:
 4. safely extracts and inventories those nine payloads into a fresh staging tree and produces one combined, artifact-scoped SPDX JSON SBOM;
 5. binds the SPDX predicate to all nine payload digests, writes `SHA256SUMS` for the other ten public assets, and records SLSA provenance for the exact eleven-asset set through OIDC;
 6. uploads only those eleven names to a draft release, reconciles every remote name, size, and SHA-256 digest against the local files, and preserves that exact staged set as an internal workflow artifact;
-7. publishes the Python and TypeScript packages through their GitHub OIDC trusted publishers;
+7. reconciles any prior partial registry attempt by exact digest, publishes only missing Python or TypeScript packages through their GitHub OIDC trusted publishers, and fails closed if an existing public artifact differs;
 8. clean-installs and imports the exact versions from public PyPI and npm; and
 9. re-verifies the unchanged remote draft against the preserved eleven-asset set, then publishes the GitHub Release only after both registry smoke tests succeed.
 

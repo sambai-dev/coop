@@ -73,7 +73,7 @@ jobs:
             echo "CHANGELOG.md still marks ${version} as unreleased" >&2
             exit 1
           fi
-          grep -Fq "[v${version}](https://github.com/sambai-dev/rookhold/releases/tag/v${version})" README.md
+          python3 -c 'import json,sys; data=json.load(open("release.json", encoding="utf-8")); sys.exit(data.get("current_version") != sys.argv[1])' "$version"
           series="${version%.*}.x"
           grep -Fq "| tagged \`${series}\` releases | Supported |" SECURITY.md
           echo "version=${version}" >> "$GITHUB_OUTPUT"
@@ -655,9 +655,13 @@ jobs:
     environment:
       name: release
     permissions:
-      contents: read
-      id-token: write
+      contents: read # checkout the reviewed release helper
+      id-token: write # exchange GitHub OIDC for short-lived registry credentials
     steps:
+      - name: Check out source without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Download the exact gated SDK packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -670,7 +674,20 @@ jobs:
           mkdir pypi-dist
           cp "sdk-dist/rookhold-${{ needs.preflight.outputs.version }}-py3-none-any.whl" pypi-dist/
           cp "sdk-dist/rookhold-${{ needs.preflight.outputs.version }}.tar.gz" pypi-dist/
+      - name: Reconcile any prior partial registry publication by digest
+        id: registry-state
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pypi_state="$(python3 scripts/reconcile-registries.py status \
+            --registry pypi --version "$RELEASE_VERSION" --dist pypi-dist)"
+          npm_state="$(python3 scripts/reconcile-registries.py status \
+            --registry npm --version "$RELEASE_VERSION" --dist sdk-dist)"
+          printf 'pypi=%s\nnpm=%s\n' "$pypi_state" "$npm_state" >> "$GITHUB_OUTPUT"
       - name: Publish to PyPI with GitHub trusted publishing
+        if: steps.registry-state.outputs.pypi == 'missing'
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: pypi-dist
@@ -681,10 +698,23 @@ jobs:
           node-version: "24"
           registry-url: https://registry.npmjs.org
       - name: Publish to npm with provenance
+        if: steps.registry-state.outputs.npm == 'missing'
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
         run: >-
           npm publish
-          "sdk-dist/rookhold-${{ needs.preflight.outputs.version }}.tgz"
+          "sdk-dist/rookhold-${RELEASE_VERSION}.tgz"
           --access public --provenance
+      - name: Verify both public registries match the gated package bytes
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/reconcile-registries.py verify \
+            --registry pypi --version "$RELEASE_VERSION" --dist pypi-dist
+          python3 scripts/reconcile-registries.py verify \
+            --registry npm --version "$RELEASE_VERSION" --dist sdk-dist
 
   registry-smoke:
     name: clean public-package install
@@ -723,10 +753,12 @@ jobs:
       name: release
       url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
     permissions:
-      contents: write
+      contents: write # publish the already reconciled GitHub release draft
     steps:
-      - name: Check out source
+      - name: Check out source without persisting credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Download the reconciled eleven-asset set
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -735,6 +767,7 @@ jobs:
       - name: Re-verify the remote draft immediately before publication
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -744,7 +777,7 @@ jobs:
           python3 scripts/release-artifacts.py verify-release \
             --dist dist \
             --metadata "$metadata" \
-            --version "${{ needs.preflight.outputs.version }}" \
+            --version "$RELEASE_VERSION" \
             --tag "$GITHUB_REF_NAME"
       - name: Publish only after public registry smoke succeeds
         env:

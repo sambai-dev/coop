@@ -48,6 +48,20 @@ def check_release_status_language(
                 "release candidate" in surface_sources[relative].casefold(),
                 f"{relative} presents unpublished v{version} as current",
             )
+        forbidden_phrases = [
+            "current release",
+            "published release",
+            "now available",
+            f"v{version} is current",
+            f"v{version} is published",
+        ]
+        for relative, source in surface_sources.items():
+            folded = source.casefold()
+            for phrase in forbidden_phrases:
+                require(
+                    phrase not in folded,
+                    f"{relative} overstates candidate v{version} as published: {phrase}",
+                )
         return
 
     forbidden_phrases = [
@@ -89,9 +103,14 @@ def check_release_data(version: str) -> dict[str, str]:
     actual_contract = {key: value for key, value in release_data.items() if key != "release_status"}
     require(actual_contract == expected, "release.json differs from the eleven-asset release contract")
 
+    release_landing = (
+        expected["release_url"]
+        if release_status == "current"
+        else "https://github.com/sambai-dev/rookhold/releases"
+    )
     consumer_surfaces = {
         "README.md": [
-            expected["release_url"],
+            release_landing,
             expected["windows_app_url"],
             expected["mac_app_url"],
             expected["linux_app_url"],
@@ -359,19 +378,14 @@ def check_versions() -> str:
         "release workflow does not reject an unfinalized changelog",
     )
     require(
-        "[v${version}](https://github.com/sambai-dev/rookhold/releases/tag/v${version})"
+        'data.get("current_version") != sys.argv[1]'
         in release_workflow,
-        "release workflow does not require the matching README release link",
+        "release workflow does not require matching canonical release metadata",
     )
     require(
         'series="${version%.*}.x"' in release_workflow
         and "| tagged \\`${series}\\` releases | Supported |" in release_workflow,
         "release workflow does not require the matching supported-version line",
-    )
-    require(
-        f"[v{version}](https://github.com/sambai-dev/rookhold/releases/tag/v{version})"
-        in read("README.md"),
-        "README current-release link differs from the workspace version",
     )
     series = version.rsplit(".", 1)[0] + ".x"
     require(
@@ -876,6 +890,16 @@ def check_pins_and_packaging() -> int:
         "--draft=false" in publish_job,
         "release workflow must publish its draft only after registry smoke",
     )
+    for registry_contract in [
+        "scripts/reconcile-registries.py status",
+        "scripts/reconcile-registries.py verify",
+        "steps.registry-state.outputs.pypi == 'missing'",
+        "steps.registry-state.outputs.npm == 'missing'",
+    ]:
+        require(
+            registry_contract in registries_job,
+            f"registry retry reconciliation contract missing: {registry_contract}",
+        )
 
     install_docs = read("docs/deployment.md") + read("docs/sdks.md")
     require(
@@ -956,6 +980,11 @@ def check_documented_boundary() -> None:
     require(
         '.get(format!("{base_url}/readyz"))' in read("crates/coop-server/src/cli.rs"),
         "temporary app startup does not wait for durable readiness",
+    )
+    require(
+        'limits.insert("allow_network".into(), json!(false));'
+        in read("crates/coop-server/src/cli.rs"),
+        "unified CLI submissions must explicitly deny job networking",
     )
     service = read("deploy/rookhold.service")
     require(

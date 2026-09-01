@@ -315,6 +315,7 @@ async fn run_once(args: RunArgs) -> Result<(), String> {
         .unwrap_or(configured_isolation);
     let code = read_code(&args.code)?;
     let mut limits = serde_json::Map::new();
+    limits.insert("allow_network".into(), json!(false));
     if let Some(value) = args.wall_seconds {
         limits.insert("wall_seconds".into(), json!(value));
     }
@@ -326,9 +327,7 @@ async fn run_once(args: RunArgs) -> Result<(), String> {
         "code": code,
         "requirements": {"minimum_isolation": minimum_isolation},
     });
-    if !limits.is_empty() {
-        body["limits"] = Value::Object(limits);
-    }
+    body["limits"] = Value::Object(limits);
     if let Some(stdin) = args.stdin {
         body["stdin"] = json!(stdin);
     }

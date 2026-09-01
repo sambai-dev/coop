@@ -7,7 +7,7 @@ verifiable receipt of what happened.
 [![Release](https://img.shields.io/github/v/release/sambai-dev/rookhold)](https://github.com/sambai-dev/rookhold/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Release candidate:** [v0.8.0](https://github.com/sambai-dev/rookhold/releases/tag/v0.8.0).
+**Release candidate:** v0.8.0. See [all releases](https://github.com/sambai-dev/rookhold/releases).
 The download and registry links below become available when the release
 workflow publishes. Until then, use the [source build](#build-from-source).
 
@@ -65,6 +65,9 @@ network      disabled
 isolation    gvisor-application-kernel
 receipt      saved to .rookhold/runs/019…/receipt.json
 ```
+
+The CLI explicitly requests `allow_network: false`; the guarded service must
+also report disabled networking and the required isolation class.
 
 [Read the quickstart](https://rookhold.vercel.app/getting-started/quickstart) ·
 [Deploy the secure boundary](https://rookhold.vercel.app/getting-started/first-secure-deployment)

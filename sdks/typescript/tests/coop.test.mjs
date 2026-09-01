@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, webcrypto } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -707,6 +707,56 @@ test("attestation downloads preserve exact binary order and expose validated met
     assert.equal(call.init.redirect, "error");
     assert.equal(call.init.headers.Authorization, "Bearer tenant-secret");
     assert.equal(call.url.toString().includes("tenant-secret"), false);
+  }
+});
+
+test("artifact digests use Node Web Crypto when the global is unavailable", async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  const bytes = Uint8Array.from([1, 2, 3, 4]);
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  try {
+    Object.defineProperty(globalThis, "crypto", { configurable: true, value: undefined });
+    const client = new Rookhold("https://example.test", "secret", {
+      fetch: async () => binaryResponse(bytes, "application/octet-stream", {
+        "x-content-sha256": digest,
+      }),
+    });
+    const artifact = await client.downloadAttestation("job");
+    assert.equal(artifact.sha256, digest);
+  } finally {
+    if (original) Object.defineProperty(globalThis, "crypto", original);
+    else delete globalThis.crypto;
+  }
+});
+
+test("artifact digests prefer browser-global Web Crypto", async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  const bytes = Uint8Array.from([5, 6, 7, 8]);
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  let calls = 0;
+  try {
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: {
+        subtle: {
+          digest: async (...args) => {
+            calls += 1;
+            return webcrypto.subtle.digest(...args);
+          },
+        },
+      },
+    });
+    const client = new Rookhold("https://example.test", "secret", {
+      fetch: async () => binaryResponse(bytes, "application/octet-stream", {
+        "x-content-sha256": digest,
+      }),
+    });
+    const artifact = await client.downloadAttestation("job");
+    assert.equal(artifact.sha256, digest);
+    assert.equal(calls, 1);
+  } finally {
+    if (original) Object.defineProperty(globalThis, "crypto", original);
+    else delete globalThis.crypto;
   }
 });
 

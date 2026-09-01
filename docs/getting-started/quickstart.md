@@ -17,6 +17,8 @@ cargo build --locked -p coop-server --bin rookhold
 target/debug/rookhold run python 'print(6 * 7)'
 ```
 
+## After v0.8.0 publishes
+
 Extract it, then run one job. On Windows:
 
 ```powershell
@@ -60,7 +62,10 @@ rookhold run python 'print(6 * 7)' \
 
 That connected run should report `network: disabled` and
 `isolation: gvisor-application-kernel`. Rookhold fails admission if the service
-cannot satisfy the requested class.
+cannot satisfy the requested class. The unified CLI explicitly sends
+`limits.allow_network: false` with every submission, so the guarded run requires
+both the network policy and the gVisor boundary instead of inferring either from
+display text.
 
 Next: [install an SDK](installation.md#sdk) or
 [deploy the secure Linux boundary](first-secure-deployment.md).
