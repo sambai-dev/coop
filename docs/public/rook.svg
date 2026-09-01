@@ -1,1 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Rookhold"><path fill="#1e55e6" d="M7 3h4v5h3V3h4v5h3V3h4v9l-3 3v10h3v4H7v-4h3V15l-3-3V3Zm7 12v10h4V15h-4Z"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Rookhold">
+  <rect width="64" height="64" fill="#101318"/>
+  <path fill="#fff" d="M15 14h8v8h6v-8h6v8h6v-8h8v18l-6 6v12h7v6H14v-6h7V38l-6-6V14Zm8 14h18v-8h-2v6h-4v-6h-6v6h-4v-6h-2v8Zm6 10v12h6V38h-6Z"/>
+</svg>
