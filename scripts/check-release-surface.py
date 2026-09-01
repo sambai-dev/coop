@@ -233,6 +233,10 @@ def check_versions() -> str:
         typescript_source.count(typescript_client_header) == 2,
         "TypeScript HTTP and artifact clients do not identify the package release version",
     )
+    require(
+        'const moduleName = "node:crypto"' in typescript_source,
+        "TypeScript SDK omits the Node 18 Web Crypto fallback",
+    )
     python_lock = read("sdks/python/uv.lock")
     locked_python_project = re.search(
         r'\[\[package\]\]\s+name = "rookhold"\s+version = "([^"]+)"',
@@ -852,6 +856,10 @@ def check_documented_boundary() -> None:
         'receipt.get("isolation_class") == "none"',
     ]:
         require(invariant in verifier, f"local documentation verifier omits: {invariant}")
+    require(
+        '.get(format!("{base_url}/readyz"))' in read("crates/coop-server/src/cli.rs"),
+        "temporary app startup does not wait for durable readiness",
+    )
     service = read("deploy/rookhold.service")
     require(
         "ConditionArchitecture=x86-64" in service,

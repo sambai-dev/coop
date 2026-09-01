@@ -266,7 +266,7 @@ impl TemporaryServer {
                 ));
             }
             if client
-                .get(format!("{base_url}/healthz"))
+                .get(format!("{base_url}/readyz"))
                 .send()
                 .await
                 .is_ok_and(|response| response.status().is_success())
