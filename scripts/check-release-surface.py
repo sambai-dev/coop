@@ -168,6 +168,21 @@ def check_release_data(version: str) -> dict[str, str]:
             advertised_versions <= {version},
             f"{relative} advertises stale versions: {sorted(advertised_versions - {version})}",
         )
+
+    canonical_docs_url = "https://rookhold.pages.dev/"
+    for relative in ["README.md", "sdks/python/pyproject.toml", "sdks/typescript/package.json"]:
+        source = read(relative)
+        require(canonical_docs_url in source, f"{relative} omits the canonical Cloudflare site")
+        require("vercel" not in source.casefold(), f"{relative} still references Vercel")
+    require(not (ROOT / "vercel.json").exists(), "Vercel hosting configuration still exists")
+    docs_config = read("docs/.vitepress/config.mts")
+    require("https://rookhold.pages.dev" in docs_config, "docs canonical origin is not Cloudflare")
+    require("GITHUB_ACTIONS" in docs_config, "GitHub Pages fallback base is not explicit")
+    docs_package = read("docs/package.json")
+    require("docs:deploy:cloudflare" in docs_package, "docs package omits the Cloudflare deploy command")
+    cloudflare_headers = read("docs/public/_headers")
+    for header in ["X-Content-Type-Options", "Referrer-Policy", "Permissions-Policy"]:
+        require(header in cloudflare_headers, f"Cloudflare static headers omit {header}")
     return release_data
 
 

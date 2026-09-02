@@ -69,8 +69,8 @@ receipt      saved to .rookhold/runs/019…/receipt.json
 The CLI explicitly requests `allow_network: false`; the guarded service must
 also report disabled networking and the required isolation class.
 
-[Read the quickstart](https://rookhold.vercel.app/getting-started/quickstart) ·
-[Deploy the secure boundary](https://rookhold.vercel.app/getting-started/first-secure-deployment)
+[Read the quickstart](https://rookhold.pages.dev/getting-started/quickstart) ·
+[Deploy the secure boundary](https://rookhold.pages.dev/getting-started/first-secure-deployment)
 
 ## Add Rookhold to an application
 
@@ -114,9 +114,9 @@ const result = await Rookhold.fromEnv().run({
 console.log(result.stdout);
 ```
 
-[Python guide](https://rookhold.vercel.app/use/python) ·
-[TypeScript guide](https://rookhold.vercel.app/use/typescript) ·
-[API reference](https://rookhold.vercel.app/api)
+[Python guide](https://rookhold.pages.dev/use/python) ·
+[TypeScript guide](https://rookhold.pages.dev/use/typescript) ·
+[API reference](https://rookhold.pages.dev/api)
 
 ## Connect to an existing Rookhold server
 
@@ -145,8 +145,8 @@ Adding Rookhold does not disable a host's built-in shell or other execution
 tools. Remove or deny those routes when a model must cross only the Rookhold
 boundary.
 
-[CLI guide](https://rookhold.vercel.app/use/cli) ·
-[MCP guide](https://rookhold.vercel.app/use/mcp) ·
+[CLI guide](https://rookhold.pages.dev/use/cli) ·
+[MCP guide](https://rookhold.pages.dev/use/mcp) ·
 [Integration templates](integrations/README.md)
 
 ## What Rookhold does
@@ -204,12 +204,12 @@ untrusted jobs.
 
 ## Documentation
 
-- [Getting started](https://rookhold.vercel.app/getting-started/quickstart)
-- [Installation choices](https://rookhold.vercel.app/getting-started/installation)
-- [Execution model](https://rookhold.vercel.app/understand/execution-model)
-- [Receipts and verification](https://rookhold.vercel.app/understand/receipts)
-- [Deployment and operations](https://rookhold.vercel.app/deployment)
-- [Compatibility](https://rookhold.vercel.app/compatibility)
+- [Getting started](https://rookhold.pages.dev/getting-started/quickstart)
+- [Installation choices](https://rookhold.pages.dev/getting-started/installation)
+- [Execution model](https://rookhold.pages.dev/understand/execution-model)
+- [Receipts and verification](https://rookhold.pages.dev/understand/receipts)
+- [Deployment and operations](https://rookhold.pages.dev/deployment)
+- [Compatibility](https://rookhold.pages.dev/compatibility)
 - [Release process](docs/releasing.md)
 
 ## Contributing

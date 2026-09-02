@@ -1,10 +1,10 @@
 import { defineConfig } from "vitepress";
 
-const isVercel = process.env.VERCEL === "1";
-const siteBase = isVercel ? "/" : "/rookhold/";
-const siteOrigin = isVercel
-  ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL ?? "rookhold.vercel.app"}`
-  : "https://sambai-dev.github.io/rookhold";
+const isGitHubPages = process.env.GITHUB_ACTIONS === "true";
+const siteBase = isGitHubPages ? "/rookhold/" : "/";
+const siteOrigin = isGitHubPages
+  ? "https://sambai-dev.github.io/rookhold"
+  : "https://rookhold.pages.dev";
 
 export default defineConfig({
   title: "Rookhold",
