@@ -4,7 +4,7 @@ Choose the Rookhold surface that matches what you are doing.
 
 ## Rookhold app
 
-After v0.8.0 publishes, use the complete app when you want `rookhold run`, a
+Use the complete app when you want `rookhold run`, a
 local trusted-code service, the persistent server, setup commands, remote
 client, MCP, and the verifier.
 
@@ -27,7 +27,7 @@ python -m pip install ./sdks/python
 npm install ./sdks/typescript
 ```
 
-After publication, install the exact GitHub release packages:
+Install the exact GitHub release packages:
 
 ```bash
 pip install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0-py3-none-any.whl
@@ -41,7 +41,7 @@ execution boundary.
 
 ## Standalone client
 
-After v0.8.0 publishes, use the standalone `rookhold-cli` download when a person
+Use the standalone `rookhold-cli` download when a person
 or MCP host already has a Rookhold endpoint and does not need the service or
 local-run workflow.
 

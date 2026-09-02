@@ -23,8 +23,8 @@ hero:
 ---
 
 <section class="release-candidate-note" aria-label="v0.8.0 publication status">
-  <strong>v0.8.0 release candidate</strong>
-  <span>Downloads and registry commands activate after the release workflow publishes. Until then, <a href="https://github.com/sambai-dev/rookhold#build-from-source">build from main</a>.</span>
+  <strong>v0.8.0 is current</strong>
+  <span>App, CLI, Python wheel, and TypeScript tarball downloads are live. Named registry installs remain deferred.</span>
 </section>
 
 <section class="home-use-cases" aria-label="Common Rookhold use cases">
@@ -52,7 +52,7 @@ hero:
 <section id="try" class="download-section" aria-labelledby="try-heading">
   <div class="section-heading">
     <h2 id="try-heading">Try the Rookhold app.</h2>
-    <p>After v0.8.0 publishes, the complete bundle contains the unified app, local service, remote client, MCP adapter, verifier, and setup templates.</p>
+    <p>The complete bundle contains the unified app, local service, remote client, MCP adapter, verifier, and setup templates.</p>
   </div>
   <div class="download-grid">
     <a class="download-option" aria-label="Download the Rookhold app for 64-bit Windows" href="https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-pc-windows-msvc.zip"><strong>Windows</strong></a>
@@ -65,7 +65,7 @@ hero:
 <section id="sdk" class="sdk-section" aria-labelledby="sdk-heading">
   <div class="section-heading">
     <h2 id="sdk-heading">Add Rookhold to an application.</h2>
-    <p>After v0.8.0 publishes, install the SDKs from the registries. They submit jobs to an endpoint and do not create the guarded Linux boundary by themselves.</p>
+    <p>Install the exact v0.8.0 SDK release assets. They submit jobs to an endpoint and do not create the guarded Linux boundary by themselves.</p>
   </div>
   <div class="sdk-layout">
     <div class="install-command"><span>Python</span><code>pip install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0-py3-none-any.whl</code><a href="./use/python">Python guide →</a></div>
@@ -77,7 +77,7 @@ hero:
 <section class="client-section" aria-labelledby="client-heading">
   <div class="section-heading">
     <h2 id="client-heading">Already have a Rookhold server?</h2>
-    <p>After v0.8.0 publishes, the standalone client is the smaller human and MCP interface. It does not include the service or local-run workflow.</p>
+    <p>The standalone client is the smaller human and MCP interface. It does not include the service or local-run workflow.</p>
     <div class="home-demo-actions">
       <a class="home-text-link" href="./use/cli">Client guide <span aria-hidden="true">→</span></a>
       <a class="home-text-link" href="./use/mcp">MCP setup <span aria-hidden="true">→</span></a>
