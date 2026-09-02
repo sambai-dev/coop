@@ -61,6 +61,7 @@ body { background: #fdfeff; }
 .VPHero .actions .action:nth-child(3) .VPButton:hover { background: #edf2ff !important; }
 
 .vp-doc div[class*=language-] { border-radius: 4px; }
+.projects-page .vp-doc h2 { border-top: 0; }
 .VPHome .VPContent { overflow: hidden; }
 .VPHome .vp-doc.container { max-width: none; padding: 0; }
 .VPHome section:not(.boundary-section):not(.final-cta) {

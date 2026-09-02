@@ -1,3 +1,7 @@
+---
+pageClass: projects-page
+---
+
 # Projects using Rookhold
 
 No project is listed without its maintainer's permission. If Rookhold is part
