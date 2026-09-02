@@ -9,7 +9,7 @@ permissive CORS headers; a cross-origin frontend needs an explicitly
 allowlisted reverse-proxy policy, and its bearer key will be available to that
 frontend's JavaScript.
 
-Build and pack the current checkout:
+Before v0.8.0 publishes, build and pack the checkout:
 
 ```bash
 cd sdks/typescript
@@ -17,7 +17,14 @@ npm ci
 npm pack
 ```
 
-`npm install rookhold` becomes available when v0.8.0 is published to npm.
+After publication, install the exact release tarball:
+
+```bash
+npm install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tgz
+```
+
+The named npm install is deferred until maintainer 2FA and trusted publishing
+are configured.
 
 The common path is one call:
 

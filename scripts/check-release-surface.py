@@ -16,6 +16,18 @@ from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 
+CURRENT_CONSUMER_SURFACES = [
+    "README.md",
+    "docs/index.md",
+    "docs/getting-started/quickstart.md",
+    "docs/getting-started/installation.md",
+    "docs/use/cli.md",
+    "docs/use/mcp.md",
+    "docs/sdks.md",
+    "sdks/python/README.md",
+    "sdks/typescript/README.md",
+]
+
 
 def read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
@@ -24,6 +36,139 @@ def read(relative: str) -> str:
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def check_release_status_language(
+    release_status: str, version: str, surface_sources: dict[str, str]
+) -> None:
+    """Keep candidate and current consumer copy aligned with release state."""
+    if release_status == "candidate":
+        for relative in ["README.md", "docs/index.md"]:
+            require(
+                "release candidate" in surface_sources[relative].casefold(),
+                f"{relative} presents unpublished v{version} as current",
+            )
+        forbidden_phrases = [
+            "current release",
+            "published release",
+            "now available",
+            f"v{version} is current",
+            f"v{version} is published",
+        ]
+        for relative, source in surface_sources.items():
+            folded = source.casefold()
+            for phrase in forbidden_phrases:
+                require(
+                    phrase not in folded,
+                    f"{relative} overstates candidate v{version} as published: {phrase}",
+                )
+        return
+
+    forbidden_phrases = [
+        "release candidate",
+        f"after v{version} publishes",
+        "until then",
+    ]
+    for relative, source in surface_sources.items():
+        folded = source.casefold()
+        for phrase in forbidden_phrases:
+            require(
+                phrase not in folded,
+                f"{relative} retains pre-publication wording for current v{version}: {phrase}",
+            )
+
+
+def check_release_data(version: str) -> dict[str, str]:
+    """Validate the canonical public release URLs and consumer surfaces."""
+    release_data = json.loads(read("release.json"))
+    require(isinstance(release_data, dict), "release.json must contain an object")
+    release_status = release_data.get("release_status")
+    require(release_status in {"candidate", "current"}, "release.json has an invalid release_status")
+    base = f"https://github.com/sambai-dev/rookhold/releases/download/v{version}"
+    expected = {
+        "current_version": version,
+        "release_url": f"https://github.com/sambai-dev/rookhold/releases/tag/v{version}",
+        "windows_app_url": f"{base}/rookhold-x86_64-pc-windows-msvc.zip",
+        "mac_app_url": f"{base}/rookhold-aarch64-apple-darwin.tar.gz",
+        "linux_app_url": f"{base}/rookhold-x86_64-unknown-linux-musl.tar.gz",
+        "windows_client_url": f"{base}/rookhold-cli-x86_64-pc-windows-msvc.exe",
+        "mac_client_url": f"{base}/rookhold-cli-aarch64-apple-darwin",
+        "linux_client_url": f"{base}/rookhold-cli-x86_64-unknown-linux-gnu",
+        "python_wheel_url": f"{base}/rookhold-{version}-py3-none-any.whl",
+        "python_sdist_url": f"{base}/rookhold-{version}.tar.gz",
+        "npm_tarball_url": f"{base}/rookhold-{version}.tgz",
+        "spdx_url": f"{base}/rookhold-{version}.spdx.json",
+        "checksums_url": f"{base}/SHA256SUMS",
+    }
+    actual_contract = {key: value for key, value in release_data.items() if key != "release_status"}
+    require(actual_contract == expected, "release.json differs from the eleven-asset release contract")
+
+    release_landing = (
+        expected["release_url"]
+        if release_status == "current"
+        else "https://github.com/sambai-dev/rookhold/releases"
+    )
+    consumer_surfaces = {
+        "README.md": [
+            release_landing,
+            expected["windows_app_url"],
+            expected["mac_app_url"],
+            expected["linux_app_url"],
+            expected["windows_client_url"],
+            expected["mac_client_url"],
+            expected["linux_client_url"],
+            expected["python_wheel_url"],
+            expected["npm_tarball_url"],
+        ],
+        "docs/index.md": [
+            expected["windows_app_url"],
+            expected["mac_app_url"],
+            expected["linux_app_url"],
+            expected["windows_client_url"],
+            expected["mac_client_url"],
+            expected["linux_client_url"],
+            "registry accounts are activated",
+        ],
+        "docs/getting-started/quickstart.md": [
+            expected["windows_app_url"],
+            expected["mac_app_url"],
+            expected["linux_app_url"],
+        ],
+        "docs/getting-started/installation.md": [
+            expected[key]
+            for key in [
+                "release_url",
+                "windows_app_url",
+                "mac_app_url",
+                "linux_app_url",
+                "windows_client_url",
+                "mac_client_url",
+                "linux_client_url",
+            ]
+        ],
+        "docs/sdks.md": [
+            expected["python_wheel_url"],
+            expected["python_sdist_url"],
+            expected["npm_tarball_url"],
+            expected["spdx_url"],
+            expected["checksums_url"],
+        ],
+    }
+    for relative, required_values in consumer_surfaces.items():
+        source = read(relative)
+        for required_value in required_values:
+            require(required_value in source, f"{relative} differs from release.json: {required_value}")
+
+    current_sources = {relative: read(relative) for relative in CURRENT_CONSUMER_SURFACES}
+    check_release_status_language(release_status, version, current_sources)
+
+    for relative, source in current_sources.items():
+        advertised_versions = set(re.findall(r"\bv(\d+\.\d+\.\d+)\b", source))
+        require(
+            advertised_versions <= {version},
+            f"{relative} advertises stale versions: {sorted(advertised_versions - {version})}",
+        )
+    return release_data
 
 
 def toml_string(relative: str, section: str, key: str) -> str:
@@ -46,6 +191,7 @@ def toml_string(relative: str, section: str, key: str) -> str:
 def check_versions() -> str:
     version = toml_string("Cargo.toml", "workspace.package", "version")
     require(version == "0.8.0", f"unexpected workspace release version: {version}")
+    check_release_data(version)
 
     toolchain = toml_string("rust-toolchain.toml", "toolchain", "channel")
     rust_version = toml_string("Cargo.toml", "workspace.package", "rust-version")
@@ -161,6 +307,10 @@ def check_versions() -> str:
         typescript_source.count(typescript_client_header) == 2,
         "TypeScript HTTP and artifact clients do not identify the package release version",
     )
+    require(
+        'const moduleName = "node:crypto"' in typescript_source,
+        "TypeScript SDK omits the Node 18 Web Crypto fallback",
+    )
     python_lock = read("sdks/python/uv.lock")
     locked_python_project = re.search(
         r'\[\[package\]\]\s+name = "rookhold"\s+version = "([^"]+)"',
@@ -227,19 +377,14 @@ def check_versions() -> str:
         "release workflow does not reject an unfinalized changelog",
     )
     require(
-        "[v${version}](https://github.com/sambai-dev/rookhold/releases/tag/v${version})"
+        'data.get("current_version") != sys.argv[1]'
         in release_workflow,
-        "release workflow does not require the matching README release link",
+        "release workflow does not require matching canonical release metadata",
     )
     require(
         'series="${version%.*}.x"' in release_workflow
         and "| tagged \\`${series}\\` releases | Supported |" in release_workflow,
         "release workflow does not require the matching supported-version line",
-    )
-    require(
-        f"[v{version}](https://github.com/sambai-dev/rookhold/releases/tag/v{version})"
-        in read("README.md"),
-        "README current-release link differs from the workspace version",
     )
     series = version.rsplit(".", 1)[0] + ".x"
     require(
@@ -457,6 +602,23 @@ def check_pins_and_packaging() -> int:
         )
     require("os: macos-15" in release, "Apple-silicon release is not built on the GA arm64 runner")
     require("ROOKHOLD_RELEASE_GOVERNANCE" in release, "release workflow lacks repository-governance acknowledgement")
+    require("ROOKHOLD_PYPI_TRUSTED_PUBLISHER" not in release, "binary release still blocks on PyPI activation")
+    require("ROOKHOLD_NPM_TRUSTED_PUBLISHER" not in release, "binary release still blocks on npm activation")
+    deferred_packages = read(".github/workflows/publish-packages.yml")
+    for deferred_contract in [
+        "workflow_dispatch:",
+        "gh release download",
+        "gh attestation verify",
+        "scripts/reconcile-registries.py status",
+        "scripts/reconcile-registries.py verify",
+        "pypa/gh-action-pypi-publish@",
+        "npm publish",
+        "environment:\n      name: release",
+    ]:
+        require(
+            deferred_contract in deferred_packages,
+            f"deferred package publisher contract missing: {deferred_contract}",
+        )
     require(
         "environment:\n      name: release" in release,
         "publish job lacks the protected release environment hook",
@@ -700,7 +862,47 @@ def check_pins_and_packaging() -> int:
     )
     require(release.count("actions/attest@") == 2, "release workflow must create SBOM and provenance attestations")
     require("draft: true" in release, "release assets must stage in a draft")
-    require("--draft=false" in release, "release workflow never atomically publishes its draft")
+    stage_start = release.find("\n  stage-release:")
+    package_start = release.find("\n  package-smoke:")
+    publish_start = release.find("\n  publish-release:")
+    require(
+        min(stage_start, package_start, publish_start) >= 0,
+        "release workflow omits one or more ordered publication jobs",
+    )
+    require(
+        stage_start < package_start < publish_start,
+        "release jobs must stage, smoke exact packages, then publish GitHub",
+    )
+    stage_job = release[stage_start:package_start]
+    package_job = release[package_start:publish_start]
+    publish_job = release[publish_start:]
+    require(
+        "needs: [preflight, stage-release]" in package_job,
+        "package smoke must depend on the reconciled draft",
+    )
+    require(
+        "needs: [preflight, stage-release, package-smoke]" in publish_job,
+        "public GitHub release must depend on both the draft and exact package smoke",
+    )
+    require(
+        "name: rookhold-release-staged" in stage_job
+        and "name: rookhold-release-staged" in publish_job,
+        "final publication must re-use the exact reconciled eleven-asset set",
+    )
+    require(
+        "scripts/release-artifacts.py verify-release" in publish_job,
+        "final publication must re-verify the unchanged remote draft",
+    )
+    require("--draft=false" not in stage_job, "draft staging must not publish the GitHub release")
+    require(
+        "--draft=false" in publish_job,
+        "release workflow must publish its draft only after exact package smoke",
+    )
+    for package_contract in [
+        "pip install --no-deps",
+        "npm install \"../sdk-dist/rookhold-${RELEASE_VERSION}.tgz\"",
+    ]:
+        require(package_contract in package_job, f"release package smoke missing: {package_contract}")
 
     install_docs = read("docs/deployment.md") + read("docs/sdks.md")
     require(
@@ -763,6 +965,30 @@ def check_documented_boundary() -> None:
                 claim in document,
                 f"{relative} omits the current architecture boundary: {claim}",
             )
+    for relative in ["README.md", "docs/getting-started/quickstart.md"]:
+        source = read(relative)
+        for claim in ["network      host", "isolation    none"]:
+            require(claim in source, f"{relative} omits truthful local-demo output: {claim}")
+    compatibility = read(".github/workflows/compatibility.yml")
+    require(
+        "scripts/verify-local-demo.py local-demo.json" in compatibility,
+        "compatibility workflow does not execute the local documentation snapshot",
+    )
+    verifier = read("scripts/verify-local-demo.py")
+    for invariant in [
+        'receipt.get("networking") == "host"',
+        'receipt.get("isolation_class") == "none"',
+    ]:
+        require(invariant in verifier, f"local documentation verifier omits: {invariant}")
+    require(
+        '.get(format!("{base_url}/readyz"))' in read("crates/coop-server/src/cli.rs"),
+        "temporary app startup does not wait for durable readiness",
+    )
+    require(
+        'limits.insert("allow_network".into(), json!(false));'
+        in read("crates/coop-server/src/cli.rs"),
+        "unified CLI submissions must explicitly deny job networking",
+    )
     service = read("deploy/rookhold.service")
     require(
         "ConditionArchitecture=x86-64" in service,

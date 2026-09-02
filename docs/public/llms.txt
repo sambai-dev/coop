@@ -1,4 +1,4 @@
-# Rookhold Sandbox documentation
+# Rookhold documentation
 
 Rookhold runs short Python, Node, and Bash jobs with hard limits, live output,
 and receipts. It is not a persistent development workspace or remote computer.

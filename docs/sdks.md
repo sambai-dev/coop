@@ -2,12 +2,27 @@
 
 Rookhold ships small reference clients under `sdks/`. They intentionally mirror the HTTP API and are suitable for embedding in agent tool loops. The OpenAPI document remains the canonical contract for generated clients.
 
-The v0.8 release workflow is prepared to test SDK source, install the built
-Python wheel and source distribution, pack the TypeScript client, and publish
-the exact gated artifacts to PyPI and npm with GitHub trusted publishing. The
-registry packages are not public until v0.8.0 is tagged and that workflow
-finishes. A final clean-environment job will install `rookhold==0.8.0` and
-`rookhold@0.8.0` from the public registries.
+After v0.8.0 publishes, install the exact release assets:
+
+```bash
+pip install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0-py3-none-any.whl
+npm install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tgz
+```
+
+Named PyPI and npm installs are deferred while maintainer registry accounts are
+activated. A protected follow-up workflow will publish these same immutable
+v0.8.0 bytes through registry trusted publishing; it does not rebuild them.
+
+Before publication, install from the checkout with
+`python -m pip install ./sdks/python` or `npm install ./sdks/typescript`.
+
+Exact candidate release files:
+
+- [Python wheel](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0-py3-none-any.whl)
+- [Python source distribution](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tar.gz)
+- [npm tarball](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tgz)
+- [Combined SPDX SBOM](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.spdx.json)
+- [SHA256SUMS](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/SHA256SUMS)
 
 To install the v0.8.0 release, activate the intended Python virtual environment and download the exact release assets into an otherwise empty working directory. This example verifies both the checksum manifest and GitHub provenance before installation:
 

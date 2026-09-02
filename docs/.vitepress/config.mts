@@ -8,7 +8,7 @@ const siteOrigin = isVercel
 
 export default defineConfig({
   title: "Rookhold",
-  description: "A controlled execution boundary for AI agents, with hard limits, live output, and verifiable receipts.",
+  description: "Run short-lived Python, Node, and Bash code with hard limits and verifiable receipts.",
   lang: "en-US",
   base: siteBase,
   cleanUrls: true,
@@ -20,7 +20,7 @@ export default defineConfig({
     ["link", { rel: "icon", type: "image/svg+xml", href: `${siteBase}rook.svg` }],
     ["meta", { property: "og:type", content: "website" }],
     ["meta", { property: "og:title", content: "Rookhold" }],
-    ["meta", { property: "og:description", content: "Run agent code behind a boundary you control." }],
+    ["meta", { property: "og:description", content: "Run short-lived code with hard limits—and keep a receipt." }],
     ["meta", { property: "og:image", content: `${siteOrigin}/social-card.png` }],
     ["meta", { property: "og:url", content: `${siteOrigin}/` }],
     ["meta", { name: "twitter:card", content: "summary_large_image" }],
@@ -34,7 +34,7 @@ export default defineConfig({
       { text: "MCP", link: "/use/mcp" },
       { text: "Security", link: "/security-boundary" },
       { text: "Deploy", link: "/deployment" },
-      { text: "Download", link: "/#download" },
+      { text: "Try locally", link: "/#try" },
     ],
     sidebar: {
       "/getting-started/": [

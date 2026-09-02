@@ -1,7 +1,20 @@
 # MCP
 
-The same standalone `rookhold-cli` file used by a human can serve MCP over
-stdio. Your host launches it with one argument:
+The Rookhold app can configure maintained hosts safely:
+
+```bash
+rookhold setup claude-code
+rookhold setup hermes
+rookhold setup opencode
+```
+
+The command finds the normal configuration file, shows a diff, creates a
+timestamped backup, prompts before writing by default, keeps the API key in the
+environment, and runs `rookhold check` afterward. Pass `--yes` only when an
+already-reviewed automation should bypass that confirmation prompt.
+
+The standalone existing-server client can serve MCP over stdio. Your host
+launches it with one argument:
 
 ```text
 rookhold-cli mcp-server
@@ -27,27 +40,14 @@ export ROOKHOLD_MCP_MINIMUM_ISOLATION=gvisor-application-kernel
 export ROOKHOLD_MCP_ALLOWED_LANGUAGES=python,node
 ```
 
-For the current stable v0.7.1 executable, merge one of the maintained host
-templates and point its command at the downloaded file:
+To configure manually, merge one of the maintained host templates and point
+its command at the included or separately downloaded `rookhold-cli` file:
 
 - [Claude Code template](https://github.com/sambai-dev/rookhold/blob/main/integrations/claude-code/mcp.json)
 - [OpenCode template](https://github.com/sambai-dev/rookhold/blob/main/integrations/opencode/opencode.snippet.json)
 - [Hermes template](https://github.com/sambai-dev/rookhold/blob/main/integrations/hermes/config.snippet.yaml)
 - [OpenClaw template](https://github.com/sambai-dev/rookhold/blob/main/integrations/openclaw/openclaw.snippet.json5)
 - [Generic MCP configuration](https://github.com/sambai-dev/rookhold/blob/main/integrations/README.md#generic-mcp-host)
-
-After v0.8.0 is released, the unified command can configure a maintained host
-for you:
-
-```bash
-rookhold setup claude-code
-rookhold setup hermes
-rookhold setup opencode
-```
-
-The command finds the normal configuration file, shows a diff, creates a
-timestamped backup, writes only after confirmation, keeps the API key in the
-environment, and runs `rookhold check` afterward.
 
 Adding Rookhold does not disable a host's built-in shell. Remove or deny other
 execution tools when a model must cross only the Rookhold boundary.

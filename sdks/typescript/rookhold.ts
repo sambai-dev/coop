@@ -798,7 +798,22 @@ async function messageText(value: unknown): Promise<string> {
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const subtle = globalThis.crypto?.subtle;
+  let subtle: SubtleCrypto | undefined = globalThis.crypto?.subtle;
+  if (!subtle) {
+    try {
+      // Node 18 exposes Web Crypto through its built-in module rather than the
+      // global used by newer Node releases and browsers. Keep the specifier
+      // indirect so browser builds do not resolve a Node-only module eagerly.
+      const moduleName = "node:crypto";
+      const nodeCrypto = (await import(moduleName)) as {
+        webcrypto?: { subtle?: SubtleCrypto };
+      };
+      subtle = nodeCrypto.webcrypto?.subtle;
+    } catch {
+      // The closed error below remains the contract for runtimes with neither
+      // browser Web Crypto nor Node's built-in implementation.
+    }
+  }
   if (!subtle) {
     throw new RookholdError("this runtime does not provide Web Crypto SHA-256", {
       code: "digest_unavailable",

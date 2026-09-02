@@ -1,0 +1,150 @@
+name: publish deferred SDK packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      registry:
+        description: Package registry to publish
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - pypi
+          - npm
+      version:
+        description: Existing immutable GitHub release version
+        required: true
+        default: 0.8.0
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish-pypi:
+    name: publish immutable Python package
+    if: inputs.registry == 'pypi' || inputs.registry == 'both'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: release
+    permissions:
+      contents: read # download and verify immutable release assets
+      id-token: write # exchange GitHub OIDC for a short-lived PyPI credential
+    steps:
+      - name: Check out publisher verification code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download exact Python release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$(gh release view "v${RELEASE_VERSION}" --json isDraft --jq .isDraft)" = false
+          mkdir downloads package-dist
+          gh release download "v${RELEASE_VERSION}" \
+            --pattern "rookhold-${RELEASE_VERSION}-py3-none-any.whl" \
+            --pattern "rookhold-${RELEASE_VERSION}.tar.gz" \
+            --pattern SHA256SUMS \
+            --dir downloads
+          cd downloads
+          for asset in "rookhold-${RELEASE_VERSION}-py3-none-any.whl" "rookhold-${RELEASE_VERSION}.tar.gz"; do
+            digest="$(awk -v file="$asset" '$2 == file { print $1 }' SHA256SUMS)"
+            test "${#digest}" -eq 64
+            printf '%s  %s\n' "$digest" "$asset" | sha256sum --check --strict -
+            gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "refs/tags/v${RELEASE_VERSION}" \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --deny-self-hosted-runners
+            cp "$asset" ../package-dist/
+          done
+      - name: Check for an exact existing PyPI release
+        id: registry-state
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: >-
+          echo "state=$(python3 scripts/reconcile-registries.py status
+          --registry pypi --version "$RELEASE_VERSION" --dist package-dist)"
+          >> "$GITHUB_OUTPUT"
+      - name: Publish exact files with PyPI trusted publishing
+        if: steps.registry-state.outputs.state == 'missing'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: package-dist
+          attestations: true
+      - name: Reconcile published PyPI bytes
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: >-
+          python3 scripts/reconcile-registries.py verify
+          --registry pypi --version "$RELEASE_VERSION" --dist package-dist
+
+  publish-npm:
+    name: publish immutable TypeScript package
+    if: inputs.registry == 'npm' || inputs.registry == 'both'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: release
+    permissions:
+      contents: read # download and verify the immutable release tarball
+      id-token: write # exchange GitHub OIDC for a short-lived npm credential
+    steps:
+      - name: Check out publisher verification code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download exact TypeScript release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$(gh release view "v${RELEASE_VERSION}" --json isDraft --jq .isDraft)" = false
+          mkdir package-dist
+          gh release download "v${RELEASE_VERSION}" \
+            --pattern "rookhold-${RELEASE_VERSION}.tgz" \
+            --pattern SHA256SUMS \
+            --dir package-dist
+          cd package-dist
+          asset="rookhold-${RELEASE_VERSION}.tgz"
+          digest="$(awk -v file="$asset" '$2 == file { print $1 }' SHA256SUMS)"
+          test "${#digest}" -eq 64
+          printf '%s  %s\n' "$digest" "$asset" | sha256sum --check --strict -
+          gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "refs/tags/v${RELEASE_VERSION}" \
+            --predicate-type https://slsa.dev/provenance/v1 \
+            --deny-self-hosted-runners
+      - name: Set up Node for npm trusted publishing
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - name: Check for an exact existing npm release
+        id: registry-state
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: >-
+          echo "state=$(python3 scripts/reconcile-registries.py status
+          --registry npm --version "$RELEASE_VERSION" --dist package-dist)"
+          >> "$GITHUB_OUTPUT"
+      - name: Publish exact tarball with npm trusted publishing
+        if: steps.registry-state.outputs.state == 'missing'
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: npm publish "package-dist/rookhold-${RELEASE_VERSION}.tgz" --access public --provenance
+      - name: Reconcile published npm bytes
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: >-
+          python3 scripts/reconcile-registries.py verify
+          --registry npm --version "$RELEASE_VERSION" --dist package-dist

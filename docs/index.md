@@ -1,120 +1,115 @@
 ---
 layout: home
 title: Rookhold
-titleTemplate: Controlled code execution for AI agents
-description: Download the Rookhold CLI and connect Claude Code, OpenCode, Hermes, or another MCP host to a controlled execution service.
+titleTemplate: Short-lived code with hard limits and receipts
+description: Execute short Python, Node, and Bash jobs submitted by an application, agent, or user with hard limits and a verifiable receipt.
 
 hero:
-  text: Run agent code behind a boundary you control.
-  tagline: One downloadable CLI connects your app or agent to short Python, Node, and Bash jobs with hard limits, bounded live output, and a verifiable receipt.
+  text: Run short-lived code with hard limits—and keep a receipt.
+  tagline: Execute Python, Node, and Bash submitted by an application, agent, or user without turning your machine into the execution environment.
   image:
     src: /rook.svg
     alt: Rookhold black-square emblem
   actions:
     - theme: brand
-      text: Download the CLI
-      link: '#download'
+      text: Try locally
+      link: '#try'
+    - theme: alt
+      text: Install an SDK
+      link: '#sdk'
     - theme: alt
       text: Connect an MCP host
       link: /use/mcp
 ---
 
-<section class="home-proof" aria-label="Release facts">
-  <p><strong>Current stable</strong><span>v0.7.1</span></p>
-  <p><strong>Agent interface</strong><span>MCP over stdio</span></p>
-  <p><strong>Production boundary</strong><span>gVisor on Linux x86_64</span></p>
+<section class="release-candidate-note" aria-label="v0.8.0 publication status">
+  <strong>v0.8.0 release candidate</strong>
+  <span>Downloads and registry commands activate after the release workflow publishes. Until then, <a href="https://github.com/sambai-dev/rookhold#build-from-source">build from main</a>.</span>
+</section>
+
+<section class="home-use-cases" aria-label="Common Rookhold use cases">
+  <a href="https://github.com/sambai-dev/rookhold/tree/main/examples/llm-tool-call"><strong>Generated functions</strong><span>Run model-produced source outside the agent process.</span></a>
+  <a href="https://github.com/sambai-dev/rookhold/tree/main/examples/json-transform"><strong>JSON transforms</strong><span>Apply user-defined code to structured input.</span></a>
+  <a href="https://github.com/sambai-dev/rookhold/tree/main/examples/evaluator"><strong>Code grading</strong><span>Bound hidden-test evaluation and keep the record.</span></a>
 </section>
 
 <section class="home-demo" aria-labelledby="demo-heading">
   <div class="home-demo-copy">
-    <h2 id="demo-heading">One file for you and your agent.</h2>
-    <p>The normal command opens Rookhold's operator CLI. The <code>mcp-server</code> argument turns that same executable into a concurrent stdio MCP server with four narrow execution tools.</p>
-    <div class="home-demo-actions">
-      <a class="home-text-link" href="./use/cli">Open the CLI guide <span aria-hidden="true">→</span></a>
-      <a class="home-text-link" href="./use/mcp">Open the MCP guide <span aria-hidden="true">→</span></a>
-    </div>
+    <h2 id="demo-heading">One command to a real result.</h2>
+    <p>With no endpoint configured, the Rookhold app starts a temporary loopback service, runs trusted code, saves the receipt, and removes the service state. It reports the weak local posture plainly.</p>
+    <a class="home-text-link" href="./getting-started/quickstart">Open the two-minute quickstart <span aria-hidden="true">→</span></a>
   </div>
-  <div class="terminal-stage" role="img" aria-label="Rookhold CLI showing a successful bounded Python job and saved receipt">
-    <div class="terminal-head"><span>rookhold-cli</span><span>connected · gvisor</span></div>
-    <div class="terminal-line"><span class="prompt">›</span><span>/run python "print(6 * 7)"</span></div>
-    <div class="terminal-event"><span>01</span><strong>policy accepted</strong><span>network disabled · 2s wall</span></div>
-    <div class="terminal-event"><span>02</span><strong>job completed</strong><span>42</span></div>
-    <div class="terminal-receipt"><span>receipt</span><code>.rookhold/runs/…/receipt.json</code><b>succeeded</b></div>
+  <div class="terminal-stage" role="img" aria-label="Local trusted-code run reporting host networking and no isolation">
+    <div class="terminal-head"><span>rookhold app</span><span class="local-caution">local · trusted code only</span></div>
+    <div class="terminal-line"><span class="prompt">›</span><span>rookhold run python "print(6 * 7)"</span></div>
+    <div class="terminal-event"><span>01</span><strong>job completed</strong><span>42</span></div>
+    <div class="terminal-event"><span>02</span><strong>network</strong><span>host</span></div>
+    <div class="terminal-event"><span>03</span><strong>isolation</strong><span>none</span></div>
+    <div class="terminal-receipt"><span>receipt</span><code>.rookhold/runs/…/receipt.json</code><b>saved</b></div>
   </div>
 </section>
 
-<section id="download" class="download-section" aria-labelledby="download-heading">
+<section id="try" class="download-section" aria-labelledby="try-heading">
   <div class="section-heading">
-    <h2 id="download-heading">Download Rookhold.</h2>
-    <p>Choose your computer. Each option is one self-contained CLI file.</p>
+    <h2 id="try-heading">Try the Rookhold app.</h2>
+    <p>After v0.8.0 publishes, the complete bundle contains the unified app, local service, remote client, MCP adapter, verifier, and setup templates.</p>
   </div>
   <div class="download-grid">
-    <a class="download-option" aria-label="Download Rookhold for 64-bit Windows" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-pc-windows-msvc.exe">
-      <strong>Windows</strong>
-    </a>
-    <a class="download-option" aria-label="Download Rookhold for Apple silicon Mac" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-aarch64-apple-darwin">
-      <strong>Mac</strong>
-    </a>
-    <a class="download-option" aria-label="Download Rookhold for 64-bit Intel or AMD Linux" href="https://github.com/sambai-dev/rookhold/releases/download/v0.7.1/rookhold-cli-x86_64-unknown-linux-gnu">
-      <strong>Linux</strong>
-    </a>
+    <a class="download-option" aria-label="Download the Rookhold app for 64-bit Windows" href="https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-pc-windows-msvc.zip"><strong>Windows</strong></a>
+    <a class="download-option" aria-label="Download the Rookhold app for Apple Silicon Mac" href="https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-aarch64-apple-darwin.tar.gz"><strong>Mac</strong></a>
+    <a class="download-option" aria-label="Download the Rookhold app for Linux x86_64" href="https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-unknown-linux-musl.tar.gz"><strong>Linux</strong></a>
   </div>
-  <p class="download-compatibility">Windows and Linux: 64-bit Intel or AMD. Mac: Apple silicon. Mac and Linux users run <code>chmod +x</code> once after downloading.</p>
+  <p class="download-compatibility">Windows and Linux: 64-bit Intel or AMD. Mac: Apple silicon. Mac and Linux users run <code>chmod +x</code> once after extracting.</p>
 </section>
 
-<section class="mcp-section" aria-labelledby="mcp-heading">
+<section id="sdk" class="sdk-section" aria-labelledby="sdk-heading">
   <div class="section-heading">
-    <h2 id="mcp-heading">Connect any local MCP host.</h2>
-    <p>Rookhold keeps the endpoint, credential, allowed languages, and minimum isolation outside the model's tool arguments.</p>
+    <h2 id="sdk-heading">Add Rookhold to an application.</h2>
+    <p>After v0.8.0 publishes, install the SDKs from the registries. They submit jobs to an endpoint and do not create the guarded Linux boundary by themselves.</p>
   </div>
-  <div class="mcp-layout">
-    <div class="mcp-code" aria-label="Generic MCP configuration example">
-      <div class="mcp-code-head"><span>mcp.json</span><span>stdio</span></div>
-      <pre><code>{
-  "mcpServers": {
-    "rookhold": {
-      "command": "rookhold-cli",
-      "args": ["mcp-server"]
-    }
-  }
-}</code></pre>
+  <div class="sdk-layout">
+    <div class="install-command"><span>Python</span><code>pip install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0-py3-none-any.whl</code><a href="./use/python">Python guide →</a></div>
+    <div class="install-command"><span>TypeScript</span><code>npm install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tgz</code><a href="./use/typescript">TypeScript guide →</a></div>
+    <p>Named PyPI and npm installs are deferred while maintainer registry accounts are activated; v0.8.0 ships the exact packages as verified release assets.</p>
+  </div>
+</section>
+
+<section class="client-section" aria-labelledby="client-heading">
+  <div class="section-heading">
+    <h2 id="client-heading">Already have a Rookhold server?</h2>
+    <p>After v0.8.0 publishes, the standalone client is the smaller human and MCP interface. It does not include the service or local-run workflow.</p>
+    <div class="home-demo-actions">
+      <a class="home-text-link" href="./use/cli">Client guide <span aria-hidden="true">→</span></a>
+      <a class="home-text-link" href="./use/mcp">MCP setup <span aria-hidden="true">→</span></a>
     </div>
-    <ol class="mcp-steps">
-      <li><span>01</span><div><strong>Download one file</strong><p>Put <code>rookhold-cli</code> on PATH or use its absolute path.</p></div></li>
-      <li><span>02</span><div><strong>Set operator policy</strong><p>Export the endpoint, scoped key, language allowlist, and required isolation class.</p></div></li>
-      <li><span>03</span><div><strong>Register and check</strong><p>Launch <code>mcp-server</code>, then confirm the four live Rookhold tools in your host.</p></div></li>
-    </ol>
   </div>
-  <div class="host-links" aria-label="Supported host guides">
-    <a href="https://github.com/sambai-dev/rookhold/blob/main/integrations/claude-code/mcp.json">Claude Code</a>
-    <a href="https://github.com/sambai-dev/rookhold/blob/main/integrations/opencode/opencode.snippet.json">OpenCode</a>
-    <a href="https://github.com/sambai-dev/rookhold/blob/main/integrations/hermes/config.snippet.yaml">Hermes</a>
-    <a href="./use/mcp">Generic MCP</a>
+  <div class="client-links" aria-label="Standalone client downloads">
+    <a href="https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-pc-windows-msvc.exe">Windows client</a>
+    <a href="https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-aarch64-apple-darwin">Mac client</a>
+    <a href="https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-cli-x86_64-unknown-linux-gnu">Linux client</a>
   </div>
 </section>
 
 <section class="boundary-section" aria-labelledby="boundary-heading">
-  <div>
-    <h2 id="boundary-heading">The website is hosted. The executor is yours.</h2>
-  </div>
+  <div><h2 id="boundary-heading">The local demo is not the security boundary.</h2></div>
   <div class="boundary-copy">
-    <p>Vercel serves these public docs. Download links point directly to immutable GitHub Releases assets. Vercel does not run Rookhold's privileged execution backend.</p>
     <p>For untrusted code, operate Rookhold on a dedicated Linux x86_64 host with the pinned gVisor provider. Local development on Windows, macOS, or an unisolated Linux setup reports <code>isolation: none</code>.</p>
+    <p>Requested policy, observed controls, and portable proof stay separate. A run fails admission when the service cannot satisfy its required isolation class.</p>
     <a class="home-text-link" href="./getting-started/first-secure-deployment">Build the secure boundary <span aria-hidden="true">→</span></a>
   </div>
 </section>
 
 <section class="faq-section" aria-labelledby="faq-heading">
-  <div class="section-heading"><h2 id="faq-heading">The short answers.</h2></div>
+  <div class="section-heading"><h2 id="faq-heading">Choose the right surface.</h2></div>
   <div class="faq-list">
-    <details><summary>Does the CLI include the sandbox service?</summary><p>The full release archive includes the service and verifier. The one-file CLI is the consumer interface and connects to a separately operated Rookhold endpoint.</p></details>
-    <details><summary>Does MCP replace Claude Code or OpenCode?</summary><p>No. Your existing host owns the conversation and model. Rookhold adds four execution tools with policy and evidence.</p></details>
-    <details><summary>Does adding Rookhold disable the host's shell?</summary><p>No. Remove or deny alternate shell and code-execution tools when the model must cross only the Rookhold boundary.</p></details>
-    <details><summary>Can I safely run untrusted code on my laptop?</summary><p>No. The local demo is explicitly unisolated. Use the dedicated Linux gVisor deployment for the production boundary.</p></details>
+    <details><summary>Which download should I use first?</summary><p>Use the complete Rookhold app bundle for your operating system. It includes the zero-configuration local path and the server.</p></details>
+    <details><summary>When should I use the standalone client?</summary><p>Use it only when you already have a Rookhold endpoint and want the smaller operator or MCP interface.</p></details>
+    <details><summary>Do the SDKs include the sandbox service?</summary><p>No. They submit to an endpoint. The secure boundary is a separately operated Linux service.</p></details>
+    <details><summary>Can I safely run untrusted code on my laptop?</summary><p>No. The local mode is explicitly unisolated. Use the dedicated Linux gVisor deployment for mutually untrusted code.</p></details>
   </div>
 </section>
 
-<section class="final-cta" aria-label="Download Rookhold">
-  <h2>Give your agent a controlled place to run code.</h2>
-  <a href="#download">Download Rookhold v0.7.1 <span aria-hidden="true">↓</span></a>
+<section class="final-cta" aria-label="Try Rookhold locally">
+  <h2>Run one trusted local job, then decide where the boundary belongs.</h2>
+  <a href="#try">Try Rookhold locally <span aria-hidden="true">↓</span></a>
 </section>
