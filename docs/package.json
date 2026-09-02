@@ -5,7 +5,8 @@
   "scripts": {
     "docs:dev": "vitepress dev --host 127.0.0.1",
     "docs:build": "vitepress build",
-    "docs:preview": "vitepress preview --host 127.0.0.1"
+    "docs:preview": "vitepress preview --host 127.0.0.1",
+    "docs:deploy:cloudflare": "npm run docs:build && npx --yes wrangler@4.128.0 pages deploy .vitepress/dist --project-name rookhold --branch main"
   },
   "devDependencies": {
     "vitepress": "1.6.4"

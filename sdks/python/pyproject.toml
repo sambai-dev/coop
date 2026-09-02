@@ -35,7 +35,7 @@ dev = [
 stream = ["websocket-client>=1.6,<2"]
 
 [project.urls]
-Homepage = "https://rookhold.vercel.app/"
+Homepage = "https://rookhold.pages.dev/"
 Repository = "https://github.com/sambai-dev/rookhold"
 Issues = "https://github.com/sambai-dev/rookhold/issues"
 
