@@ -12,11 +12,21 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import quote, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 MAX_PACKAGE_BYTES = 64 * 1024 * 1024
 USER_AGENT = "rookhold-release-reconciler/0.8"
+
+
+class RejectRedirects(HTTPRedirectHandler):
+    """Prevent a registry response from connecting to an unvalidated target."""
+
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
+
+
+OPEN_URL = build_opener(RejectRedirects()).open
 
 
 def require(condition: bool, message: str) -> None:
@@ -53,7 +63,7 @@ def fetch(
 ) -> bytes | None:
     request = Request(url, headers={"Accept": "application/json", "User-Agent": USER_AGENT})
     try:
-        response = urlopen(request, timeout=30)
+        response = OPEN_URL(request, timeout=30)
     except HTTPError as error:
         if allow_missing and error.code == 404:
             return None
@@ -85,10 +95,18 @@ def fetch_json(
     if content is None:
         return None
     try:
-        value = json.loads(content)
+        value = json.loads(content, object_pairs_hook=reject_duplicate_members)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"registry returned malformed JSON: {url}") from error
     require(isinstance(value, dict), f"registry returned a non-object: {url}")
+    return value
+
+
+def reject_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, member in pairs:
+        require(key not in value, f"registry JSON duplicates member: {key}")
+        value[key] = member
     return value
 
 

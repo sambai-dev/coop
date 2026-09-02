@@ -50,6 +50,18 @@ class VerifyLocalDemoTests(unittest.TestCase):
                     with self.assertRaisesRegex(AssertionError, "result omits its job_id"):
                         MODULE.verify(payload, expected_runs_root=root, require_receipt_file=False)
 
+    def test_rejects_non_host_networking_independently(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".rookhold" / "runs"
+            payload = self.payload(root)
+            payload["receipt"] = {
+                "networking": "disabled",
+                "isolation_class": "none",
+                "job_id": self.JOB_ID,
+            }
+            with self.assertRaisesRegex(AssertionError, "host networking"):
+                MODULE.verify(payload, expected_runs_root=root, require_receipt_file=False)
+
     def test_rejects_mismatched_receipt_job_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".rookhold" / "runs"

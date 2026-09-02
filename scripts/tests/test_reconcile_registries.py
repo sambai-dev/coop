@@ -45,7 +45,7 @@ class RegistryReconciliationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             dist, _ = self.make_dist(directory)
             missing = HTTPError("https://registry.example", 404, "missing", {}, None)
-            with patch.dict(MODULE["registry_state"].__globals__, {"urlopen": lambda *_a, **_k: (_ for _ in ()).throw(missing)}):
+            with patch.dict(MODULE["registry_state"].__globals__, {"OPEN_URL": lambda *_a, **_k: (_ for _ in ()).throw(missing)}):
                 self.assertEqual(MODULE["registry_state"]("pypi", self.VERSION, dist), "missing")
                 self.assertEqual(MODULE["registry_state"]("npm", self.VERSION, dist), "missing")
 
@@ -60,11 +60,14 @@ class RegistryReconciliationTests(unittest.TestCase):
             url = f"https://pypi.org/pypi/rookhold/{self.VERSION}/json"
             with patch.dict(
                 MODULE["registry_state"].__globals__,
-                {"urlopen": lambda *_a, **_k: json_response({"urls": files}, url)},
+                {"OPEN_URL": lambda *_a, **_k: json_response({"urls": files}, url)},
             ):
                 self.assertEqual(MODULE["registry_state"]("pypi", self.VERSION, dist), "exact")
                 files[0]["digests"]["sha256"] = "0" * 64
                 with self.assertRaisesRegex(ValueError, "digest differs"):
+                    MODULE["registry_state"]("pypi", self.VERSION, dist)
+                files.pop()
+                with self.assertRaisesRegex(ValueError, "file set differs"):
                     MODULE["registry_state"]("pypi", self.VERSION, dist)
 
     def test_npm_downloads_and_compares_the_actual_tarball(self) -> None:
@@ -85,16 +88,32 @@ class RegistryReconciliationTests(unittest.TestCase):
                     )
                 return Response(content[f"rookhold-{self.VERSION}.tgz"], tarball_url)
 
-            with patch.dict(MODULE["registry_state"].__globals__, {"urlopen": open_exact}):
+            with patch.dict(MODULE["registry_state"].__globals__, {"OPEN_URL": open_exact}):
                 self.assertEqual(MODULE["registry_state"]("npm", self.VERSION, dist), "exact")
 
                 def open_mismatch(request, **_kwargs):
                     response = open_exact(request)
                     return Response(b"different", tarball_url) if request.full_url == tarball_url else response
 
-                with patch.dict(MODULE["registry_state"].__globals__, {"urlopen": open_mismatch}):
+                with patch.dict(MODULE["registry_state"].__globals__, {"OPEN_URL": open_mismatch}):
                     with self.assertRaisesRegex(ValueError, "digest differs"):
                         MODULE["registry_state"]("npm", self.VERSION, dist)
+
+    def test_registry_json_rejects_duplicate_members_at_any_depth(self) -> None:
+        url = "https://pypi.org/pypi/rookhold/0.8.0/json"
+        duplicate = b'{"urls":[],"nested":{"sha256":"a","sha256":"b"}}'
+        with patch.dict(
+            MODULE["fetch_json"].__globals__,
+            {"OPEN_URL": lambda *_a, **_k: Response(duplicate, url)},
+        ):
+            with self.assertRaisesRegex(ValueError, "duplicates member: sha256"):
+                MODULE["fetch_json"](url, expected_host="pypi.org")
+
+    def test_redirect_handler_refuses_every_redirect_target(self) -> None:
+        handler = MODULE["RejectRedirects"]()
+        self.assertIsNone(
+            handler.redirect_request(None, None, 302, "redirect", {}, "https://other.test")
+        )
 
 
 if __name__ == "__main__":
