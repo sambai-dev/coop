@@ -7,9 +7,9 @@ verifiable receipt of what happened.
 [![Release](https://img.shields.io/github/v/release/sambai-dev/rookhold)](https://github.com/sambai-dev/rookhold/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Release candidate:** v0.8.0. See [all releases](https://github.com/sambai-dev/rookhold/releases).
-The download and registry links below become available when the release
-workflow publishes. Until then, use the [source build](#build-from-source).
+**Current release:** [v0.8.0](https://github.com/sambai-dev/rookhold/releases/tag/v0.8.0).
+Downloads and direct SDK packages are available now. Named PyPI and npm installs
+remain deferred while maintainer registry accounts are activated.
 
 Rookhold is for applications, agents, evaluators, graders, and automations that
 receive a short piece of code but should not hand it the host machine. It is a
@@ -18,7 +18,7 @@ or general-purpose cloud sandbox.
 
 ## Try Rookhold locally
 
-After v0.8.0 publishes, choose the complete **Rookhold app** bundle. It contains
+Choose the complete **Rookhold app** bundle. It contains
 the unified `rookhold` command, remote client, MCP adapter, offline verifier,
 and setup templates.
 
@@ -80,7 +80,7 @@ untrusted workloads.
 
 ### Python
 
-After v0.8.0 publishes:
+Install the v0.8.0 release wheel:
 
 ```bash
 pip install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0-py3-none-any.whl
@@ -95,7 +95,7 @@ print(result.stdout)
 
 ### TypeScript
 
-After v0.8.0 publishes:
+Install the v0.8.0 release tarball:
 
 ```bash
 npm install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tgz
@@ -120,7 +120,7 @@ console.log(result.stdout);
 
 ## Connect to an existing Rookhold server
 
-After v0.8.0 publishes, the **Rookhold client** is the smallest download for a
+The **Rookhold client** is the smallest download for a
 person or MCP host that already has a Rookhold endpoint. It does not include
 the local service.
 

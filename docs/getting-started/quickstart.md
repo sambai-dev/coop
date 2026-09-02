@@ -1,6 +1,6 @@
 # Quickstart
 
-After v0.8.0 publishes, download the complete Rookhold app for your computer:
+Download the current complete Rookhold app for your computer:
 
 | Computer | App bundle |
 |---|---|
@@ -8,7 +8,7 @@ After v0.8.0 publishes, download the complete Rookhold app for your computer:
 | Mac with Apple Silicon | [Download for Mac](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-aarch64-apple-darwin.tar.gz) |
 | Linux x86_64 | [Download for Linux](https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-x86_64-unknown-linux-musl.tar.gz) |
 
-Before publication, run the same candidate from a checkout:
+Contributors can instead run the same version from a checkout:
 
 ```bash
 git clone https://github.com/sambai-dev/rookhold.git
@@ -17,7 +17,7 @@ cargo build --locked -p coop-server --bin rookhold
 target/debug/rookhold run python 'print(6 * 7)'
 ```
 
-## After v0.8.0 publishes
+## Run the release
 
 Extract it, then run one job. On Windows:
 
