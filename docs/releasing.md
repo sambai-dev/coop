@@ -13,8 +13,8 @@ Configure these controls in GitHub before setting the repository variable `ROOKH
 5. Enable GitHub immutable releases so a published tag or asset cannot be silently replaced. The workflow's draft-staging step remains editable until publication; immutability applies to the published release.
 6. Review Actions access so only required, SHA-pinned actions are allowed. Keep the default workflow token read-only; grant contents, attestation, and OIDC permissions only to the narrowly scoped release-staging, registry-publication, and final-publication jobs that require them.
 7. Package registry publication may follow the immutable GitHub release. On PyPI, configure a pending trusted publisher for project `rookhold`, owner
-   `sambai-dev`, repository `rookhold`, workflow `release.yml`, and environment
-   `release`, using workflow `publish-packages.yml`. A pending publisher does not reserve the name until the first
+   `sambai-dev`, repository `rookhold`, workflow `publish-packages.yml`, and environment
+   `release`. `release.yml` remains the artifact-attestation workflow. A pending publisher does not reserve the name until the first
    publish, so complete the release promptly after this check.
 8. npm does not offer PyPI-style pending publishers. Before the final tag,
    bootstrap the unclaimed `rookhold` package through the maintainer's
@@ -22,7 +22,7 @@ Configure these controls in GitHub before setting the repository variable `ROOKH
    GitHub Actions trusted publisher for owner `sambai-dev`, repository
    `rookhold`, workflow `publish-packages.yml`, environment `release`, and `npm publish`.
    Confirm the package's repository URL resolves exactly to this repository.
-   The final `0.8.0` publication must still come from the tagged OIDC workflow.
+   The final `0.8.0` publication must come from the protected OIDC follow-up workflow and reuse the tagged release asset.
 
 Registry activation does not block the binary release. Until the protected
 follow-up workflow publishes the immutable SDK assets, documentation must use

@@ -68,8 +68,8 @@ hero:
     <p>After v0.8.0 publishes, install the SDKs from the registries. They submit jobs to an endpoint and do not create the guarded Linux boundary by themselves.</p>
   </div>
   <div class="sdk-layout">
-    <div class="install-command"><span>Python</span><code>pip install …/rookhold-0.8.0-py3-none-any.whl</code><a href="./use/python">Python guide →</a></div>
-    <div class="install-command"><span>TypeScript</span><code>npm install …/rookhold-0.8.0.tgz</code><a href="./use/typescript">TypeScript guide →</a></div>
+    <div class="install-command"><span>Python</span><code>pip install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0-py3-none-any.whl</code><a href="./use/python">Python guide →</a></div>
+    <div class="install-command"><span>TypeScript</span><code>npm install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tgz</code><a href="./use/typescript">TypeScript guide →</a></div>
     <p>Named PyPI and npm installs are deferred while maintainer registry accounts are activated; v0.8.0 ships the exact packages as verified release assets.</p>
   </div>
 </section>

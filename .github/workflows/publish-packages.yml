@@ -23,8 +23,10 @@ permissions:
 
 jobs:
   publish-pypi:
+    name: publish immutable Python package
     if: inputs.registry == 'pypi' || inputs.registry == 'both'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     environment:
       name: release
     permissions:
@@ -84,8 +86,10 @@ jobs:
           --registry pypi --version "$RELEASE_VERSION" --dist package-dist
 
   publish-npm:
+    name: publish immutable TypeScript package
     if: inputs.registry == 'npm' || inputs.registry == 'both'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     environment:
       name: release
     permissions:
