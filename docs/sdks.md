@@ -2,15 +2,16 @@
 
 Rookhold ships small reference clients under `sdks/`. They intentionally mirror the HTTP API and are suitable for embedding in agent tool loops. The OpenAPI document remains the canonical contract for generated clients.
 
-After v0.8.0 publishes, install the clients from the public registries:
+After v0.8.0 publishes, install the exact release assets:
 
 ```bash
-pip install rookhold==0.8.0
-npm install rookhold@0.8.0
+pip install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0-py3-none-any.whl
+npm install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tgz
 ```
 
-The release workflow publishes both packages with registry trusted publishing
-and then installs those exact public versions in clean environments.
+Named PyPI and npm installs are deferred while maintainer registry accounts are
+activated. A protected follow-up workflow will publish these same immutable
+v0.8.0 bytes through registry trusted publishing; it does not rebuild them.
 
 Before publication, install from the checkout with
 `python -m pip install ./sdks/python` or `npm install ./sdks/typescript`.

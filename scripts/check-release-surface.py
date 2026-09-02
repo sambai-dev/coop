@@ -117,8 +117,8 @@ def check_release_data(version: str) -> dict[str, str]:
             expected["windows_client_url"],
             expected["mac_client_url"],
             expected["linux_client_url"],
-            "pip install rookhold",
-            "npm install rookhold",
+            expected["python_wheel_url"],
+            expected["npm_tarball_url"],
         ],
         "docs/index.md": [
             expected["windows_app_url"],
@@ -127,8 +127,7 @@ def check_release_data(version: str) -> dict[str, str]:
             expected["windows_client_url"],
             expected["mac_client_url"],
             expected["linux_client_url"],
-            "pip install rookhold",
-            "npm install rookhold",
+            "registry accounts are activated",
         ],
         "docs/getting-started/quickstart.md": [
             expected["windows_app_url"],
@@ -603,8 +602,23 @@ def check_pins_and_packaging() -> int:
         )
     require("os: macos-15" in release, "Apple-silicon release is not built on the GA arm64 runner")
     require("ROOKHOLD_RELEASE_GOVERNANCE" in release, "release workflow lacks repository-governance acknowledgement")
-    require("ROOKHOLD_PYPI_TRUSTED_PUBLISHER" in release, "release workflow lacks PyPI publisher acknowledgement")
-    require("ROOKHOLD_NPM_TRUSTED_PUBLISHER" in release, "release workflow lacks npm publisher acknowledgement")
+    require("ROOKHOLD_PYPI_TRUSTED_PUBLISHER" not in release, "binary release still blocks on PyPI activation")
+    require("ROOKHOLD_NPM_TRUSTED_PUBLISHER" not in release, "binary release still blocks on npm activation")
+    deferred_packages = read(".github/workflows/publish-packages.yml")
+    for deferred_contract in [
+        "workflow_dispatch:",
+        "gh release download",
+        "gh attestation verify",
+        "scripts/reconcile-registries.py status",
+        "scripts/reconcile-registries.py verify",
+        "pypa/gh-action-pypi-publish@",
+        "npm publish",
+        "environment:\n      name: release",
+    ]:
+        require(
+            deferred_contract in deferred_packages,
+            f"deferred package publisher contract missing: {deferred_contract}",
+        )
     require(
         "environment:\n      name: release" in release,
         "publish job lacks the protected release environment hook",
@@ -849,32 +863,26 @@ def check_pins_and_packaging() -> int:
     require(release.count("actions/attest@") == 2, "release workflow must create SBOM and provenance attestations")
     require("draft: true" in release, "release assets must stage in a draft")
     stage_start = release.find("\n  stage-release:")
-    registries_start = release.find("\n  publish-registries:")
-    smoke_start = release.find("\n  registry-smoke:")
+    package_start = release.find("\n  package-smoke:")
     publish_start = release.find("\n  publish-release:")
     require(
-        min(stage_start, registries_start, smoke_start, publish_start) >= 0,
+        min(stage_start, package_start, publish_start) >= 0,
         "release workflow omits one or more ordered publication jobs",
     )
     require(
-        stage_start < registries_start < smoke_start < publish_start,
-        "release jobs must stage, publish registries, smoke registries, then publish GitHub",
+        stage_start < package_start < publish_start,
+        "release jobs must stage, smoke exact packages, then publish GitHub",
     )
-    stage_job = release[stage_start:registries_start]
-    registries_job = release[registries_start:smoke_start]
-    smoke_job = release[smoke_start:publish_start]
+    stage_job = release[stage_start:package_start]
+    package_job = release[package_start:publish_start]
     publish_job = release[publish_start:]
     require(
-        "needs: [preflight, stage-release]" in registries_job,
-        "registry publication must depend on the reconciled draft",
+        "needs: [preflight, stage-release]" in package_job,
+        "package smoke must depend on the reconciled draft",
     )
     require(
-        "needs: [preflight, publish-registries]" in smoke_job,
-        "registry smoke must depend on public package publication",
-    )
-    require(
-        "needs: [preflight, stage-release, registry-smoke]" in publish_job,
-        "public GitHub release must depend on both the draft and registry smoke",
+        "needs: [preflight, stage-release, package-smoke]" in publish_job,
+        "public GitHub release must depend on both the draft and exact package smoke",
     )
     require(
         "name: rookhold-release-staged" in stage_job
@@ -888,18 +896,13 @@ def check_pins_and_packaging() -> int:
     require("--draft=false" not in stage_job, "draft staging must not publish the GitHub release")
     require(
         "--draft=false" in publish_job,
-        "release workflow must publish its draft only after registry smoke",
+        "release workflow must publish its draft only after exact package smoke",
     )
-    for registry_contract in [
-        "scripts/reconcile-registries.py status",
-        "scripts/reconcile-registries.py verify",
-        "steps.registry-state.outputs.pypi == 'missing'",
-        "steps.registry-state.outputs.npm == 'missing'",
+    for package_contract in [
+        "pip install --no-deps",
+        "npm install \"../sdk-dist/rookhold-${RELEASE_VERSION}.tgz\"",
     ]:
-        require(
-            registry_contract in registries_job,
-            f"registry retry reconciliation contract missing: {registry_contract}",
-        )
+        require(package_contract in package_job, f"release package smoke missing: {package_contract}")
 
     install_docs = read("docs/deployment.md") + read("docs/sdks.md")
     require(

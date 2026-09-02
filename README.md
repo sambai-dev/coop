@@ -83,7 +83,7 @@ untrusted workloads.
 After v0.8.0 publishes:
 
 ```bash
-pip install rookhold
+pip install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0-py3-none-any.whl
 ```
 
 ```python
@@ -98,8 +98,11 @@ print(result.stdout)
 After v0.8.0 publishes:
 
 ```bash
-npm install rookhold
+npm install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tgz
 ```
+
+Named PyPI and npm installs are temporarily deferred while maintainer registry
+accounts are activated. The release-hosted packages above contain the same SDKs.
 
 ```typescript
 import { Rookhold } from "rookhold";

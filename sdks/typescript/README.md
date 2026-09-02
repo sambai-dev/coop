@@ -17,11 +17,14 @@ npm ci
 npm pack
 ```
 
-After publication, install from npm:
+After publication, install the exact release tarball:
 
 ```bash
-npm install rookhold
+npm install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tgz
 ```
+
+The named npm install is deferred until maintainer 2FA and trusted publishing
+are configured.
 
 The common path is one call:
 

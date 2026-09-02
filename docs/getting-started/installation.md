@@ -27,12 +27,14 @@ python -m pip install ./sdks/python
 npm install ./sdks/typescript
 ```
 
-After publication, install from the registries:
+After publication, install the exact GitHub release packages:
 
 ```bash
-pip install rookhold
-npm install rookhold
+pip install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0-py3-none-any.whl
+npm install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tgz
 ```
+
+Named PyPI and npm installs are deferred until maintainer registry activation.
 
 These packages are clients. Installing them does not create the guarded Linux
 execution boundary.

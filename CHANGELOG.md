@@ -6,7 +6,7 @@ All notable changes are documented here. Rookhold follows semantic versioning wh
 
 ### Why this matters
 
-Rookhold now starts with the developer outcome: install one public package or
+Rookhold now starts with the developer outcome: install one release package or
 run one command, submit a bounded job in one method call, and keep a receipt.
 Short real jobs can also receive bounded input files and return explicitly
 named, hashed output artifacts without gaining a persistent workspace.
@@ -15,8 +15,8 @@ named, hashed output artifacts without gaining a persistent workspace.
 
 ```bash
 rookhold run python 'while True: pass' --wall-seconds 2
-pip install rookhold
-npm install rookhold
+pip install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0-py3-none-any.whl
+npm install https://github.com/sambai-dev/rookhold/releases/download/v0.8.0/rookhold-0.8.0.tgz
 ```
 
 Python and TypeScript now provide `from_env`/`fromEnv`, `run`, structured JSON
@@ -30,8 +30,10 @@ preview and back up MCP host configuration changes.
 - The REST additions are optional fields; existing submit, event, result, and
   cancellation methods remain.
 - Python remains supported on 3.9–3.14 and TypeScript on Node 18+.
-- The public package name is now `rookhold` on both PyPI and npm. The Python
-  import remains `rookhold`; TypeScript applications should replace
+- The intended public package name is `rookhold` on both PyPI and npm. Named
+  registry installs are deferred while maintainer accounts are activated; the
+  immutable v0.8.0 wheel and tarball install directly from the GitHub release.
+  The Python import remains `rookhold`; TypeScript applications should replace
   `rookhold-sdk` imports with `rookhold`.
 - Internal `coop-*` crate names and durable v1 evidence identities remain to
   avoid a risky format rename.
@@ -42,9 +44,10 @@ preview and back up MCP host configuration changes.
   executors with path, count, per-file, and total-byte bounds.
 - Added versioned Bookworm runtime-pack names and bound them to existing
   interpreter, rootfs, runtime, and OCI configuration digests in receipts.
-- Added public-package trusted publishing, clean registry smoke tests, weekly
-  compatibility checks, executable recipes, Next.js and FastAPI starters, a
-  VitePress documentation site, and GitHub Pages deployment.
+- Added clean release-package smoke tests and a protected deferred registry
+  publisher that reuses immutable GitHub release bytes, plus weekly compatibility
+  checks, executable recipes, Next.js and FastAPI starters, a VitePress
+  documentation site, and GitHub Pages deployment.
 - Tiered contribution checks so docs and recipes no longer inherit the full
   security-core evidence process.
 

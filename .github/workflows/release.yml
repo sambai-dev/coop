@@ -37,21 +37,6 @@ jobs:
             echo "Configure the protected release environment/tag rules described in docs/releasing.md, then set ROOKHOLD_RELEASE_GOVERNANCE=enabled" >&2
             exit 1
           fi
-      - name: Require configured registry trusted publishers
-        env:
-          PYPI_TRUSTED_PUBLISHER: ${{ vars.ROOKHOLD_PYPI_TRUSTED_PUBLISHER }}
-          NPM_TRUSTED_PUBLISHER: ${{ vars.ROOKHOLD_NPM_TRUSTED_PUBLISHER }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "$PYPI_TRUSTED_PUBLISHER" != enabled ]; then
-            echo "Configure the pending PyPI publisher for release.yml and the release environment, then set ROOKHOLD_PYPI_TRUSTED_PUBLISHER=enabled" >&2
-            exit 1
-          fi
-          if [ "$NPM_TRUSTED_PUBLISHER" != enabled ]; then
-            echo "Bootstrap the npm package, configure its release.yml trusted publisher for the release environment, then set ROOKHOLD_NPM_TRUSTED_PUBLISHER=enabled" >&2
-            exit 1
-          fi
       - name: Require a concrete build revision
         shell: bash
         run: |
@@ -614,6 +599,9 @@ jobs:
           overwrite_files: false
           generate_release_notes: true
           draft: true
+          body: |
+            Package registry publication is deferred while maintainer accounts are activated.
+            The exact Python wheel and TypeScript tarball are included in this release and can be installed directly.
       - name: Reconcile the remote draft before publication
         env:
           GH_TOKEN: ${{ github.token }}
@@ -647,108 +635,49 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish-registries:
-    name: publish public SDK packages
+  package-smoke:
+    name: clean release-package install
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [preflight, stage-release]
-    environment:
-      name: release
-    permissions:
-      contents: read # checkout the reviewed release helper
-      id-token: write # exchange GitHub OIDC for short-lived registry credentials
     steps:
-      - name: Check out source without persisting credentials
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
       - name: Download the exact gated SDK packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: rookhold-sdks
           path: sdk-dist
-      - name: Select only Python distribution files
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir pypi-dist
-          cp "sdk-dist/rookhold-${{ needs.preflight.outputs.version }}-py3-none-any.whl" pypi-dist/
-          cp "sdk-dist/rookhold-${{ needs.preflight.outputs.version }}.tar.gz" pypi-dist/
-      - name: Reconcile any prior partial registry publication by digest
-        id: registry-state
-        env:
-          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          pypi_state="$(python3 scripts/reconcile-registries.py status \
-            --registry pypi --version "$RELEASE_VERSION" --dist pypi-dist)"
-          npm_state="$(python3 scripts/reconcile-registries.py status \
-            --registry npm --version "$RELEASE_VERSION" --dist sdk-dist)"
-          printf 'pypi=%s\nnpm=%s\n' "$pypi_state" "$npm_state" >> "$GITHUB_OUTPUT"
-      - name: Publish to PyPI with GitHub trusted publishing
-        if: steps.registry-state.outputs.pypi == 'missing'
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        with:
-          packages-dir: pypi-dist
-          attestations: true
-      - name: Set up Node for npm trusted publishing
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-          registry-url: https://registry.npmjs.org
-      - name: Publish to npm with provenance
-        if: steps.registry-state.outputs.npm == 'missing'
-        env:
-          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
-        run: >-
-          npm publish
-          "sdk-dist/rookhold-${RELEASE_VERSION}.tgz"
-          --access public --provenance
-      - name: Verify both public registries match the gated package bytes
-        env:
-          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/reconcile-registries.py verify \
-            --registry pypi --version "$RELEASE_VERSION" --dist pypi-dist
-          python3 scripts/reconcile-registries.py verify \
-            --registry npm --version "$RELEASE_VERSION" --dist sdk-dist
-
-  registry-smoke:
-    name: clean public-package install
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    needs: [preflight, publish-registries]
-    steps:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Install and import the exact PyPI release in a clean environment
+      - name: Install and import the exact release wheel in a clean environment
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           python -m venv clean-python
-          clean-python/bin/python -m pip install "rookhold==${{ needs.preflight.outputs.version }}"
+          clean-python/bin/python -m pip install --no-deps "sdk-dist/rookhold-${RELEASE_VERSION}-py3-none-any.whl"
           clean-python/bin/python -c "from rookhold import Rookhold, RunResult; assert callable(Rookhold.from_env); assert RunResult.__name__ == 'RunResult'"
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
-      - name: Install and import the exact npm release in a clean project
+      - name: Install and import the exact release tarball in a clean project
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
         shell: bash
         run: |
+          set -euo pipefail
           mkdir clean-node
           cd clean-node
           npm init -y
-          npm install "rookhold@${{ needs.preflight.outputs.version }}"
+          npm install "../sdk-dist/rookhold-${RELEASE_VERSION}.tgz"
           node --input-type=module -e "import { Rookhold, RunResult } from 'rookhold'; if (typeof Rookhold.fromEnv !== 'function' || typeof RunResult !== 'function') process.exit(1)"
 
   publish-release:
     name: publish GitHub release
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: [preflight, stage-release, registry-smoke]
+    needs: [preflight, stage-release, package-smoke]
     environment:
       name: release
       url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
@@ -779,7 +708,7 @@ jobs:
             --metadata "$metadata" \
             --version "$RELEASE_VERSION" \
             --tag "$GITHUB_REF_NAME"
-      - name: Publish only after public registry smoke succeeds
+      - name: Publish only after exact package smoke succeeds
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
