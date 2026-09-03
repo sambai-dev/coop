@@ -90,6 +90,7 @@ export default defineConfig({
             { text: "Contribution tiers", link: "/contributing" },
             { text: "Runtime packs", link: "/runtime-packs" },
             { text: "Integrations", link: "/integrations" },
+            { text: "Feedback", link: "/feedback" },
           ],
         },
       ],

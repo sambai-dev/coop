@@ -70,7 +70,8 @@ The CLI explicitly requests `allow_network: false`; the guarded service must
 also report disabled networking and the required isolation class.
 
 [Read the quickstart](https://rookhold.pages.dev/getting-started/quickstart) ·
-[Deploy the secure boundary](https://rookhold.pages.dev/getting-started/first-secure-deployment)
+[Deploy the secure boundary](https://rookhold.pages.dev/getting-started/first-secure-deployment) ·
+[Share 60-second feedback](https://github.com/sambai-dev/rookhold/issues/new?template=first-run-feedback.yml)
 
 ## Add Rookhold to an application
 
@@ -210,6 +211,7 @@ untrusted jobs.
 - [Receipts and verification](https://rookhold.pages.dev/understand/receipts)
 - [Deployment and operations](https://rookhold.pages.dev/deployment)
 - [Compatibility](https://rookhold.pages.dev/compatibility)
+- [Feedback](https://rookhold.pages.dev/feedback)
 - [Release process](docs/releasing.md)
 
 ## Contributing

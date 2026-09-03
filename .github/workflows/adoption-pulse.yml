@@ -1,0 +1,66 @@
+name: adoption pulse
+
+on:
+  schedule:
+    - cron: "17 20 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    name: update maintainer adoption pulse
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out reporting code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the current adoption report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROOKHOLD_REPOSITORY: ${{ github.repository }}
+        run: >-
+          python3 scripts/adoption-pulse.py
+          --repository "$ROOKHOLD_REPOSITORY"
+          --output adoption-pulse.md
+      - name: Update one durable public issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROOKHOLD_REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title='[Maintainer] Adoption pulse'
+          gh label create adoption-pulse \
+            --repo "$ROOKHOLD_REPOSITORY" \
+            --description 'Automatically refreshed public adoption signals' \
+            --color 1d76db \
+            --force
+          mapfile -t matches < <(gh issue list \
+            --repo "$ROOKHOLD_REPOSITORY" \
+            --state open \
+            --label adoption-pulse \
+            --limit 20 \
+            --json number,title \
+            --jq ".[] | select(.title == \"$title\") | .number")
+          if [ "${#matches[@]}" -gt 1 ]; then
+            echo 'More than one open adoption pulse issue exists; refusing an ambiguous update.' >&2
+            exit 1
+          fi
+          if [ "${#matches[@]}" -eq 0 ]; then
+            gh issue create \
+              --repo "$ROOKHOLD_REPOSITORY" \
+              --title "$title" \
+              --label adoption-pulse \
+              --body-file adoption-pulse.md
+          else
+            gh issue edit "${matches[0]}" \
+              --repo "$ROOKHOLD_REPOSITORY" \
+              --body-file adoption-pulse.md
+          fi

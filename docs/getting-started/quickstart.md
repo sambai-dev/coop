@@ -69,3 +69,6 @@ display text.
 
 Next: [install an SDK](installation.md#sdk) or
 [deploy the secure Linux boundary](first-secure-deployment.md).
+
+Finished or blocked? [Share a 60-second first-run report](../feedback.md). The
+first unclear step is more valuable than a general review.

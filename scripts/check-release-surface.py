@@ -1087,6 +1087,28 @@ def check_contribution_contract() -> None:
     ]:
         require(contract in ci, f"CI completion-evidence contract missing: {contract}")
 
+    feedback_form = read(".github/ISSUE_TEMPLATE/first-run-feedback.yml")
+    for contract in [
+        "first-run-feedback",
+        "time_to_result",
+        "first_unclear_point",
+        "I removed credentials, private code, tenant identifiers, and sensitive paths.",
+    ]:
+        require(contract in feedback_form, f"first-run feedback form missing: {contract}")
+    feedback_docs = read("docs/feedback.md")
+    require("does not send hidden product telemetry" in feedback_docs, "feedback docs omit telemetry posture")
+    require("discussions/57" in feedback_docs, "feedback docs omit the durable first-run thread")
+
+    adoption_workflow = read(".github/workflows/adoption-pulse.yml")
+    for contract in [
+        'cron: "17 20 * * 0"',
+        "issues: write",
+        "scripts/adoption-pulse.py",
+        "adoption-pulse.md",
+        "More than one open adoption pulse issue exists",
+    ]:
+        require(contract in adoption_workflow, f"adoption pulse workflow missing: {contract}")
+
 
 def check_hostile_count() -> int:
     source = read("crates/coop-server/tests/hostile.rs")

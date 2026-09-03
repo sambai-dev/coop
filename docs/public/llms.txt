@@ -3,14 +3,15 @@
 Rookhold runs short Python, Node, and Bash jobs with hard limits, live output,
 and receipts. It is not a persistent development workspace or remote computer.
 
-Start: /rookhold/getting-started/quickstart
-CLI: /rookhold/use/cli
-Python: /rookhold/use/python
-TypeScript: /rookhold/use/typescript
-MCP: /rookhold/use/mcp
-Limits: /rookhold/understand/limits
-Receipts: /rookhold/understand/receipts
-Isolation: /rookhold/understand/isolation
-Deployment: /rookhold/deployment
-Security boundary: /rookhold/security-boundary
-API: /rookhold/api
+Start: https://rookhold.pages.dev/getting-started/quickstart
+Feedback: https://rookhold.pages.dev/feedback
+CLI: https://rookhold.pages.dev/use/cli
+Python: https://rookhold.pages.dev/use/python
+TypeScript: https://rookhold.pages.dev/use/typescript
+MCP: https://rookhold.pages.dev/use/mcp
+Limits: https://rookhold.pages.dev/understand/limits
+Receipts: https://rookhold.pages.dev/understand/receipts
+Isolation: https://rookhold.pages.dev/understand/isolation
+Deployment: https://rookhold.pages.dev/deployment
+Security boundary: https://rookhold.pages.dev/security-boundary
+API: https://rookhold.pages.dev/api

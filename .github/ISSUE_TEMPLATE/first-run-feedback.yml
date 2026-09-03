@@ -1,0 +1,89 @@
+name: First-run feedback
+description: Share a 60-second report about your first Rookhold result or blocker
+title: "feedback: "
+labels:
+  - first-run-feedback
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying Rookhold. Short, honest reports are more useful than polished reviews.
+        Do not include API keys, private code, tenant identifiers, or sensitive paths.
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Where did you get to?
+      options:
+        - Completed a trusted local run
+        - Connected an MCP host
+        - Connected to a guarded Rookhold service
+        - Blocked before the first result
+    validations:
+      required: true
+  - type: dropdown
+    id: install_path
+    attributes:
+      label: How did you install or run Rookhold?
+      options:
+        - Windows app bundle
+        - macOS app bundle
+        - Linux app bundle
+        - Standalone CLI
+        - Python release wheel
+        - TypeScript release tarball
+        - Source checkout
+    validations:
+      required: true
+  - type: dropdown
+    id: time_to_result
+    attributes:
+      label: Time to the first successful result
+      options:
+        - Under 2 minutes
+        - 2–5 minutes
+        - 5–15 minutes
+        - More than 15 minutes
+        - Did not complete
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: Windows 11 x86_64, macOS Apple Silicon, or Ubuntu 24.04 x86_64
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Rookhold version
+      value: v0.8.0
+    validations:
+      required: true
+  - type: textarea
+    id: first_unclear_point
+    attributes:
+      label: What was the first unclear or frustrating point?
+      description: Quote the instruction or describe the exact step where you hesitated or stopped.
+      placeholder: I expected… but the first confusing point was…
+    validations:
+      required: true
+  - type: textarea
+    id: intended_use
+    attributes:
+      label: What would you use Rookhold for?
+      placeholder: Generated scripts, grading, an MCP host, an application feature, or something else
+  - type: checkboxes
+    id: public_project
+    attributes:
+      label: Optional public project listing
+      options:
+        - label: You may quote this report and list my linked public project on the Rookhold site.
+          required: false
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private code, tenant identifiers, and sensitive paths.
+          required: true

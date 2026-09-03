@@ -1,5 +1,14 @@
 blank_issues_enabled: false
 contact_links:
+  - name: First-run feedback thread
+    url: https://github.com/sambai-dev/rookhold/discussions/57
+    about: Share a short success, blocker, or unclear first-run step without opening an issue.
+  - name: Ask a question
+    url: https://github.com/sambai-dev/rookhold/discussions/categories/q-a
+    about: Get help using or deploying Rookhold.
+  - name: Show what you built
+    url: https://github.com/sambai-dev/rookhold/discussions/categories/show-and-tell
+    about: Share a public application, agent, evaluator, or automation using Rookhold.
   - name: Security vulnerability
     url: https://github.com/sambai-dev/rookhold/security/policy
     about: Report vulnerabilities privately using the security policy.
