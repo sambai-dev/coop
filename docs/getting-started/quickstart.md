@@ -50,6 +50,15 @@ This local mode is convenient, not contained. It has host networking and the
 service account's authority. Use it only for code you trust.
 :::
 
+Confirm that the local wall-clock deadline works with a deliberate two-second
+timeout:
+
+```bash
+rookhold run python 'while True: pass' --wall-seconds 2
+```
+
+The result should report `status: timed_out` after approximately two seconds.
+
 For untrusted code, connect the same app to a guarded Linux service and require
 its observed isolation class:
 

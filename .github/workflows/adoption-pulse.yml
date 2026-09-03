@@ -6,7 +6,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: read # permit checkout and public repository API reads
+
+concurrency:
+  group: adoption-pulse-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   update:
@@ -14,8 +18,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      contents: read
-      issues: write
+      contents: read # permit checkout and public repository API reads
+      issues: write # update the single public adoption pulse issue
     steps:
       - name: Check out reporting code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,13 +46,13 @@ jobs:
             --description 'Automatically refreshed public adoption signals' \
             --color 1d76db \
             --force
-          mapfile -t matches < <(gh issue list \
-            --repo "$ROOKHOLD_REPOSITORY" \
-            --state open \
-            --label adoption-pulse \
-            --limit 20 \
-            --json number,title \
-            --jq ".[] | select(.title == \"$title\") | .number")
+          lookup_file="$(mktemp)"
+          trap 'rm -f "$lookup_file"' EXIT
+          gh api --paginate \
+            "repos/${ROOKHOLD_REPOSITORY}/issues?state=open&labels=adoption-pulse&per_page=100" \
+            --jq '.[] | select(.pull_request == null) | select(.title == "[Maintainer] Adoption pulse") | .number' \
+            > "$lookup_file"
+          mapfile -t matches < "$lookup_file"
           if [ "${#matches[@]}" -gt 1 ]; then
             echo 'More than one open adoption pulse issue exists; refusing an ambiguous update.' >&2
             exit 1

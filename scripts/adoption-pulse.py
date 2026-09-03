@@ -101,7 +101,13 @@ def build_snapshot(client: GitHub, repository: str) -> dict[str, Any]:
         for row in contributors
         if is_external(row.get("login"), owner)
     }
-    feedback = [row for row in issues if "first-run-feedback" in label_names(row)]
+    feedback = [
+        row
+        for row in issues
+        if "first-run-feedback" in label_names(row)
+        and isinstance(row.get("user"), dict)
+        and is_external(row["user"].get("login"), owner)
+    ]
     latest = next(
         (release for release in releases if not release.get("draft") and not release.get("prerelease")),
         None,
