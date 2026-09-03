@@ -38,6 +38,148 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def yaml_scalar(raw: str) -> str:
+    value = raw.split(" #", 1)[0].strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def yaml_block(source: str, key: str, indent: int) -> list[str]:
+    lines = source.splitlines()
+    header = " " * indent + key + ":"
+    matches = [index for index, line in enumerate(lines) if line == header]
+    require(len(matches) == 1, f"YAML must contain exactly one {key} block at indent {indent}")
+    block: list[str] = []
+    for line in lines[matches[0] + 1 :]:
+        if line.strip() and not line.lstrip().startswith("#"):
+            current_indent = len(line) - len(line.lstrip(" "))
+            if current_indent <= indent:
+                break
+        block.append(line)
+    return block
+
+
+def yaml_mapping(lines: list[str], indent: int, context: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        current_indent = len(line) - len(line.lstrip(" "))
+        if current_indent != indent or line[indent:].startswith("- "):
+            continue
+        match = re.fullmatch(r"([A-Za-z0-9_-]+):(?:\s*(.*))?", line[indent:])
+        require(match is not None, f"malformed YAML mapping entry in {context}: {line!r}")
+        key = match.group(1)
+        require(key not in values, f"duplicate YAML key in {context}: {key}")
+        values[key] = yaml_scalar(match.group(2) or "")
+    return values
+
+
+def yaml_sequence_scalars(lines: list[str], indent: int, context: str) -> list[str]:
+    values: list[str] = []
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        current_indent = len(line) - len(line.lstrip(" "))
+        if current_indent == indent:
+            require(line[indent:].startswith("- "), f"malformed YAML sequence in {context}")
+            values.append(yaml_scalar(line[indent + 2 :]))
+    return values
+
+
+def yaml_sequence_mappings(
+    source: str, key: str, header_indent: int, item_indent: int
+) -> list[tuple[dict[str, str], list[str]]]:
+    block = yaml_block(source, key, header_indent)
+    starts = [
+        index
+        for index, line in enumerate(block)
+        if line.startswith(" " * item_indent + "- ")
+        and len(line) - len(line.lstrip(" ")) == item_indent
+    ]
+    require(bool(starts), f"YAML sequence {key} contains no mappings")
+    items: list[tuple[dict[str, str], list[str]]] = []
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else len(block)
+        lines = block[start:end]
+        first = re.fullmatch(r"\s*-\s+([A-Za-z0-9_-]+):(?:\s*(.*))?", lines[0])
+        require(first is not None, f"malformed YAML mapping in {key}")
+        values = {first.group(1): yaml_scalar(first.group(2) or "")}
+        nested = yaml_mapping(lines[1:], item_indent + 2, f"{key} item")
+        require(not set(values).intersection(nested), f"duplicate YAML key in {key} item")
+        values.update(nested)
+        items.append((values, lines))
+    return items
+
+
+def validate_feedback_form_contract(source: str) -> None:
+    require("\t" not in source, "feedback form YAML contains tabs")
+    top = yaml_mapping(source.splitlines(), 0, "feedback form")
+    require(top.get("name") == "First-run feedback", "feedback form name differs")
+    require(bool(top.get("description")), "feedback form description is missing")
+    labels = yaml_sequence_scalars(yaml_block(source, "labels", 0), 2, "feedback labels")
+    require(labels == ["first-run-feedback"], "feedback form label contract differs")
+    items = yaml_sequence_mappings(source, "body", 0, 2)
+    identified = [values["id"] for values, _ in items if values.get("id")]
+    require(len(identified) == len(set(identified)), "feedback form IDs are duplicated")
+    by_id = {
+        values["id"]: (values, lines)
+        for values, lines in items
+        if values.get("id")
+    }
+    for required_id in ["time_to_result", "first_unclear_point", "safety"]:
+        require(required_id in by_id, f"feedback form omits exact field: {required_id}")
+    safety_lines = by_id["safety"][1]
+    require(
+        any(
+            line.strip()
+            == "- label: I removed credentials, private code, tenant identifiers, and sensitive paths."
+            for line in safety_lines
+        ),
+        "feedback safety acknowledgement is missing from the safety field",
+    )
+
+
+def validate_adoption_workflow_contract(source: str) -> None:
+    require("\t" not in source, "adoption workflow YAML contains tabs")
+    yaml_mapping(source.splitlines(), 0, "adoption workflow")
+    schedule = yaml_block(source, "schedule", 2)
+    require(
+        yaml_sequence_scalars(schedule, 4, "adoption schedule") == ['cron: "17 20 * * 0"'],
+        "adoption workflow schedule differs",
+    )
+    concurrency = yaml_mapping(yaml_block(source, "concurrency", 0), 2, "adoption concurrency")
+    require(
+        concurrency
+        == {
+            "group": "adoption-pulse-${{ github.repository }}",
+            "cancel-in-progress": "false",
+        },
+        "adoption workflow concurrency contract differs",
+    )
+    top_permissions = yaml_mapping(
+        yaml_block(source, "permissions", 0), 2, "top-level adoption permissions"
+    )
+    require(top_permissions == {"contents": "read"}, "top-level adoption permissions differ")
+    update_lines = yaml_block(source, "update", 2)
+    update_source = "\n".join(update_lines)
+    job_permissions = yaml_mapping(
+        yaml_block(update_source, "permissions", 4), 6, "adoption job permissions"
+    )
+    require(
+        job_permissions == {"contents": "read", "issues": "write"},
+        "adoption job permissions are not exactly contents:read and issues:write",
+    )
+    for contract in [
+        "scripts/adoption-pulse.py",
+        "--output adoption-pulse.md",
+        "gh api --paginate",
+        "More than one open adoption pulse issue exists",
+    ]:
+        require(contract in update_source, f"adoption update job omits: {contract}")
+
+
 def check_release_status_language(
     release_status: str, version: str, surface_sources: dict[str, str]
 ) -> None:
@@ -1086,6 +1228,13 @@ def check_contribution_contract() -> None:
         "scripts/check-pr-description.py",
     ]:
         require(contract in ci, f"CI completion-evidence contract missing: {contract}")
+
+    validate_feedback_form_contract(read(".github/ISSUE_TEMPLATE/first-run-feedback.yml"))
+    feedback_docs = read("docs/feedback.md")
+    require("does not send hidden product telemetry" in feedback_docs, "feedback docs omit telemetry posture")
+    require("discussions/57" in feedback_docs, "feedback docs omit the durable first-run thread")
+
+    validate_adoption_workflow_contract(read(".github/workflows/adoption-pulse.yml"))
 
 
 def check_hostile_count() -> int:

@@ -37,7 +37,10 @@ hero:
   <div class="home-demo-copy">
     <h2 id="demo-heading">One command to a real result.</h2>
     <p>With no endpoint configured, the Rookhold app starts a temporary loopback service, runs trusted code, saves the receipt, and removes the service state. It reports the weak local posture plainly.</p>
-    <a class="home-text-link" href="./getting-started/quickstart">Open the two-minute quickstart <span aria-hidden="true">→</span></a>
+    <div class="home-demo-actions">
+      <a class="home-text-link" href="./getting-started/quickstart">Open the two-minute quickstart <span aria-hidden="true">→</span></a>
+      <a class="home-text-link" href="./feedback">Share first-run feedback <span aria-hidden="true">→</span></a>
+    </div>
   </div>
   <div class="terminal-stage" role="img" aria-label="Local trusted-code run reporting host networking and no isolation">
     <div class="terminal-head"><span>rookhold app</span><span class="local-caution">local · trusted code only</span></div>

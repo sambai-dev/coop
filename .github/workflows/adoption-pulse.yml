@@ -1,0 +1,70 @@
+name: adoption pulse
+
+on:
+  schedule:
+    - cron: "17 20 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read # permit checkout and public repository API reads
+
+concurrency:
+  group: adoption-pulse-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: update maintainer adoption pulse
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # permit checkout and public repository API reads
+      issues: write # update the single public adoption pulse issue
+    steps:
+      - name: Check out reporting code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the current adoption report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROOKHOLD_REPOSITORY: ${{ github.repository }}
+        run: >-
+          python3 scripts/adoption-pulse.py
+          --repository "$ROOKHOLD_REPOSITORY"
+          --output adoption-pulse.md
+      - name: Update one durable public issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROOKHOLD_REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title='[Maintainer] Adoption pulse'
+          gh label create adoption-pulse \
+            --repo "$ROOKHOLD_REPOSITORY" \
+            --description 'Automatically refreshed public adoption signals' \
+            --color 1d76db \
+            --force
+          lookup_file="$(mktemp)"
+          trap 'rm -f "$lookup_file"' EXIT
+          gh api --paginate \
+            "repos/${ROOKHOLD_REPOSITORY}/issues?state=open&labels=adoption-pulse&per_page=100" \
+            --jq '.[] | select(.pull_request == null) | select(.title == "[Maintainer] Adoption pulse") | .number' \
+            > "$lookup_file"
+          mapfile -t matches < "$lookup_file"
+          if [ "${#matches[@]}" -gt 1 ]; then
+            echo 'More than one open adoption pulse issue exists; refusing an ambiguous update.' >&2
+            exit 1
+          fi
+          if [ "${#matches[@]}" -eq 0 ]; then
+            gh issue create \
+              --repo "$ROOKHOLD_REPOSITORY" \
+              --title "$title" \
+              --label adoption-pulse \
+              --body-file adoption-pulse.md
+          else
+            gh issue edit "${matches[0]}" \
+              --repo "$ROOKHOLD_REPOSITORY" \
+              --body-file adoption-pulse.md
+          fi
